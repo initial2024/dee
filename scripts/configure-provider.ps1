@@ -1,6 +1,32 @@
-param([switch]$NonInteractive)
+param([switch]$NonInteractive, [switch]$Advanced)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'configure-provider-header.ps1') -NonInteractive
+
+function Get-SuggestedProviderId {
+  param([string]$BaseUrl, [hashtable]$Providers)
+  try { $hostName = ([uri]$BaseUrl).Host.ToLowerInvariant() } catch { throw 'Base URL is invalid.' }
+  $known = @{ 'lightboat' = 'lightboat'; 'groq' = 'groq'; 'openrouter' = 'openrouter'; 'nvidia' = 'nvidia'; 'deepseek' = 'deepseek' }
+  $suggestion = $null
+  foreach ($name in $known.Keys) { if ($hostName -like "*$name*") { $suggestion = $known[$name]; break } }
+  if ([string]::IsNullOrWhiteSpace($suggestion)) { $suggestion = ((($hostName -split '\.')[0..([Math]::Max(0, ($hostName -split '\.').Count - 2))] -join '-') -replace '[^a-z0-9_-]', '-') }
+  if ([string]::IsNullOrWhiteSpace($suggestion)) { $suggestion = 'provider' }
+  $candidate = $suggestion; $suffix = 2
+  while ($Providers.ContainsKey($candidate)) { $candidate = "$suggestion-$suffix"; $suffix++ }
+  return $candidate
+}
+
+function Get-SuggestedProviderType {
+  param([string]$BaseUrl)
+  $uri = [uri]$BaseUrl
+  if ($uri.Host -in @('localhost', '127.0.0.1') -and $uri.Port -eq 1234) { return 'lmstudio' }
+  return 'openai_compatible'
+}
+
+function Get-SuggestedWireApi {
+  param([string]$ProviderType)
+  if ($ProviderType -eq 'lmstudio') { return 'chat_completions' }
+  return 'responses'
+}
 
 function Set-ProviderConfiguration {
   param(
@@ -31,17 +57,27 @@ function Set-ProviderConfiguration {
 }
 
 if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
-  $providerId = (Read-Host 'Provider ID').Trim()
-  $providerType = (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible)').Trim()
   $baseUrl = (Read-Host 'Base URL').Trim()
-  $wireApi = (Read-Host 'Wire API (responses, chat_completions, auto_if_supported)').Trim()
-  $keyEnv = (Read-Host 'API key environment variable name').Trim()
+  $existingConfig = Get-HeaderMappingConfig (Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json')
+  $suggestedId = Get-SuggestedProviderId $baseUrl $existingConfig['providers']
+  $providerId = if ($Advanced) { (Read-Host 'Provider ID').Trim() } else { (Read-Host "Suggested Provider ID: $suggestedId (Enter accepts)").Trim() }
+  if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = $suggestedId }
+  $suggestedType = Get-SuggestedProviderType $baseUrl
+  $providerType = if ($Advanced) { (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible)').Trim() } else { $suggestedType }
+  $suggestedWireApi = Get-SuggestedWireApi $providerType
+  $wireApi = if ($Advanced) { (Read-Host 'Wire API (responses, chat_completions, auto_if_supported)').Trim() } else { $suggestedWireApi }
+  $keyEnv = if ($providerType -eq 'lmstudio') { '' } else { (Read-Host 'API key environment variable name').Trim() }
   Set-ProviderConfiguration -ProviderId $providerId -ProviderType $providerType -BaseUrl $baseUrl -WireApi $wireApi -ApiKeyEnvironmentName $keyEnv
   if ($providerType -ne 'lmstudio') {
     $secureKey = Read-Host 'API key' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
     try { [Environment]::SetEnvironmentVariable($keyEnv, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 'User') }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
   }
+  try {
+    $modelsEndpoint = ($baseUrl.TrimEnd('/') + $(if ($baseUrl.TrimEnd('/') -match '/v1$') { '' } else { '/v1' }) + '/models')
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $modelsEndpoint -TimeoutSec 10
+    if ($response.Headers['Content-Type'] -notmatch 'text/html') { $count = (($response.Content | ConvertFrom-Json).data | Measure-Object).Count; Write-Host "Discovered models: $count" }
+  } catch { Write-Host 'Model discovery will run when the configured provider is available.' }
   while ((Read-Host 'Configure a custom header? (yes/no)').Trim().ToLowerInvariant() -eq 'yes') {
     $headerName = (Read-Host 'Header name').Trim(); $headerEnv = (Read-Host 'Header value environment variable name').Trim()
     $secureHeader = Read-Host 'Header value' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureHeader)

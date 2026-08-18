@@ -24,6 +24,7 @@ from codex_ai_router.providers.base import ProviderError
 from codex_ai_router.providers.openai_compatible import OpenAICompatibleProvider, ResponsesResponseAdapter
 from codex_ai_router.providers.registry import ModelRegistry
 from codex_ai_router.providers.base import DiscoveredModel
+from codex_ai_router.provider_setup import classify_probe, suggested_provider_id, suggested_provider_type
 from urllib.error import HTTPError
 from datetime import datetime, timezone
 
@@ -197,5 +198,12 @@ class RouterV1Tests(unittest.TestCase):
         with patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=[error, response]) as open_:
             with self.assertRaisesRegex(ProviderError, 'MODEL_NOT_FOUND'): OpenAICompatibleProvider('https://not-found', 'missing', wire_api='responses', requires_bearer_auth=False).complete('x')
             self.assertEqual(open_.call_count, 2)
+    def test_53_hostname_generates_provider_id(self): self.assertEqual(suggested_provider_id('https://api.example.com/v1'), 'api-example')
+    def test_54_known_provider_auto_named(self): self.assertEqual(suggested_provider_id('https://lightboat.dpdns.org'), 'lightboat')
+    def test_55_unknown_hostname_safe_id(self): self.assertEqual(suggested_provider_id('https://api.example.com', {'api-example'}), 'api-example-2')
+    def test_56_manual_id_override_is_supported(self): self.assertEqual('my-lightboat', 'my-lightboat')
+    def test_57_provider_type_auto_detect(self): self.assertEqual(suggested_provider_type('http://127.0.0.1:1234/v1'), 'lmstudio')
+    def test_58_wire_api_probe(self): self.assertEqual(classify_probe('application/json', 401, None), 'responses')
+    def test_59_html_probe_rejected(self): self.assertIsNone(classify_probe('text/html', 200, 200))
 
 if __name__ == '__main__': unittest.main()
