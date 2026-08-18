@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .base import BaseProvider, ProviderError
+from .base import DiscoveredModel
 
 
 class LMStudioProvider(BaseProvider):
@@ -22,6 +24,15 @@ class LMStudioProvider(BaseProvider):
 
     def available(self) -> bool:
         return bool(self.models())
+
+    def discover_models(self, refresh: bool = False) -> list[DiscoveredModel]:
+        return [DiscoveredModel("local", model, model, None, None, datetime.now(timezone.utc)) for model in self.models()]
+
+    def refresh_models(self) -> list[DiscoveredModel]:
+        return self.discover_models(refresh=True)
+
+    def candidate_models(self) -> list[str]:
+        return self.models()
 
     def ask(self, prompt: str) -> str:
         models = self.models()

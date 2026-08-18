@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 import subprocess
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,12 @@ from codex_ai_router.tools.subprocess_runner import run_command
 from codex_ai_router.tools.worktree import isolated_worktree
 from codex_ai_router.configuration import load_config
 from codex_ai_router.model_policy import SelectionPolicy
+from codex_ai_router.providers.base import ProviderError
+from codex_ai_router.providers.openai_compatible import OpenAICompatibleProvider, ResponsesResponseAdapter
+from codex_ai_router.providers.registry import ModelRegistry
+from codex_ai_router.providers.base import DiscoveredModel
+from urllib.error import HTTPError
+from datetime import datetime, timezone
 
 
 class FakeProvider:
@@ -26,6 +33,18 @@ class FakeProvider:
     def available(self): return self._available
     def models(self): return ["fake"] if self._available else []
     def ask(self, prompt): self.calls += 1; return self.output
+
+
+class FakeHeaders:
+    def __init__(self, content_type='application/json'): self.content_type = content_type
+    def get_content_type(self): return self.content_type
+
+
+class FakeResponse:
+    def __init__(self, data, content_type='application/json'): self.data, self.headers = data, FakeHeaders(content_type)
+    def read(self): return self.data
+    def __enter__(self): return self
+    def __exit__(self, *args): return False
 
 
 class RouterV1Tests(unittest.TestCase):
@@ -118,5 +137,65 @@ class RouterV1Tests(unittest.TestCase):
     def test_30_no_eligible_model_stops(self):
         policy = SelectionPolicy.from_values(allow_model=['api:other'])
         self.assertEqual(Router(Path.cwd(), FakeProvider(), FakeProvider(), selection_policy=policy).delegate('tests', Mode.API_ONLY).status, 'NO_ELIGIBLE_MODEL')
+    def test_31_chat_completions_backward_compatible(self):
+        data = b'{"model":"m","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(data)):
+            self.assertEqual(OpenAICompatibleProvider('https://host/v1', 'm', requires_bearer_auth=False).complete('x').text, 'ok')
+    def test_32_responses_request_shape(self):
+        data = b'{"model":"m","status":"completed","output_text":"ok"}'
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(data)) as open_:
+            self.assertEqual(OpenAICompatibleProvider('https://host', 'm', wire_api='responses', requires_bearer_auth=False).complete('x').text, 'ok')
+            request = open_.call_args.args[0]
+            self.assertEqual(request.full_url, 'https://host/v1/responses')
+            self.assertEqual(json.loads(request.data), {'model': 'm', 'input': 'x'})
+    def test_33_responses_text_extraction(self): self.assertEqual(ResponsesResponseAdapter.text({'output':[{'content':[{'text':'a'}, {'output_text':'b'}]}]}), 'ab')
+    def test_34_responses_base_url_without_v1(self): self.assertEqual(OpenAICompatibleProvider('https://host', 'm', wire_api='responses').endpoint(), 'https://host/v1/responses')
+    def test_35_responses_base_url_with_v1(self): self.assertEqual(OpenAICompatibleProvider('https://host/v1', 'm', wire_api='responses').endpoint(), 'https://host/v1/responses')
+    def test_36_no_bearer_when_auth_disabled(self): self.assertNotIn('Authorization', OpenAICompatibleProvider('https://host', 'm', requires_bearer_auth=False).request_headers())
+    def test_37_bearer_when_auth_enabled(self):
+        with patch.dict(os.environ, {'XIAOYU_CODER_API_KEY': 'test-key'}, clear=True): self.assertIn('Authorization', OpenAICompatibleProvider('https://host', 'm').request_headers())
+    def test_38_custom_header_env(self):
+        with patch.dict(os.environ, {'TEST_HEADER_ENV': 'selector'}, clear=True): self.assertEqual(OpenAICompatibleProvider('https://host', 'm', requires_bearer_auth=False, header_env={'X-Selector':'TEST_HEADER_ENV'}).request_headers()['X-Selector'], 'selector')
+    def test_39_html_200_rejected(self):
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'<html>', 'text/html')):
+            with self.assertRaisesRegex(ProviderError, 'NON_API_RESPONSE'): OpenAICompatibleProvider('https://host', 'm', requires_bearer_auth=False).complete('x')
+    def test_40_deny_model_no_provider_call(self):
+        provider = FakeProvider()
+        policy = SelectionPolicy.from_values(deny_model=['api:fake'])
+        self.assertEqual(Router(Path.cwd(), FakeProvider(), provider, selection_policy=policy).delegate('tests', Mode.API_ONLY).status, 'NO_ELIGIBLE_MODEL')
+        self.assertEqual(provider.calls, 0)
+    def test_41_model_discovery_from_v1_models(self):
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'{"data":[{"id":"m","owned_by":"o"}]}')) as open_:
+            models = OpenAICompatibleProvider('https://host', requires_bearer_auth=False).discover_models()
+            self.assertEqual(models[0].qualified_id, 'api:m'); self.assertEqual(open_.call_args.args[0].full_url, 'https://host/v1/models')
+    def test_42_discovery_does_not_require_manual_name(self):
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'{"data":[{"id":"m"}]}')):
+            self.assertEqual(OpenAICompatibleProvider('https://host', requires_bearer_auth=False).candidate_models(), ['m'])
+    def test_43_lmstudio_models_auto_registered(self):
+        with patch.object(LMStudioProvider, 'models', return_value=['one', 'two']): self.assertEqual([x.model_id for x in LMStudioProvider().discover_models()], ['one', 'two'])
+    def test_44_responses_provider_can_discover_models(self):
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'{"data":[{"id":"m"}]}')):
+            self.assertEqual(OpenAICompatibleProvider('https://host', wire_api='responses', requires_bearer_auth=False).models(), ['m'])
+    def test_45_discovered_not_automatically_allowed(self): self.assertEqual(SelectionPolicy.from_values(allow_model=['api:other']).eligible('api', ['m']), [])
+    def test_46_deny_filters_discovered_model(self): self.assertEqual(SelectionPolicy.from_values(deny_model=['api:m']).eligible('api', ['m']), [])
+    def test_47_eligible_models_correct(self): self.assertEqual(SelectionPolicy.from_values(allow_model=['api:m']).eligible('api', ['m', 'other']), ['m'])
+    def test_48_model_cache_refresh(self):
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'{"data":[{"id":"m"}]}')) as open_:
+            provider = OpenAICompatibleProvider('https://cache-host', requires_bearer_auth=False); provider.models(); provider.models(); self.assertEqual(open_.call_count, 1); provider.refresh_models(); self.assertEqual(open_.call_count, 2)
+    def test_49_unsupported_discovery_allows_manual_fallback(self):
+        error = HTTPError('https://host/v1/models', 404, 'missing', None, None)
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=error):
+            provider = OpenAICompatibleProvider('https://unsupported', 'manual', requires_bearer_auth=False); self.assertEqual(provider.candidate_models(), ['manual'])
+    def test_50_html_model_response_rejected(self):
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'<html>', 'text/html')):
+            provider = OpenAICompatibleProvider('https://html-models', requires_bearer_auth=False); self.assertEqual(provider.models(), []); self.assertEqual(provider.model_discovery_supported, 'NON_API_RESPONSE')
+    def test_51_removed_model_marked_unavailable(self):
+        registry = ModelRegistry(); model = DiscoveredModel('api', 'm', 'm', None, None, datetime.now(timezone.utc)); registry.update('api', [model]); registry.update('api', []); self.assertEqual(registry.all()[0].availability, 'NO')
+    def test_52_model_not_found_triggers_single_refresh(self):
+        response = FakeResponse(b'{"data":[{"id":"other"}]}')
+        error = HTTPError('https://host/v1/responses', 404, 'missing', None, None)
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=[error, response]) as open_:
+            with self.assertRaisesRegex(ProviderError, 'MODEL_NOT_FOUND'): OpenAICompatibleProvider('https://not-found', 'missing', wire_api='responses', requires_bearer_auth=False).complete('x')
+            self.assertEqual(open_.call_count, 2)
 
 if __name__ == '__main__': unittest.main()

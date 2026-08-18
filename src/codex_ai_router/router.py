@@ -30,7 +30,7 @@ class Router:
         if not self.selection_policy.providers.permits(provider_name):
             return [], []
         provider = self.local if provider_name == "local" else self.api
-        discovered = provider.models()
+        discovered = provider.candidate_models() if hasattr(provider, "candidate_models") else provider.models()
         return discovered, self.selection_policy.eligible(provider_name, discovered)
 
     def status(self) -> dict:

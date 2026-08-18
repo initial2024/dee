@@ -1,8 +1,11 @@
 mode: AUTO_TRIAD
 api:
   base_url_env: XIAOYU_CODER_API_BASE
-  model_env: XIAOYU_CODER_API_MODEL
+  model_env: optional-preferred-model-env
   api_key_env: XIAOYU_CODER_API_KEY
+  wire_api: chat_completions
+  requires_bearer_auth: true
+  header_env: {} # map header names to environment-variable names; never store values here
   max_requests_per_task: 3
   max_tokens_per_task: 12000
   max_cost_usd_per_task: 2.00
