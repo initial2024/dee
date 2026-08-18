@@ -344,5 +344,11 @@ class RouterV1Tests(unittest.TestCase):
         router.delegate('summarize README', Mode.LOCAL_ONLY)
         capabilities = router.model_registry.capabilities('local:local-model')
         self.assertIn('TEXT', capabilities); self.assertIn('STRUCTURED_OUTPUT', capabilities); self.assertNotIn('TOOL_CALLING', capabilities)
+    def test_89_local_requests_have_bounded_non_streaming_generation(self):
+        response = FakeResponse(b'{"choices":[{"message":{"content":"ok"}}]}')
+        with patch.object(LMStudioProvider, 'models', return_value=['local-model']), patch('codex_ai_router.providers.lmstudio.urlopen', return_value=response) as open_:
+            provider = LMStudioProvider(timeout=60, max_tokens=256); self.assertEqual(provider.ask('brief'), 'ok')
+            payload = json.loads(open_.call_args.args[0].data)
+            self.assertEqual((payload['max_tokens'], payload['stream']), (256, False))
 
 if __name__ == '__main__': unittest.main()
