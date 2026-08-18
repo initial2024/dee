@@ -12,6 +12,12 @@ api:
 local:
   base_url: http://127.0.0.1:1234/v1
   model: auto
+  first_token_budget_seconds: 8
+  simple_task_budget_seconds: 20
+  hard_timeout_seconds: 30
+  max_agent_steps: 2
+  structured_retry_max: 1
+  local_write: false
 routing:
   codex_budget_mode: SAVE
   max_agent_iterations: 6

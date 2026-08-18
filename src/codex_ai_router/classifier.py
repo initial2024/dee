@@ -18,6 +18,10 @@ def classify(prompt: str) -> tuple[str, Risk]:
         return "LARGE_REFACTOR", Risk.HIGH
     if any(word in text for word in ("log", "traceback", "error log")):
         return "LOG_ANALYSIS", Risk.LOW
+    if any(word in text for word in ("compact context", "context compaction", "compress context")):
+        return "CONTEXT_COMPACTION", Risk.LOW
+    if any(word in text for word in ("small diff", "diff review", "review diff")):
+        return "SMALL_REVIEW", Risk.LOW
     if any(word in text for word in ("translate", "translation")):
         return "TRANSLATION", Risk.LOW
     if any(word in text for word in ("readme", "documentation", "docs", "summarize")):

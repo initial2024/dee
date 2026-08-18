@@ -4,10 +4,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import os
+import time
 
 from .agents.coder import agent_loop
 from .classifier import classify
-from .policy import choose_mode, requires_codex_gate
+from .policy import FastLocalGate, FastLocalPolicy, choose_mode, requires_codex_gate
+from .accounting.performance import PerformanceTracker
 from .providers import LMStudioProvider, OpenAICompatibleProvider
 from .providers.base import DiscoveredModel
 from .providers.registry import ModelRegistry
@@ -25,10 +27,12 @@ class Router:
     max_iterations: int = 6
     selection_policy: SelectionPolicy = SelectionPolicy()
     model_registry: ModelRegistry = field(default_factory=ModelRegistry)
+    fast_local_policy: FastLocalPolicy = field(default_factory=FastLocalPolicy)
+    performance: PerformanceTracker = field(default_factory=PerformanceTracker)
 
     @classmethod
-    def default(cls, root: Path | None = None, selection_policy: SelectionPolicy | None = None) -> "Router":
-        return cls((root or Path.cwd()).resolve(), LMStudioProvider(), OpenAICompatibleProvider(), selection_policy=selection_policy or SelectionPolicy())
+    def default(cls, root: Path | None = None, selection_policy: SelectionPolicy | None = None, fast_local_policy: FastLocalPolicy | None = None) -> "Router":
+        return cls((root or Path.cwd()).resolve(), LMStudioProvider(), OpenAICompatibleProvider(), selection_policy=selection_policy or SelectionPolicy(), performance=PerformanceTracker.for_current_user(), fast_local_policy=fast_local_policy or FastLocalPolicy())
 
     def provider_models(self, provider_name: str) -> tuple[list[str], list[str]]:
         if not self.selection_policy.providers.permits(provider_name):
@@ -44,7 +48,8 @@ class Router:
 
     def route(self, prompt: str, requested: Mode | None = None) -> dict:
         category, risk = classify(prompt)
-        local_ok = bool(self.provider_models("local")[1])
+        local_models = self.provider_models("local")[1]
+        local_ok = bool(local_models) and FastLocalGate(self.fast_local_policy).permits(prompt, category, risk, any(self.performance.is_degraded(f"local:{model}", self.fast_local_policy.slow_streak_limit) for model in local_models))
         api_ok = bool(self.provider_models("api")[1])
         mode = choose_mode(category, risk, requested, local_ok, api_ok)
         return {"category": category, "risk": risk.value, "mode": mode.value, "codex_gate": requires_codex_gate(risk)}
@@ -62,10 +67,10 @@ class Router:
             if not api_selected or not local_selected:
                 return AgentResult("CODEX_ACTION_REQUIRED", "API_LOCAL requires two policy-eligible providers", risk=risk, needs_escalation=True)
             self.api.model, self.local.model = api_selected, local_selected
-            return api_local(self.api, self.local, prompt, self.root, risk, self.max_iterations)
+            return api_local(self.api, self.local, prompt, self.root, risk, min(self.max_iterations, self.fast_local_policy.max_agent_steps))
         provider_name = "local" if mode is Mode.LOCAL_ONLY else "api"
         if mode is Mode.AUTO_TRIAD:
-            provider_name = "local" if self.provider_models("local")[1] else "api"
+            provider_name = "local" if self.route(prompt).get("mode") == Mode.LOCAL_ONLY.value else "api"
         discovered, eligible = self.provider_models(provider_name)
         override = local_model if provider_name == "local" else api_model
         selected = self.selection_policy.choose(provider_name, discovered, role, override)
@@ -86,7 +91,13 @@ class Router:
                 return AgentResult("CODEX_ACTION_REQUIRED", "All helper providers unavailable", risk=risk, needs_escalation=True)
             return AgentResult("CODEX_ACTION_REQUIRED", "Selected provider became unavailable", risk=risk, needs_escalation=True)
         provider.model = selected
-        result = agent_loop(provider, prompt, self.root, risk, self.max_iterations)
+        previous_timeout = getattr(provider, "timeout", None)
+        if provider_name == "local" and previous_timeout is not None:
+            provider.timeout = min(previous_timeout, self.fast_local_policy.hard_timeout_seconds)
+        started = time.monotonic()
+        result = agent_loop(provider, prompt, self.root, risk, min(self.max_iterations, self.fast_local_policy.max_agent_steps) if provider_name == "local" else self.max_iterations)
+        elapsed = time.monotonic() - started
+        if previous_timeout is not None: provider.timeout = previous_timeout
         if provider_name == "local" and result.status == "STRUCTURED_ACTION_UNAVAILABLE":
             alternatives = [model for model in discovered if model != selected and model in eligible][:1]
             if alternatives:
@@ -94,6 +105,15 @@ class Router:
                 retried = agent_loop(provider, prompt, self.root, risk, self.max_iterations)
                 retried.warnings.append("LOCAL_STRUCTURED_MODEL_FALLBACK")
                 result = retried
+        if provider_name == "local":
+            self.performance.record(f"local:{provider.model}", elapsed, result.status not in {"STRUCTURED_ACTION_UNAVAILABLE", "ESCALATE"}, result.status not in {"TEXT_ONLY_RESULT", "STRUCTURED_ACTION_UNAVAILABLE"}, self.fast_local_policy.simple_task_budget_seconds)
+            needs_api_fallback = result.status == "STRUCTURED_ACTION_UNAVAILABLE" or elapsed > self.fast_local_policy.simple_task_budget_seconds
+            if needs_api_fallback and requested is None and self.provider_models("api")[1]:
+                api_selected = self.selection_policy.choose("api", self.provider_models("api")[0], role, api_model)
+                if api_selected:
+                    self.api.model = api_selected
+                    result = agent_loop(self.api, prompt, self.root, risk, self.max_iterations)
+                    result.warnings.append("FALLBACK_TO_API")
         # Capability observations are deliberately conservative: a completed
         # structured response proves structured output, while a text fallback
         # proves text only.  Proposed actions do not imply unrestricted tools.

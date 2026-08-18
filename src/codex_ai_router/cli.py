@@ -11,6 +11,7 @@ from . import provider_config
 from .providers import LMStudioProvider, OpenAICompatibleProvider
 from .provider_setup import default_display_name, suggested_provider_id, suggested_provider_type
 from .providers.model_discovery import codex_profile_requires_bearer_auth
+from .policy import FastLocalPolicy
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -49,8 +50,9 @@ def main() -> None:
     provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("id")
     args = parser.parse_args()
     task_policy = SelectionPolicy.from_values(getattr(args, "allow_provider", ()), getattr(args, "deny_provider", ()), getattr(args, "allow_model", ()), getattr(args, "deny_model", ()), getattr(args, "no_api", False), getattr(args, "no_local", False))
-    policy = SelectionPolicy.from_config(load_config(args.config)).merged_with(task_policy) if args.config else task_policy
-    router = Router.default(Path.cwd(), policy)
+    config_data = load_config(args.config) if args.config else {}
+    policy = SelectionPolicy.from_config(config_data).merged_with(task_policy) if args.config else task_policy
+    router = Router.default(Path.cwd(), policy, FastLocalPolicy.from_config(config_data))
     if args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
     elif args.command == "models":

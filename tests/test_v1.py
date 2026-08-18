@@ -380,5 +380,35 @@ class RouterV1Tests(unittest.TestCase):
             provider = OpenAICompatibleProvider('https://host', wire_api='responses', requires_bearer_auth=False, provider_metadata=metadata)
             self.assertEqual(provider.models(), [])
             self.assertEqual(open_.call_count, 1)
+    def test_94_fast_local_gate_allows_only_simple_low_risk_work(self):
+        from codex_ai_router.policy import FastLocalGate
+        gate = FastLocalGate()
+        self.assertTrue(gate.permits('summarize this short README', 'DOCS', Risk.LOW))
+        self.assertFalse(gate.permits('edit multiple files and run tests', 'SMALL_CODE', Risk.MEDIUM))
+        self.assertFalse(gate.permits('x' * 20000, 'DOCS', Risk.LOW))
+    def test_95_medium_code_is_api_first(self):
+        self.assertEqual(self.router().route('implement function')['mode'], 'API_ONLY')
+    def test_96_local_structure_failure_falls_back_to_api_once(self):
+        class BrokenLocal(FakeProvider):
+            def ask(self, prompt): raise ProviderError('LOCAL_PROVIDER_ERROR:TimeoutError')
+        local = BrokenLocal()
+        router = Router(Path.cwd(), local, FakeProvider())
+        result = router.delegate('summarize README')
+        self.assertEqual(result.status, 'PASS'); self.assertIn('FALLBACK_TO_API', result.warnings)
+    def test_97_performance_tracker_degrades_repeatedly_slow_models(self):
+        from codex_ai_router.accounting.performance import PerformanceTracker
+        with tempfile.TemporaryDirectory() as temp:
+            tracker = PerformanceTracker(Path(temp) / 'performance.json')
+            for _ in range(3): tracker.record('local:model', 21, True, True, 20)
+            self.assertTrue(tracker.is_degraded('local:model'))
+    def test_98_local_agent_actions_are_capped_at_two_steps(self):
+        output = '{"status":"PASS","summary":"ok","confidence":1,"risk":"LOW","needs_escalation":false,"actions":["one","two","three"],"tests":[],"warnings":[]}'
+        local = FakeProvider(output=output); router = Router(Path.cwd(), local, FakeProvider())
+        result = router.delegate('summarize README', Mode.LOCAL_ONLY)
+        self.assertEqual(len(result.actions), 2)
+    def test_99_fast_local_budgets_load_from_config(self):
+        from codex_ai_router.policy import FastLocalPolicy
+        policy = FastLocalPolicy.from_config({'local': {'hard_timeout_seconds': 25, 'max_agent_steps': 2}})
+        self.assertEqual((policy.hard_timeout_seconds, policy.max_agent_steps), (25, 2))
 
 if __name__ == '__main__': unittest.main()
