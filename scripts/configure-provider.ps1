@@ -76,7 +76,8 @@ if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
   $providerType = if ($Advanced) { (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible)').Trim() } else { $suggestedType }
   $suggestedWireApi = Get-SuggestedWireApi $baseUrl $providerType
   $wireApi = if ($Advanced) { (Read-Host 'Wire API (responses, chat_completions, auto_if_supported)').Trim() } else { $suggestedWireApi }
-  $keyEnv = if ($providerType -eq 'lmstudio') { '' } else { (Read-Host 'API key environment variable name').Trim() }
+  $suggestedKeyEnv = 'XIAOYU_API_' + ($providerId.ToUpperInvariant() -replace '[^A-Z0-9]', '_') + '_KEY'
+  $keyEnv = if ($providerType -eq 'lmstudio') { '' } elseif ($Advanced) { (Read-Host 'API key environment variable name').Trim() } else { $suggestedKeyEnv }
   Set-ProviderConfiguration -ProviderId $providerId -ProviderType $providerType -BaseUrl $baseUrl -WireApi $wireApi -ApiKeyEnvironmentName $keyEnv
   if ($providerType -ne 'lmstudio') {
     $secureKey = Read-Host 'API key' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
