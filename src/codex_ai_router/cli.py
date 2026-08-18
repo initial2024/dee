@@ -7,6 +7,8 @@ from .router import Router
 from .task import Mode
 from .model_policy import SelectionPolicy
 from .configuration import load_config
+from . import provider_config
+from .providers import LMStudioProvider, OpenAICompatibleProvider
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -36,8 +38,13 @@ def main() -> None:
     review = sub.add_parser("review"); review.add_argument("path")
     config = sub.add_parser("config"); config.add_argument("action", choices=("show",))
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
-    provider_models = provider_sub.add_parser("models"); provider_models.add_argument("provider", choices=("api", "local"))
-    provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("provider", choices=("api", "local"))
+    provider_sub.add_parser("list")
+    provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id"); provider_add.add_argument("--type", default="openai_compatible"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api", default="chat_completions"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100)
+    provider_show = provider_sub.add_parser("show"); provider_show.add_argument("id")
+    for action in ("enable", "disable", "remove"):
+        item = provider_sub.add_parser(action); item.add_argument("id")
+    provider_models = provider_sub.add_parser("models"); provider_models.add_argument("id")
+    provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("id")
     args = parser.parse_args()
     task_policy = SelectionPolicy.from_values(getattr(args, "allow_provider", ()), getattr(args, "deny_provider", ()), getattr(args, "allow_model", ()), getattr(args, "deny_model", ()), getattr(args, "no_api", False), getattr(args, "no_local", False))
     policy = SelectionPolicy.from_config(load_config(args.config)).merged_with(task_policy) if args.config else task_policy
@@ -55,9 +62,22 @@ def main() -> None:
         provider = router.local if args.provider == "local" else router.api; provider.model = selected
         emit({"provider": args.provider, "response": provider.ask(args.task)})
     elif args.command == "provider":
-        provider = router.local if args.provider == "local" else router.api
-        records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
-        emit({"provider": args.provider, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability} for record in records]})
+        if args.provider_action == "list":
+            data = provider_config.load(); emit({"providers": [{"id": key, "type": value.get("type"), "enabled": value.get("enabled", True), "configured": bool(value.get("base_url") and (value.get("type") == "lmstudio" or value.get("api_key_env")))} for key, value in data["providers"].items()]})
+        elif args.provider_action == "add":
+            emit(provider_config.upsert(args.id, {"type": args.type, "base_url": args.base_url, "wire_api": args.wire_api, "api_key_env": args.api_key_env, "enabled": True, "model_discovery": True, "models": [], "priority": args.priority}))
+        elif args.provider_action == "show": emit(provider_config.load()["providers"].get(args.id) or (_ for _ in ()).throw(KeyError("provider not found")))
+        elif args.provider_action in {"enable", "disable"}: emit(provider_config.set_enabled(args.id, args.provider_action == "enable"))
+        elif args.provider_action == "remove": provider_config.remove(args.id); emit({"status": "REMOVED", "id": args.id})
+        else:
+            if args.id == "local": provider = router.local
+            else:
+                entry = provider_config.load()["providers"].get(args.id)
+                if not entry: raise KeyError("provider not found")
+                if entry.get("type") == "lmstudio": provider = LMStudioProvider(entry.get("base_url", "http://127.0.0.1:1234/v1"))
+                else: provider = OpenAICompatibleProvider(entry.get("base_url"), key_env=entry.get("api_key_env", ""), wire_api=entry.get("wire_api", "chat_completions"), header_env=entry.get("headers", {}), provider_id=args.id)
+            records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
+            emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability} for record in records]})
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
     else: emit({"config_example": str(Path(__file__).parents[2] / "config" / "config.example.yaml"), "api_key_env": "XIAOYU_CODER_API_KEY"})

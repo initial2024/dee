@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'configure-provider-header.ps1') -NonInteractive
 
 $provider = (Read-Host 'Provider name').Trim()
 $baseUrl = (Read-Host 'OpenAI-compatible Base URL').Trim()
@@ -11,7 +12,7 @@ if ([string]::IsNullOrWhiteSpace($wireApi)) { $wireApi = 'responses' }
 if ($wireApi -notin @('chat_completions', 'responses')) { throw 'Wire API must be chat_completions or responses.' }
 if ($keyEnv -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'API key environment variable name is invalid.' }
 if (-not [string]::IsNullOrWhiteSpace($headerEnvJson)) {
-  try { $headerMap = $headerEnvJson | ConvertFrom-Json -AsHashtable } catch { throw 'Header mapping must be a JSON object.' }
+  try { $headerMap = ConvertTo-HashtableRecursive ($headerEnvJson | ConvertFrom-Json) } catch { throw 'Header mapping must be a JSON object.' }
   foreach ($entry in $headerMap.GetEnumerator()) { if ($entry.Key -notmatch '^[A-Za-z0-9-]+$' -or $entry.Value -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'Header mapping contains an invalid header or environment variable name.' } }
 }
 

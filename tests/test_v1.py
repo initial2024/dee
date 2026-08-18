@@ -140,7 +140,7 @@ class RouterV1Tests(unittest.TestCase):
     def test_31_chat_completions_backward_compatible(self):
         data = b'{"model":"m","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
         with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(data)):
-            self.assertEqual(OpenAICompatibleProvider('https://host/v1', 'm', requires_bearer_auth=False).complete('x').text, 'ok')
+            self.assertEqual(OpenAICompatibleProvider('https://host/v1', 'm', wire_api='chat_completions', requires_bearer_auth=False).complete('x').text, 'ok')
     def test_32_responses_request_shape(self):
         data = b'{"model":"m","status":"completed","output_text":"ok"}'
         with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(data)) as open_:
