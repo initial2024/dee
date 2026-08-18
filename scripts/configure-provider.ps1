@@ -1,6 +1,8 @@
 param([switch]$NonInteractive, [switch]$Advanced)
 $ErrorActionPreference = 'Stop'
+$providerConfigurationNonInteractive = $NonInteractive
 . (Join-Path $PSScriptRoot 'configure-provider-header.ps1') -NonInteractive
+$NonInteractive = $providerConfigurationNonInteractive
 
 function Get-SuggestedProviderId {
   param([string]$BaseUrl, [hashtable]$Providers)

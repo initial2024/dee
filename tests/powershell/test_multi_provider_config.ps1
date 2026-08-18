@@ -6,6 +6,23 @@ $root = Join-Path ([System.IO.Path]::GetTempPath()) ('router-provider-test-' + [
 [System.IO.Directory]::CreateDirectory($root) | Out-Null
 $path = Join-Path $root 'providers.json'
 try {
+  $providerScript = (Resolve-Path (Join-Path $PSScriptRoot '..\..\scripts\configure-provider.ps1')).Path
+  $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $processInfo.FileName = 'powershell.exe'
+  $processInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$providerScript`""
+  $processInfo.UseShellExecute = $false
+  $processInfo.RedirectStandardInput = $true
+  $processInfo.RedirectStandardOutput = $true
+  $processInfo.RedirectStandardError = $true
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $processInfo
+  [void]$process.Start()
+  $process.StandardInput.WriteLine('')
+  $process.StandardInput.Close()
+  $interactiveOutput = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+  $process.WaitForExit()
+  Assert-True ($interactiveOutput -match 'Base URL is invalid.') 'default_interactive_starts_base_url'
+
   Set-ProviderConfiguration -ProviderId 'lightboat' -ProviderType 'openai_compatible' -BaseUrl 'https://one.example/v1' -WireApi 'responses' -ApiKeyEnvironmentName 'LIGHTBOAT_KEY' -ConfigPath $path -SkipEnvironmentUpdate
   $first = Get-HeaderMappingConfig $path
   Assert-True ($first['providers'].Count -eq 1) 'add_first_provider'
