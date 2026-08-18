@@ -23,8 +23,18 @@ function Get-SuggestedProviderType {
 }
 
 function Get-SuggestedWireApi {
-  param([string]$ProviderType)
+  param([string]$BaseUrl, [string]$ProviderType)
   if ($ProviderType -eq 'lmstudio') { return 'chat_completions' }
+  $normalized = $BaseUrl.TrimEnd('/'); if ($normalized -notmatch '/v1$') { $normalized += '/v1' }
+  foreach ($candidate in @(@{ Name = 'responses'; Url = "$normalized/responses" }, @{ Name = 'chat_completions'; Url = "$normalized/chat/completions" })) {
+    try {
+      $response = Invoke-WebRequest -UseBasicParsing -Method Options -Uri $candidate.Url -TimeoutSec 5
+      if ($response.Headers['Content-Type'] -notmatch 'text/html') { return $candidate.Name }
+    } catch {
+      $http = $_.Exception.Response
+      if ($null -ne $http -and $http.ContentType -notmatch 'text/html' -and [int]$http.StatusCode -in @(400, 401, 403, 405)) { return $candidate.Name }
+    }
+  }
   return 'responses'
 }
 
@@ -64,7 +74,7 @@ if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
   if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = $suggestedId }
   $suggestedType = Get-SuggestedProviderType $baseUrl
   $providerType = if ($Advanced) { (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible)').Trim() } else { $suggestedType }
-  $suggestedWireApi = Get-SuggestedWireApi $providerType
+  $suggestedWireApi = Get-SuggestedWireApi $baseUrl $providerType
   $wireApi = if ($Advanced) { (Read-Host 'Wire API (responses, chat_completions, auto_if_supported)').Trim() } else { $suggestedWireApi }
   $keyEnv = if ($providerType -eq 'lmstudio') { '' } else { (Read-Host 'API key environment variable name').Trim() }
   Set-ProviderConfiguration -ProviderId $providerId -ProviderType $providerType -BaseUrl $baseUrl -WireApi $wireApi -ApiKeyEnvironmentName $keyEnv
