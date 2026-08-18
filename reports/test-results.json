@@ -1,1 +1,1 @@
-{"ROUTER_TEST_TOTAL":30,"ROUTER_TEST_PASS":30,"ROUTER_TEST_FAIL":0,"MODEL_POLICY_TEST_FAIL":0,"command":"py -3 -m unittest discover -s tests -v"}
+{"ROUTER_TEST_TOTAL":33,"ROUTER_TEST_PASS":33,"ROUTER_TEST_FAIL":0,"MODEL_POLICY_TEST_FAIL":0,"command":"py -3 -m unittest discover -s tests -v"}

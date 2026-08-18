@@ -14,7 +14,7 @@ class OpenAICompatibleProvider(BaseProvider):
     def __init__(self, base_url: str | None = None, model: str | None = None, key_env: str = "XIAOYU_CODER_API_KEY", timeout: int = 20):
         self.base_url = (base_url or os.getenv("XIAOYU_CODER_API_BASE", "")).rstrip("/")
         self.model = model or os.getenv("XIAOYU_CODER_API_MODEL", "")
-        self.key_env = key_env
+        self.key_env = os.getenv("XIAOYU_CODER_API_KEY_ENV", key_env)
         self.timeout = timeout
 
     def available(self) -> bool:
@@ -39,5 +39,5 @@ class OpenAICompatibleProvider(BaseProvider):
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read())['choices'][0]['message']['content']
-        except (HTTPError, URLError, KeyError, json.JSONDecodeError) as exc:
+        except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
             raise ProviderError(f"API_PROVIDER_ERROR:{type(exc).__name__}") from exc

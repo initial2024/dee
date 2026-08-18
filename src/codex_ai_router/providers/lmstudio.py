@@ -33,5 +33,5 @@ class LMStudioProvider(BaseProvider):
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read())['choices'][0]['message']['content']
-        except (HTTPError, URLError, KeyError, json.JSONDecodeError) as exc:
+        except (HTTPError, URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
             raise ProviderError(f"LOCAL_PROVIDER_ERROR:{type(exc).__name__}") from exc

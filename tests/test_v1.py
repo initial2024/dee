@@ -35,6 +35,9 @@ class RouterV1Tests(unittest.TestCase):
     def test_02_api_missing_key(self):
         with patch.dict(os.environ, {}, clear=True): self.assertFalse(OpenAICompatibleProvider().available())
     def test_03_api_key_not_repr(self): self.assertNotIn('secret', repr(OpenAICompatibleProvider()))
+    def test_03b_api_key_env_is_selectable(self):
+        with patch.dict(os.environ, {'XIAOYU_CODER_API_KEY_ENV': 'XIAOYU_API_PROVIDER_KEY'}, clear=True):
+            self.assertEqual(OpenAICompatibleProvider().key_env, 'XIAOYU_API_PROVIDER_KEY')
     def test_04_local_only(self): self.assertEqual(self.router().route('summarize README', Mode.LOCAL_ONLY)['mode'], 'LOCAL_ONLY')
     def test_05_api_only(self): self.assertEqual(self.router().delegate('generate tests', Mode.API_ONLY).status, 'PASS')
     def test_06_api_local_mode(self): self.assertEqual(self.router().route('fix function', Mode.API_LOCAL)['mode'], 'API_LOCAL')
@@ -64,6 +67,12 @@ class RouterV1Tests(unittest.TestCase):
     def test_17_structured_retry(self):
         from codex_ai_router.agents.coder import ask_structured
         self.assertTrue(ask_structured(FakeProvider(output='bad'), 'x', 'LOW').needs_escalation)
+    def test_17b_provider_error_escalates(self):
+        from codex_ai_router.agents.coder import ask_structured
+        from codex_ai_router.providers.base import ProviderError
+        class ErrorProvider(FakeProvider):
+            def ask(self, prompt): raise ProviderError('unavailable')
+        self.assertTrue(ask_structured(ErrorProvider(), 'x', 'LOW').needs_escalation)
     def test_18_disagreement(self):
         from codex_ai_router.orchestration.judge import judge
         self.assertTrue(judge(AgentResult('PASS','',risk='LOW'), AgentResult('PASS','',risk='HIGH')).needs_escalation)
@@ -84,6 +93,9 @@ class RouterV1Tests(unittest.TestCase):
     def test_24_override_cannot_bypass_deny(self):
         policy = SelectionPolicy.from_values(deny_model=['api:fake'])
         self.assertEqual(Router(Path.cwd(), FakeProvider(), FakeProvider(), selection_policy=policy).delegate('tests', Mode.API_ONLY, api_model='fake').status, 'NO_ELIGIBLE_MODEL')
+    def test_24b_denied_override_cannot_fall_back(self):
+        policy = SelectionPolicy.from_values(deny_model=['local:blocked'])
+        self.assertIsNone(policy.choose('local', ['blocked', 'allowed'], 'coder', 'blocked'))
     def test_25_role_preference_respects_deny(self):
         policy = SelectionPolicy.from_values(deny_model=['api:fake'], roles={'coder': ('api:fake',)})
         self.assertIsNone(policy.choose('api', ['fake'], 'coder'))

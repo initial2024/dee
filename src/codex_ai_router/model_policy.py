@@ -35,9 +35,9 @@ class SelectionPolicy:
 
     def choose(self, provider: str, discovered: list[str], role: str, override: str | None = None) -> str | None:
         eligible = self.eligible(provider, discovered)
-        # A task override is only a preference and cannot bypass deny/allow rules.
-        if override and override in eligible:
-            return override
+        # An explicit task model selection is strict: it cannot bypass policy or silently switch models.
+        if override:
+            return override if override in eligible else None
         preferred = self.roles.get(role, ())
         for item in preferred:
             prefix, _, model = item.partition(":")

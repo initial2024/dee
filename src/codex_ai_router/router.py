@@ -91,4 +91,4 @@ class Router:
 
     def doctor(self) -> dict:
         import shutil
-        return {**self.status(), "PYTHON": "YES", "GIT": "YES" if shutil.which("git") else "NO", "CURRENT_REPO": "YES" if (self.root / ".git").exists() else "NO", "WORKTREE_CAPABLE": "YES" if shutil.which("git") else "NO", "LMSTUDIO_BASE_URL": self.local.base_url, "API_KEY_ENV": self.api.key_env}
+        return {**self.status(), "PYTHON": "YES", "GIT": "YES" if shutil.which("git") else "NO", "CURRENT_REPO": "YES" if (self.root / ".git").exists() else "NO", "WORKTREE_CAPABLE": "YES" if shutil.which("git") else "NO", "LMSTUDIO_BASE_URL": self.local.base_url, "API_KEY_CONFIGURED": "YES" if self.api.available() else "NO"}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from ..result import AgentResult
 from ..security.secrets import redact
+from ..providers.base import ProviderError
 
 PROTOCOL = '''Return ONLY JSON with status, summary, confidence, risk, needs_escalation, actions, tests, warnings. Do not include secrets. You may propose edits and targeted tests, but cannot execute unrestricted shell commands.'''
 
@@ -12,7 +13,7 @@ def ask_structured(provider, task: str, risk: str, retries: int = 1) -> AgentRes
     for _ in range(retries + 1):
         try:
             return AgentResult.from_json(provider.ask(prompt))
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, ProviderError):
             continue
     return AgentResult("ESCALATE", "Structured output parse failed twice", risk=risk, needs_escalation=True, warnings=["STRUCTURED_OUTPUT_RETRY_EXHAUSTED"])
 
