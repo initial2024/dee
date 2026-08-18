@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-ai-router"
+version = "0.1.0"
+description = "Safe companion router for Codex, OpenAI-compatible APIs, and LM Studio"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+xiaoyu-router = "codex_ai_router.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

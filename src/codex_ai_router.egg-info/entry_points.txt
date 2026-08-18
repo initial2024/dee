@@ -1,0 +1,2 @@
+[console_scripts]
+xiaoyu-router = codex_ai_router.cli:main

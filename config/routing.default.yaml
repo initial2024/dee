@@ -1,0 +1,4 @@
+default_mode: AUTO_TRIAD
+codex_budget_mode: SAVE
+modes: [CODEX_ONLY, API_ONLY, LOCAL_ONLY, CODEX_API, CODEX_LOCAL, API_LOCAL, AUTO_TRIAD]
+high_risk_keywords: [delete, migration, deploy, credential, api key, auth, permission, force push, payment, signing, security, shell configuration, user data]

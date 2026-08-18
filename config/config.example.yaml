@@ -1,0 +1,26 @@
+mode: AUTO_TRIAD
+api:
+  base_url_env: XIAOYU_CODER_API_BASE
+  model_env: XIAOYU_CODER_API_MODEL
+  api_key_env: XIAOYU_CODER_API_KEY
+  max_requests_per_task: 3
+  max_tokens_per_task: 12000
+  max_cost_usd_per_task: 2.00
+local:
+  base_url: http://127.0.0.1:1234/v1
+  model: auto
+routing:
+  codex_budget_mode: SAVE
+  max_agent_iterations: 6
+  max_wall_time_seconds: 300
+  max_tool_calls: 40
+  max_output_bytes: 65536
+provider_policy:
+  allow: [local, api]
+  deny: []
+models:
+  allow: []
+  deny: []
+roles:
+  coder:
+    preferred: [api:model-code, local:model-local]

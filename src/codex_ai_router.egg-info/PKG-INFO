@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: codex-ai-router
+Version: 0.1.0
+Summary: Safe companion router for Codex, OpenAI-compatible APIs, and LM Studio
+Requires-Python: >=3.10
+Requires-Dist: PyYAML>=6.0
