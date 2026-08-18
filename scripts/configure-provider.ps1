@@ -53,7 +53,7 @@ function Set-ProviderConfiguration {
   param(
     [string]$ProviderId, [string]$ProviderType, [string]$BaseUrl, [string]$WireApi,
     [string]$ApiKeyEnvironmentName, [int]$Priority = 100,
-    [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json'),
+    [string]$ConfigPath = (Get-CanonicalProviderConfigPath),
     [string]$DisplayName,
     [switch]$SkipEnvironmentUpdate
   )
@@ -70,6 +70,8 @@ function Set-ProviderConfiguration {
   $provider['model_discovery'] = $true; $provider['models'] = @(); $provider['priority'] = $Priority
   if (-not $provider.ContainsKey('headers')) { $provider['headers'] = @{} }
   Save-HeaderMappingConfigAtomic $config $ConfigPath
+  $readback = Get-HeaderMappingConfig $ConfigPath
+  if (-not $readback['providers'].ContainsKey($ProviderId) -or $readback['providers'][$ProviderId]['id'] -ne $ProviderId -or $readback['providers'][$ProviderId]['display_name'] -ne $provider['display_name']) { throw 'Provider metadata save/readback verification failed.' }
   if (-not $SkipEnvironmentUpdate) {
     [Environment]::SetEnvironmentVariable('XIAOYU_CODER_API_PROVIDER', $ProviderId, 'User')
     [Environment]::SetEnvironmentVariable('XIAOYU_CODER_API_BASE', $BaseUrl, 'User')
@@ -80,7 +82,7 @@ function Set-ProviderConfiguration {
 
 if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
   $baseUrl = (Read-Host 'Base URL').Trim()
-  $activeConfigPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json' } else { $ConfigPath }
+  $activeConfigPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Get-CanonicalProviderConfigPath } else { $ConfigPath }
   $existingConfig = Get-HeaderMappingConfig $activeConfigPath
   $suggestedId = Get-SuggestedProviderId $baseUrl $existingConfig['providers']
   $providerId = if ($Advanced) { (Read-Host "Provider ID [$suggestedId]").Trim() } else { $suggestedId }

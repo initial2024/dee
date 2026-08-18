@@ -254,5 +254,26 @@ class RouterV1Tests(unittest.TestCase):
                 cli.main()
             listed = json.loads(output.getvalue())['providers'][0]
             self.assertEqual((listed['display_name'], listed['id']), ('轻舟公益站', 'lightboat'))
+    def test_72_legacy_metadata_migrates_to_canonical_store(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); legacy, canonical = root / 'provider-header-mappings.json', root / 'providers.json'
+            legacy.write_text(json.dumps({'providers': {'test-provider': {'type': 'openai_compatible', 'base_url': 'https://example.invalid/v1', 'api_key_env': 'TEST_PROVIDER_KEY', 'headers': {'X-Selector': 'TEST_SELECTOR_ENV'}}}}), encoding='utf-8')
+            data, migrated, orphaned = provider_config.migrate_legacy_metadata(canonical, legacy)
+            self.assertEqual((migrated, orphaned), (['test-provider'], []))
+            self.assertEqual(data['providers']['test-provider']['headers']['X-Selector'], 'TEST_SELECTOR_ENV')
+    def test_73_invalid_legacy_metadata_is_not_migrated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); legacy, canonical = root / 'provider-header-mappings.json', root / 'providers.json'
+            legacy.write_text(json.dumps({'providers': {'领取': {'headers': {'X-Selector': 'TEST_SELECTOR_ENV'}}}}), encoding='utf-8')
+            data, migrated, orphaned = provider_config.migrate_legacy_metadata(canonical, legacy)
+            self.assertEqual((data['providers'], migrated, orphaned), ({}, [], ['领取']))
+    def test_74_explicit_provider_config_override_does_not_import_user_legacy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            override = Path(temp) / 'fixture-providers.json'
+            with patch.dict(os.environ, {'XIAOYU_ROUTER_PROVIDER_CONFIG': str(override)}, clear=False):
+                self.assertEqual(provider_config.load(), {'providers': {}})
+    def test_75_default_provider_path_uses_windows_userprofile(self):
+        with patch.dict(os.environ, {'USERPROFILE': 'C:/router-user'}, clear=False):
+            self.assertEqual(provider_config.config_path(), Path('C:/router-user/.codex-ai-router/providers.json'))
 
 if __name__ == '__main__': unittest.main()

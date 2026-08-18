@@ -5,19 +5,68 @@ from pathlib import Path
 
 VALID_ID = __import__("re").compile(r"^[a-z0-9_-]+$")
 VALID_TYPES = {"openai_compatible", "custom_openai_compatible", "lmstudio"}
+LEGACY_FILE_NAME = "provider-header-mappings.json"
+CANONICAL_FILE_NAME = "providers.json"
+
+
+def provider_home() -> Path:
+    return Path(os.getenv("USERPROFILE") or Path.home())
 
 
 def config_path() -> Path:
     configured = os.getenv("XIAOYU_ROUTER_PROVIDER_CONFIG")
-    return Path(configured) if configured else Path.home() / ".codex-ai-router" / "providers.json"
+    return Path(configured) if configured else provider_home() / ".codex-ai-router" / CANONICAL_FILE_NAME
 
 
-def load(path: Path | None = None) -> dict:
-    target = path or config_path()
+def legacy_config_path() -> Path:
+    return provider_home() / ".codex-ai-router" / LEGACY_FILE_NAME
+
+
+def _read(target: Path) -> dict:
     if not target.exists(): return {"providers": {}}
     data = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("providers", {}), dict): raise ValueError("provider config must contain a providers object")
     data.setdefault("providers", {})
+    return data
+
+
+def _safe_legacy_provider(provider_id: str, value: object) -> dict | None:
+    if not VALID_ID.fullmatch(provider_id) or not isinstance(value, dict): return None
+    if value.get("type") not in VALID_TYPES or not isinstance(value.get("base_url"), str) or not value["base_url"].strip(): return None
+    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode"}
+    record = {key: value[key] for key in allowed if key in value}
+    headers = record.get("headers", {})
+    if not isinstance(headers, dict) or not all(isinstance(name, str) and isinstance(env_name, str) for name, env_name in headers.items()): return None
+    record["id"] = provider_id
+    record["display_name"] = record.get("display_name") or provider_id
+    return record
+
+
+def migrate_legacy_metadata(target: Path | None = None, legacy_path: Path | None = None) -> tuple[dict, list[str], list[str]]:
+    """Copy valid non-secret legacy metadata once; never delete or overwrite entries."""
+    canonical = target or config_path()
+    legacy = legacy_path or legacy_config_path()
+    data = _read(canonical)
+    if not legacy.exists() or legacy.resolve() == canonical.resolve(): return data, [], []
+    old = _read(legacy)
+    migrated, orphaned = [], []
+    for provider_id, value in old["providers"].items():
+        record = _safe_legacy_provider(provider_id, value)
+        if record is None:
+            orphaned.append(provider_id)
+        elif provider_id not in data["providers"]:
+            data["providers"][provider_id] = record
+            migrated.append(provider_id)
+    if migrated: save(data, canonical)
+    return data, migrated, orphaned
+
+
+def load(path: Path | None = None) -> dict:
+    target = path or config_path()
+    if path is None and "XIAOYU_ROUTER_PROVIDER_CONFIG" not in os.environ:
+        data, _, _ = migrate_legacy_metadata(target)
+    else:
+        data = _read(target)
     for provider_id, provider in data["providers"].items():
         if isinstance(provider, dict): provider.setdefault("display_name", provider_id)
     return data

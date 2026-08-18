@@ -1,6 +1,11 @@
 param([switch]$NonInteractive)
 $ErrorActionPreference = 'Stop'
 
+function Get-CanonicalProviderConfigPath {
+  if (-not [string]::IsNullOrWhiteSpace($env:XIAOYU_ROUTER_PROVIDER_CONFIG)) { return $env:XIAOYU_ROUTER_PROVIDER_CONFIG }
+  return (Join-Path $env:USERPROFILE '.codex-ai-router\providers.json')
+}
+
 function ConvertTo-HashtableRecursive {
   param([Parameter(ValueFromPipeline=$true)]$Value)
   if ($null -eq $Value) { return $null }
@@ -50,7 +55,7 @@ function Set-ProviderHeaderMapping {
     [string]$ProviderName,
     [string]$HeaderName,
     [string]$HeaderEnvironmentName,
-    [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json'),
+    [string]$ConfigPath = (Get-CanonicalProviderConfigPath),
     [switch]$SkipEnvironmentUpdate
   )
   if ([string]::IsNullOrWhiteSpace($ProviderName)) { throw 'Provider name is required.' }
@@ -64,6 +69,8 @@ function Set-ProviderHeaderMapping {
   if (-not ($provider['headers'] -is [hashtable])) { throw 'Existing provider headers mapping must be an object.' }
   $provider['headers'][$HeaderName] = $HeaderEnvironmentName
   Save-HeaderMappingConfigAtomic $config $ConfigPath
+  $readback = Get-HeaderMappingConfig $ConfigPath
+  if (-not $readback['providers'].ContainsKey($ProviderName) -or $readback['providers'][$ProviderName]['headers'][$HeaderName] -ne $HeaderEnvironmentName) { throw 'Provider header mapping save/readback verification failed.' }
   if (-not $SkipEnvironmentUpdate) {
     [Environment]::SetEnvironmentVariable('XIAOYU_CODER_API_PROVIDER', $ProviderName, 'User')
     [Environment]::SetEnvironmentVariable('XIAOYU_CODER_API_HEADER_ENVS_JSON', ($provider['headers'] | ConvertTo-Json -Compress), 'User')
