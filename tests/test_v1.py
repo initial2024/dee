@@ -90,7 +90,7 @@ class RouterV1Tests(unittest.TestCase):
     def test_16_api_fallback(self): self.assertEqual(self.router(True, False).delegate('generate tests', Mode.API_ONLY).status, 'PASS')
     def test_17_structured_retry(self):
         from codex_ai_router.agents.coder import ask_structured
-        self.assertTrue(ask_structured(FakeProvider(output='bad'), 'x', 'LOW').needs_escalation)
+        self.assertEqual(ask_structured(FakeProvider(output='bad'), 'x', 'LOW').status, 'TEXT_ONLY_RESULT')
     def test_17b_provider_error_escalates(self):
         from codex_ai_router.agents.coder import ask_structured
         from codex_ai_router.providers.base import ProviderError
@@ -190,7 +190,7 @@ class RouterV1Tests(unittest.TestCase):
     def test_49_unsupported_discovery_allows_manual_fallback(self):
         error = HTTPError('https://host/v1/models', 404, 'missing', None, None)
         with patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=error):
-            provider = OpenAICompatibleProvider('https://unsupported', 'manual', requires_bearer_auth=False); self.assertEqual(provider.candidate_models(), ['manual'])
+            provider = OpenAICompatibleProvider('https://unsupported', 'manual', requires_bearer_auth=False); self.assertEqual(provider.candidate_models(), [])
     def test_50_html_model_response_rejected(self):
         with patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(b'<html>', 'text/html')):
             provider = OpenAICompatibleProvider('https://html-models', requires_bearer_auth=False); self.assertEqual(provider.models(), []); self.assertEqual(provider.model_discovery_supported, 'NON_API_RESPONSE')
@@ -275,5 +275,74 @@ class RouterV1Tests(unittest.TestCase):
     def test_75_default_provider_path_uses_windows_userprofile(self):
         with patch.dict(os.environ, {'USERPROFILE': 'C:/router-user'}, clear=False):
             self.assertEqual(provider_config.config_path(), Path('C:/router-user/.codex-ai-router/providers.json'))
+    def test_76_model_list_401_falls_back(self):
+        error = HTTPError('https://host/v1/models', 401, 'unauthorized', None, None)
+        response = FakeResponse(b'{"model":"configured","output_text":"API_ROUTER_OK"}')
+        with patch.dict(os.environ, {}, clear=True), patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=[error, response]):
+            provider = OpenAICompatibleProvider('https://host', wire_api='responses', requires_bearer_auth=False, provider_id='api1', provider_metadata={'models':['configured']})
+            self.assertEqual(provider.models(), ['configured']); self.assertEqual(provider.remote_model_list_status, 'HTTP_401')
+    def test_77_configured_model_candidate_detected(self):
+        from codex_ai_router.providers.model_discovery import ModelDiscoveryChain
+        self.assertIn(('configured','EXISTING_PROVIDER_METADATA'), ModelDiscoveryChain('api','https://host',{'models':['configured']}).candidates())
+    def test_78_codex_profile_model_metadata_detected(self):
+        from codex_ai_router.providers.model_discovery import codex_profile_candidates
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'config.toml'; path.write_text('model = "wrong"\n[model_providers.match]\nbase_url = "https://host/v1"\nmodel = "profile-model"\n', encoding='utf-8')
+            self.assertIn('profile-model', codex_profile_candidates('https://host', path))
+    def test_78b_codex_profile_auth_metadata_detected(self):
+        from codex_ai_router.providers.model_discovery import codex_profile_requires_bearer_auth
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'config.toml'; path.write_text('[model_providers.match]\nbase_url = "https://host/v1"\nrequires_openai_auth = false\n', encoding='utf-8')
+            self.assertFalse(codex_profile_requires_bearer_auth('https://host', path))
+    def test_79_invalid_candidate_not_registered(self):
+        error = HTTPError('https://host/v1/models', 401, 'unauthorized', None, None)
+        response = FakeResponse(b'{"model":"bad","output_text":"not the expected value"}')
+        with patch.dict(os.environ, {}, clear=True), patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=[error, response]):
+            provider = OpenAICompatibleProvider('https://host', wire_api='responses', requires_bearer_auth=False, provider_metadata={'models':['bad']})
+            self.assertEqual(provider.models(), [])
+    def test_80_validated_candidate_registered(self):
+        error = HTTPError('https://host/v1/models', 403, 'forbidden', None, None)
+        response = FakeResponse(b'{"model":"good","output_text":"API_ROUTER_OK"}')
+        with patch.dict(os.environ, {}, clear=True), patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=[error, response]):
+            provider = OpenAICompatibleProvider('https://host', wire_api='responses', requires_bearer_auth=False, provider_id='api1', provider_metadata={'models':['good']})
+            model = provider.discover_models()[0]; self.assertEqual((model.qualified_id, model.raw_metadata['validation']), ('api1:good','PASS'))
+    def test_81_strict_and_fenced_json_parse(self):
+        from codex_ai_router.agents.structured import parse_structured
+        self.assertEqual(parse_structured('{"status":"PASS"}')['status'], 'PASS'); self.assertEqual(parse_structured('```json\n{"status":"PASS"}\n```')['status'], 'PASS')
+    def test_82_json_with_explanation_and_repair(self):
+        from codex_ai_router.agents.structured import parse_structured
+        self.assertEqual(parse_structured('Explanation. {"status":"PASS",} done')['status'], 'PASS')
+    def test_83_deterministic_repair_does_not_invent_action(self):
+        from codex_ai_router.agents.structured import parse_structured
+        self.assertNotIn('actions', parse_structured('{"status":"PASS",}'))
+    def test_84_single_repair_retry(self):
+        from codex_ai_router.agents.coder import ask_structured
+        class SequenceProvider(FakeProvider):
+            def __init__(self): super().__init__(); self.values = ['bad', '{"status":"PASS","summary":"ok","confidence":1,"risk":"LOW","needs_escalation":false,"actions":[],"tests":[],"warnings":[]}']
+            def ask(self, prompt): self.calls += 1; return self.values.pop(0)
+        provider = SequenceProvider(); self.assertEqual(ask_structured(provider, 'summarize', 'LOW').status, 'PASS'); self.assertEqual(provider.calls, 2)
+    def test_85_readonly_text_fallback(self):
+        from codex_ai_router.agents.coder import ask_structured
+        self.assertEqual(ask_structured(FakeProvider(output='plain summary'), 'summarize README', 'LOW').status, 'TEXT_ONLY_RESULT')
+    def test_86_coding_action_requires_structure(self):
+        from codex_ai_router.agents.coder import ask_structured
+        self.assertEqual(ask_structured(FakeProvider(output='edit this file'), 'edit file and run tests', 'LOW').status, 'STRUCTURED_ACTION_UNAVAILABLE')
+    def test_87_local_model_structured_fallback(self):
+        class LocalModels(FakeProvider):
+            def __init__(self): super().__init__(); self.model = 'one'; self.attempts = 0
+            def models(self): return ['one','two']
+            def ask(self, prompt):
+                self.attempts += 1
+                return 'bad' if self.model == 'one' else '{"status":"PASS","summary":"ok","confidence":1,"risk":"LOW","needs_escalation":false,"actions":[],"tests":[],"warnings":[]}'
+        local = LocalModels(); router = Router(Path.cwd(), local, FakeProvider()); result = router.delegate('edit file and run tests', Mode.LOCAL_ONLY)
+        self.assertEqual((result.status, local.model), ('PASS','two'))
+    def test_88_runtime_capability_records_structure_without_granting_tools(self):
+        local = FakeProvider(output='{"status":"PASS","summary":"ok","confidence":1,"risk":"LOW","needs_escalation":false,"actions":[],"tests":[],"warnings":[]}')
+        local.model = 'local-model'
+        local.models = lambda: ['local-model']
+        router = Router(Path.cwd(), local, FakeProvider())
+        router.delegate('summarize README', Mode.LOCAL_ONLY)
+        capabilities = router.model_registry.capabilities('local:local-model')
+        self.assertIn('TEXT', capabilities); self.assertIn('STRUCTURED_OUTPUT', capabilities); self.assertNotIn('TOOL_CALLING', capabilities)
 
 if __name__ == '__main__': unittest.main()

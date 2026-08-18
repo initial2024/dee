@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 import os
 
@@ -8,6 +9,8 @@ from .agents.coder import agent_loop
 from .classifier import classify
 from .policy import choose_mode, requires_codex_gate
 from .providers import LMStudioProvider, OpenAICompatibleProvider
+from .providers.base import DiscoveredModel
+from .providers.registry import ModelRegistry
 from .result import AgentResult
 from .task import Mode, Task
 from .model_policy import SelectionPolicy
@@ -21,6 +24,7 @@ class Router:
     api: OpenAICompatibleProvider
     max_iterations: int = 6
     selection_policy: SelectionPolicy = SelectionPolicy()
+    model_registry: ModelRegistry = field(default_factory=ModelRegistry)
 
     @classmethod
     def default(cls, root: Path | None = None, selection_policy: SelectionPolicy | None = None) -> "Router":
@@ -83,6 +87,24 @@ class Router:
             return AgentResult("CODEX_ACTION_REQUIRED", "Selected provider became unavailable", risk=risk, needs_escalation=True)
         provider.model = selected
         result = agent_loop(provider, prompt, self.root, risk, self.max_iterations)
+        if provider_name == "local" and result.status == "STRUCTURED_ACTION_UNAVAILABLE":
+            alternatives = [model for model in discovered if model != selected and model in eligible][:1]
+            if alternatives:
+                provider.model = alternatives[0]
+                retried = agent_loop(provider, prompt, self.root, risk, self.max_iterations)
+                retried.warnings.append("LOCAL_STRUCTURED_MODEL_FALLBACK")
+                result = retried
+        # Capability observations are deliberately conservative: a completed
+        # structured response proves structured output, while a text fallback
+        # proves text only.  Proposed actions do not imply unrestricted tools.
+        observed = {"TEXT"}
+        if result.status not in {"TEXT_ONLY_RESULT", "STRUCTURED_ACTION_UNAVAILABLE"}:
+            observed.add("STRUCTURED_OUTPUT")
+        if result.actions:
+            observed.add("CODING")
+        qualified = f"{provider_name}:{provider.model}"
+        self.model_registry.update(provider_name, [DiscoveredModel(provider_name, provider.model, provider.model, None, None, datetime.now(timezone.utc))])
+        self.model_registry.set_capabilities(qualified, observed)
         if mode in {Mode.CODEX_API, Mode.CODEX_LOCAL}:
             result.status = "CODEX_ACTION_REQUIRED"
             result.needs_escalation = True

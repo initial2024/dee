@@ -10,6 +10,7 @@ from .configuration import load_config
 from . import provider_config
 from .providers import LMStudioProvider, OpenAICompatibleProvider
 from .provider_setup import default_display_name, suggested_provider_id, suggested_provider_type
+from .providers.model_discovery import codex_profile_requires_bearer_auth
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -80,9 +81,11 @@ def main() -> None:
                 entry = provider_config.load()["providers"].get(args.id)
                 if not entry: raise KeyError("provider not found")
                 if entry.get("type") == "lmstudio": provider = LMStudioProvider(entry.get("base_url", "http://127.0.0.1:1234/v1"))
-                else: provider = OpenAICompatibleProvider(entry.get("base_url"), key_env=entry.get("api_key_env", ""), wire_api=entry.get("wire_api", "chat_completions"), header_env=entry.get("headers", {}), provider_id=args.id)
+                else:
+                    profile_auth = codex_profile_requires_bearer_auth(entry.get("base_url", ""))
+                    provider = OpenAICompatibleProvider(entry.get("base_url"), key_env=entry.get("api_key_env", ""), wire_api=entry.get("wire_api", "chat_completions"), requires_bearer_auth=entry.get("requires_bearer_auth", profile_auth), header_env=entry.get("headers", {}), provider_id=args.id, provider_metadata=entry, model_env=entry.get("model_env"))
             records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
-            emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability} for record in records]})
+            emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records]})
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
     else: emit({"config_example": str(Path(__file__).parents[2] / "config" / "config.example.yaml"), "api_key_env": "XIAOYU_CODER_API_KEY"})

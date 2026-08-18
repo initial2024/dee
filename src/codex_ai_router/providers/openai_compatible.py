@@ -6,6 +6,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .base import BaseProvider, DiscoveredModel, ProviderError, ProviderResponse
+from .model_discovery import ModelDiscoveryChain
 
 
 class ResponsesRequestAdapter:
@@ -36,15 +37,20 @@ class OpenAICompatibleProvider(BaseProvider):
     name, VALID_PROTOCOLS, CACHE_TTL_SECONDS = "api", {"chat_completions", "responses"}, 1800
     _model_cache: dict[str, tuple[float, list[DiscoveredModel], str]] = {}
 
-    def __init__(self, base_url: str | None = None, model: str | None = None, key_env: str = "XIAOYU_CODER_API_KEY", timeout: int = 20, wire_api: str | None = None, requires_bearer_auth: bool | None = None, custom_headers: dict[str, str] | None = None, header_env: dict[str, str] | None = None, provider_id: str = "api"):
+    def __init__(self, base_url: str | None = None, model: str | None = None, key_env: str = "XIAOYU_CODER_API_KEY", timeout: int = 20, wire_api: str | None = None, requires_bearer_auth: bool | None = None, custom_headers: dict[str, str] | None = None, header_env: dict[str, str] | None = None, provider_id: str = "api", provider_metadata: dict | None = None, model_env: str | None = None, codex_profile_path=None):
         self.base_url, self.model = (base_url or os.getenv("XIAOYU_CODER_API_BASE", "")).rstrip("/"), model or os.getenv("XIAOYU_CODER_API_MODEL", "")
-        self.key_env, self.provider_id = os.getenv("XIAOYU_CODER_API_KEY_ENV", key_env), provider_id
+        self.key_env, self.provider_id = (os.getenv("XIAOYU_CODER_API_KEY_ENV", key_env) if key_env == "XIAOYU_CODER_API_KEY" else key_env), provider_id
         self.wire_api = (wire_api or os.getenv("XIAOYU_CODER_API_WIRE_API", "chat_completions")).lower()
         if self.wire_api not in self.VALID_PROTOCOLS: raise ValueError("wire_api must be chat_completions or responses")
         setting = os.getenv("XIAOYU_CODER_API_REQUIRES_BEARER_AUTH", "true").lower()
         self.requires_bearer_auth = requires_bearer_auth if requires_bearer_auth is not None else setting in {"1", "true", "yes"}
         self.custom_headers, self.header_env, self.timeout = dict(custom_headers or {}), dict(header_env or self._header_env_from_environment()), timeout
         self.model_discovery_supported = "UNKNOWN"
+        self.remote_model_list_status = "UNKNOWN"
+        self.provider_metadata = dict(provider_metadata or {})
+        self.model_env, self.codex_profile_path = model_env, codex_profile_path
+        self.last_model_sources: dict[str, str] = {}
+        self._validating_candidate = False
 
     @staticmethod
     def _header_env_from_environment() -> dict[str, str]:
@@ -66,21 +72,49 @@ class OpenAICompatibleProvider(BaseProvider):
         if content_type: headers["Content-Type"] = "application/json"
         return headers
 
+    def _remote_models(self) -> list[DiscoveredModel]:
+        """Attempt the standards endpoint without treating its failure as provider failure."""
+        if not self.available(): self.remote_model_list_status = "UNAVAILABLE"; return []
+        try:
+            with urlopen(Request(self.models_endpoint(), headers=self.request_headers()), timeout=self.timeout) as response:
+                if response.headers.get_content_type() == "text/html": self.remote_model_list_status = "NON_API_RESPONSE"; return []
+                payload = json.loads(response.read()); now = datetime.now(timezone.utc)
+                models = [DiscoveredModel(self.provider_id, item["id"], item.get("id", ""), item.get("owned_by"), {**item, "source": "REMOTE_MODEL_LIST", "validation": "REMOTE_LIST"}, now) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
+                self.remote_model_list_status = "PASS"; return models
+        except HTTPError as exc: self.remote_model_list_status = f"HTTP_{exc.code}"; return []
+        except (URLError, TimeoutError, json.JSONDecodeError, ProviderError): self.remote_model_list_status = "ERROR"; return []
+
+    def validate_model_candidate(self, model: str) -> bool:
+        previous = self.model
+        try:
+            self.model = model
+            self._validating_candidate = True
+            return self.complete("Return exactly: API_ROUTER_OK").text.strip() == "API_ROUTER_OK"
+        except ProviderError:
+            return False
+        finally:
+            self._validating_candidate = False
+            self.model = previous
+
     def discover_models(self, refresh: bool = False) -> list[DiscoveredModel]:
-        cache_key = f"{self.provider_id}|{self.models_endpoint()}|{self.requires_bearer_auth}"
+        candidate_chain = ModelDiscoveryChain(self.provider_id, self.base_url, self.provider_metadata, self.model_env, self.codex_profile_path)
+        candidate_signature = tuple(candidate_chain.candidates())
+        cache_key = f"{self.provider_id}|{self.models_endpoint()}|{self.requires_bearer_auth}|{candidate_signature}"
         cached = self._model_cache.get(cache_key)
         if cached and not refresh and time.monotonic() - cached[0] < self.CACHE_TTL_SECONDS:
             self.model_discovery_supported = cached[2]; return cached[1]
-        if not self.available(): return []
-        try:
-            with urlopen(Request(self.models_endpoint(), headers=self.request_headers()), timeout=self.timeout) as response:
-                if response.headers.get_content_type() == "text/html": self.model_discovery_supported = "NON_API_RESPONSE"; return []
-                payload = json.loads(response.read()); now = datetime.now(timezone.utc)
-                models = [DiscoveredModel(self.provider_id, item["id"], item.get("id", ""), item.get("owned_by"), item, now) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
-                self.model_discovery_supported = "YES"; self._model_cache[cache_key] = (time.monotonic(), models, "YES"); return models
-        except HTTPError as exc:
-            self.model_discovery_supported = "NO" if exc.code in {404, 405} else "ERROR"; return []
-        except (URLError, TimeoutError, json.JSONDecodeError, ProviderError): self.model_discovery_supported = "ERROR"; return []
+        models = self._remote_models()
+        if models:
+            self.model_discovery_supported = "YES"; self._model_cache[cache_key] = (time.monotonic(), models, "YES"); return models
+        candidates = list(candidate_signature)
+        validated: list[DiscoveredModel] = []
+        for candidate, source in candidates:
+            if self.validate_model_candidate(candidate):
+                self.last_model_sources[candidate] = source
+                validated.append(DiscoveredModel(self.provider_id, candidate, candidate, None, {"source": source, "validation": "PASS"}, datetime.now(timezone.utc)))
+        self.model_discovery_supported = "FALLBACK_VALIDATED" if validated else self.remote_model_list_status
+        self._model_cache[cache_key] = (time.monotonic(), validated, self.model_discovery_supported)
+        return validated
     def refresh_models(self) -> list[DiscoveredModel]: return self.discover_models(refresh=True)
     def models(self) -> list[str]: return [model.model_id for model in self.discover_models()]
     def candidate_models(self) -> list[str]:
@@ -100,7 +134,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 choice = data["choices"][0]; return ProviderResponse(choice["message"]["content"], data.get("model"), choice.get("finish_reason"), data.get("usage"), "chat_completions")
         except ProviderError: raise
         except HTTPError as exc:
-            if exc.code == 404:
+            if exc.code == 404 and not self._validating_candidate:
                 refreshed = self.refresh_models()
                 if refreshed and self.model not in {item.model_id for item in refreshed}:
                     raise ProviderError("MODEL_NOT_FOUND") from exc
