@@ -18,13 +18,15 @@ def load(path: Path | None = None) -> dict:
     data = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not isinstance(data.get("providers", {}), dict): raise ValueError("provider config must contain a providers object")
     data.setdefault("providers", {})
+    for provider_id, provider in data["providers"].items():
+        if isinstance(provider, dict): provider.setdefault("display_name", provider_id)
     return data
 
 
 def save(data: dict, path: Path | None = None) -> None:
     target = path or config_path(); target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(target.suffix + ".tmp")
-    temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    temp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     temp.replace(target)
 
 
@@ -37,8 +39,10 @@ def upsert(provider_id: str, values: dict, path: Path | None = None) -> dict:
     kind = values.get("type", "openai_compatible")
     if kind not in VALID_TYPES: raise ValueError("unsupported provider type")
     data = load(path); previous = data["providers"].get(provider_id, {})
-    headers = {**previous.get("headers", {}), **values.pop("headers", {})}
-    data["providers"][provider_id] = {**previous, **values, "id": provider_id, "type": kind, "headers": headers}
+    supplied = dict(values)
+    headers = {**previous.get("headers", {}), **supplied.pop("headers", {})}
+    display_name = supplied.get("display_name") or previous.get("display_name") or provider_id
+    data["providers"][provider_id] = {**previous, **supplied, "id": provider_id, "display_name": display_name, "type": kind, "headers": headers}
     save(data, path); return data["providers"][provider_id]
 
 

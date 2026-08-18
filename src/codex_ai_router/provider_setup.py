@@ -19,6 +19,11 @@ def suggested_provider_id(base_url: str, existing: set[str] = set()) -> str:
     return candidate
 
 
+def default_display_name(provider_id: str) -> str:
+    """Return a readable default without changing the machine-stable ID."""
+    return " ".join(part.capitalize() for part in provider_id.replace("_", "-").split("-") if part) or provider_id
+
+
 def suggested_provider_type(base_url: str) -> str:
     host = (urlparse(base_url).hostname or "").lower()
     return "lmstudio" if host in {"localhost", "127.0.0.1"} and "1234" in base_url else "openai_compatible"

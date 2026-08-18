@@ -23,14 +23,23 @@ try {
   $process.WaitForExit()
   Assert-True ($interactiveOutput -match 'Base URL is invalid.') 'default_interactive_starts_base_url'
 
-  Set-ProviderConfiguration -ProviderId 'lightboat' -ProviderType 'openai_compatible' -BaseUrl 'https://one.example/v1' -WireApi 'responses' -ApiKeyEnvironmentName 'LIGHTBOAT_KEY' -ConfigPath $path -SkipEnvironmentUpdate
+  $generatedId = Get-SuggestedProviderId -BaseUrl 'https://lightboat.dpdns.org' -Providers @{}
+  Assert-True ($generatedId -eq 'lightboat') 'generated_id_is_lowercase'
+  Assert-True ($generatedId -match '^[a-z0-9_-]+$') 'generated_id_matches_validation'
+
+  $chineseDisplayName = [string]::Concat(([char]0x8F7B), ([char]0x821F), ([char]0x516C), ([char]0x76CA), ([char]0x7AD9))
+  Set-ProviderConfiguration -ProviderId 'lightboat' -DisplayName $chineseDisplayName -ProviderType 'openai_compatible' -BaseUrl 'https://one.example/v1' -WireApi 'responses' -ApiKeyEnvironmentName 'LIGHTBOAT_KEY' -ConfigPath $path -SkipEnvironmentUpdate
   $first = Get-HeaderMappingConfig $path
   Assert-True ($first['providers'].Count -eq 1) 'add_first_provider'
   Assert-True ($first['providers']['lightboat']['type'] -eq 'openai_compatible') 'provider_id_and_type'
+  Assert-True ($first['providers']['lightboat']['display_name'] -eq $chineseDisplayName) 'chinese_display_name_roundtrip'
   Set-ProviderConfiguration -ProviderId 'groq-main' -ProviderType 'openai_compatible' -BaseUrl 'https://two.example/v1' -WireApi 'chat_completions' -ApiKeyEnvironmentName 'GROQ_KEY' -ConfigPath $path -SkipEnvironmentUpdate
   $second = Get-HeaderMappingConfig $path
   Assert-True ($second['providers'].Count -eq 2) 'add_second_provider'
   Assert-True ($second['providers'].ContainsKey('lightboat')) 'providers_preserved'
+  $second['providers']['groq-main']['display_name'] = $chineseDisplayName
+  Save-HeaderMappingConfigAtomic $second $path
+  Assert-True ((Get-HeaderMappingConfig $path)['providers']['groq-main']['display_name'] -eq $chineseDisplayName) 'duplicate_display_name_allowed'
   Set-ProviderConfiguration -ProviderId 'lightboat' -ProviderType 'openai_compatible' -BaseUrl 'https://updated.example/v1' -WireApi 'responses' -ApiKeyEnvironmentName 'LIGHTBOAT_KEY' -ConfigPath $path -SkipEnvironmentUpdate
   $updated = Get-HeaderMappingConfig $path
   Assert-True ($updated['providers']['lightboat']['base_url'] -eq 'https://updated.example/v1') 'update_one_provider'

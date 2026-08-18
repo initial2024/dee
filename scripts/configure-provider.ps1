@@ -1,5 +1,6 @@
-param([switch]$NonInteractive, [switch]$Advanced)
+param([switch]$NonInteractive, [switch]$Advanced, [string]$ConfigPath, [switch]$SkipEnvironmentUpdate)
 $ErrorActionPreference = 'Stop'
+if ([Console]::IsInputRedirected) { [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false) }
 $providerConfigurationNonInteractive = $NonInteractive
 . (Join-Path $PSScriptRoot 'configure-provider-header.ps1') -NonInteractive
 $NonInteractive = $providerConfigurationNonInteractive
@@ -12,9 +13,17 @@ function Get-SuggestedProviderId {
   foreach ($name in $known.Keys) { if ($hostName -like "*$name*") { $suggestion = $known[$name]; break } }
   if ([string]::IsNullOrWhiteSpace($suggestion)) { $suggestion = ((($hostName -split '\.')[0..([Math]::Max(0, ($hostName -split '\.').Count - 2))] -join '-') -replace '[^a-z0-9_-]', '-') }
   if ([string]::IsNullOrWhiteSpace($suggestion)) { $suggestion = 'provider' }
+  $suggestion = $suggestion.ToLowerInvariant()
   $candidate = $suggestion; $suffix = 2
   while ($Providers.ContainsKey($candidate)) { $candidate = "$suggestion-$suffix"; $suffix++ }
-  return $candidate
+  return $candidate.ToLowerInvariant()
+}
+
+function Get-DefaultDisplayName {
+  param([string]$ProviderId)
+  return (($ProviderId -replace '[_-]+', ' ').Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object {
+    $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1)
+  }) -join ' '
 }
 
 function Get-SuggestedProviderType {
@@ -45,6 +54,7 @@ function Set-ProviderConfiguration {
     [string]$ProviderId, [string]$ProviderType, [string]$BaseUrl, [string]$WireApi,
     [string]$ApiKeyEnvironmentName, [int]$Priority = 100,
     [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json'),
+    [string]$DisplayName,
     [switch]$SkipEnvironmentUpdate
   )
   if ($ProviderId -notmatch '^[a-z0-9_-]+$') { throw 'Provider ID must match [a-z0-9_-]+.' }
@@ -55,7 +65,7 @@ function Set-ProviderConfiguration {
   $config = Get-HeaderMappingConfig $ConfigPath
   if (-not $config['providers'].ContainsKey($ProviderId)) { $config['providers'][$ProviderId] = @{ headers = @{} } }
   $provider = $config['providers'][$ProviderId]
-  $provider['id'] = $ProviderId; $provider['type'] = $ProviderType; $provider['base_url'] = $BaseUrl
+  $provider['id'] = $ProviderId; $provider['display_name'] = if ([string]::IsNullOrWhiteSpace($DisplayName)) { if ($provider.ContainsKey('display_name')) { $provider['display_name'] } else { $ProviderId } } else { $DisplayName }; $provider['type'] = $ProviderType; $provider['base_url'] = $BaseUrl
   $provider['wire_api'] = $WireApi; $provider['enabled'] = $true; $provider['api_key_env'] = $ApiKeyEnvironmentName
   $provider['model_discovery'] = $true; $provider['models'] = @(); $provider['priority'] = $Priority
   if (-not $provider.ContainsKey('headers')) { $provider['headers'] = @{} }
@@ -70,18 +80,24 @@ function Set-ProviderConfiguration {
 
 if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
   $baseUrl = (Read-Host 'Base URL').Trim()
-  $existingConfig = Get-HeaderMappingConfig (Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json')
+  $activeConfigPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Join-Path $env:USERPROFILE '.codex-ai-router\provider-header-mappings.json' } else { $ConfigPath }
+  $existingConfig = Get-HeaderMappingConfig $activeConfigPath
   $suggestedId = Get-SuggestedProviderId $baseUrl $existingConfig['providers']
-  $providerId = if ($Advanced) { (Read-Host 'Provider ID').Trim() } else { (Read-Host "Suggested Provider ID: $suggestedId (Enter accepts)").Trim() }
+  $providerId = if ($Advanced) { (Read-Host "Provider ID [$suggestedId]").Trim() } else { $suggestedId }
   if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = $suggestedId }
   $suggestedType = Get-SuggestedProviderType $baseUrl
   $providerType = if ($Advanced) { (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible)').Trim() } else { $suggestedType }
+  Write-Host "Detected provider type: $providerType"
+  Write-Host "Suggested Provider ID: $providerId"
+  $defaultDisplayName = Get-DefaultDisplayName $providerId
+  $displayName = (Read-Host "Display name [$defaultDisplayName]").Trim()
+  if ([string]::IsNullOrWhiteSpace($displayName)) { $displayName = $defaultDisplayName }
   $suggestedWireApi = Get-SuggestedWireApi $baseUrl $providerType
   $wireApi = if ($Advanced) { (Read-Host 'Wire API (responses, chat_completions, auto_if_supported)').Trim() } else { $suggestedWireApi }
   $suggestedKeyEnv = 'XIAOYU_API_' + ($providerId.ToUpperInvariant() -replace '[^A-Z0-9]', '_') + '_KEY'
   $keyEnv = if ($providerType -eq 'lmstudio') { '' } elseif ($Advanced) { (Read-Host 'API key environment variable name').Trim() } else { $suggestedKeyEnv }
-  Set-ProviderConfiguration -ProviderId $providerId -ProviderType $providerType -BaseUrl $baseUrl -WireApi $wireApi -ApiKeyEnvironmentName $keyEnv
-  if ($providerType -ne 'lmstudio') {
+  Set-ProviderConfiguration -ProviderId $providerId -DisplayName $displayName -ProviderType $providerType -BaseUrl $baseUrl -WireApi $wireApi -ApiKeyEnvironmentName $keyEnv -ConfigPath $activeConfigPath -SkipEnvironmentUpdate:$SkipEnvironmentUpdate
+  if ($providerType -ne 'lmstudio' -and -not $SkipEnvironmentUpdate) {
     $secureKey = Read-Host 'API key' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
     try { [Environment]::SetEnvironmentVariable($keyEnv, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 'User') }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
@@ -94,8 +110,9 @@ if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
   while ((Read-Host 'Configure a custom header? (yes/no)').Trim().ToLowerInvariant() -eq 'yes') {
     $headerName = (Read-Host 'Header name').Trim(); $headerEnv = (Read-Host 'Header value environment variable name').Trim()
     $secureHeader = Read-Host 'Header value' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureHeader)
-    try { Set-ProviderHeaderMapping -ProviderName $providerId -HeaderName $headerName -HeaderEnvironmentName $headerEnv; [Environment]::SetEnvironmentVariable($headerEnv, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 'User') }
+    try { Set-ProviderHeaderMapping -ProviderName $providerId -HeaderName $headerName -HeaderEnvironmentName $headerEnv -ConfigPath $activeConfigPath -SkipEnvironmentUpdate:$SkipEnvironmentUpdate; if (-not $SkipEnvironmentUpdate) { [Environment]::SetEnvironmentVariable($headerEnv, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 'User') } }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
   }
-  Write-Host 'Saved provider metadata and sensitive values to current-user environment variables. No secret was displayed.'
+  if ($SkipEnvironmentUpdate) { Write-Host 'Saved provider metadata to the supplied configuration path. No environment variables were written.' }
+  else { Write-Host 'Saved provider metadata and sensitive values to current-user environment variables. No secret was displayed.' }
 }

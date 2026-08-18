@@ -4,6 +4,9 @@ import time
 import unittest
 import subprocess
 import json
+import io
+import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,7 +27,8 @@ from codex_ai_router.providers.base import ProviderError
 from codex_ai_router.providers.openai_compatible import OpenAICompatibleProvider, ResponsesResponseAdapter
 from codex_ai_router.providers.registry import ModelRegistry
 from codex_ai_router.providers.base import DiscoveredModel
-from codex_ai_router.provider_setup import classify_probe, suggested_provider_id, suggested_provider_type
+from codex_ai_router.provider_setup import classify_probe, default_display_name, suggested_provider_id, suggested_provider_type
+from codex_ai_router import provider_config
 from urllib.error import HTTPError
 from datetime import datetime, timezone
 
@@ -205,5 +209,50 @@ class RouterV1Tests(unittest.TestCase):
     def test_57_provider_type_auto_detect(self): self.assertEqual(suggested_provider_type('http://127.0.0.1:1234/v1'), 'lmstudio')
     def test_58_wire_api_probe(self): self.assertEqual(classify_probe('application/json', 401, None), 'responses')
     def test_59_html_probe_rejected(self): self.assertIsNone(classify_probe('text/html', 200, 200))
+    def test_60_generated_id_is_lowercase(self): self.assertEqual(suggested_provider_id('https://API.Example.COM'), 'api-example')
+    def test_61_generated_id_matches_validation(self):
+        provider_id = suggested_provider_id('https://strange_host.example.com')
+        provider_config.validate_provider_id(provider_id)
+    def test_62_lightboat_hostname_generates_lightboat(self): self.assertEqual(suggested_provider_id('https://lightboat.dpdns.org'), 'lightboat')
+    def test_63_unicode_display_name_allowed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = provider_config.upsert('lightboat', {'display_name': '轻舟公益站', 'type': 'openai_compatible'}, Path(temp) / 'providers.json')
+            self.assertEqual(record['display_name'], '轻舟公益站')
+    def test_64_chinese_display_name_roundtrip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            provider_config.upsert('lightboat', {'display_name': '轻舟公益站', 'type': 'openai_compatible'}, path)
+            self.assertEqual(provider_config.load(path)['providers']['lightboat']['display_name'], '轻舟公益站')
+            self.assertIn('轻舟公益站', path.read_text(encoding='utf-8'))
+    def test_65_display_name_does_not_change_provider_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = provider_config.upsert('lightboat', {'display_name': 'DeepSeek 主接口', 'type': 'openai_compatible'}, Path(temp) / 'providers.json')
+            self.assertEqual(record['id'], 'lightboat')
+    def test_66_duplicate_display_name_allowed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            provider_config.upsert('one', {'display_name': '同名', 'type': 'openai_compatible'}, path)
+            provider_config.upsert('two', {'display_name': '同名', 'type': 'openai_compatible'}, path)
+            self.assertEqual(len(provider_config.load(path)['providers']), 2)
+    def test_67_duplicate_provider_id_gets_suffix(self): self.assertEqual(suggested_provider_id('https://lightboat.dpdns.org', {'lightboat'}), 'lightboat-2')
+    def test_68_legacy_provider_without_display_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            path.write_text('{"providers":{"legacy":{"type":"openai_compatible"}}}', encoding='utf-8')
+            self.assertEqual(provider_config.load(path)['providers']['legacy']['display_name'], 'legacy')
+    def test_69_model_id_uses_provider_id_not_display_name(self):
+        model = DiscoveredModel('lightboat', 'gpt-x', '轻舟公益站', None, None, datetime.now(timezone.utc))
+        self.assertEqual(model.qualified_id, 'lightboat:gpt-x')
+    def test_70_default_display_name_is_separate_from_id(self): self.assertEqual(default_display_name('nvidia-backup'), 'Nvidia Backup')
+    def test_71_provider_list_exposes_display_name_and_id(self):
+        from codex_ai_router import cli
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            provider_config.upsert('lightboat', {'display_name': '轻舟公益站', 'type': 'openai_compatible'}, path)
+            output = io.StringIO()
+            with patch.dict(os.environ, {'XIAOYU_ROUTER_PROVIDER_CONFIG': str(path)}, clear=False), patch.object(sys, 'argv', ['xiaoyu-router', 'provider', 'list']), redirect_stdout(output):
+                cli.main()
+            listed = json.loads(output.getvalue())['providers'][0]
+            self.assertEqual((listed['display_name'], listed['id']), ('轻舟公益站', 'lightboat'))
 
 if __name__ == '__main__': unittest.main()
