@@ -3,6 +3,7 @@ from __future__ import annotations
 import json, os, time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .base import BaseProvider, DiscoveredModel, ProviderError, ProviderResponse
@@ -60,7 +61,13 @@ class OpenAICompatibleProvider(BaseProvider):
     @property
     def normalized_v1_base_url(self) -> str: return self.base_url if self.base_url.endswith("/v1") else self.base_url + "/v1"
     def endpoint(self) -> str: return self.normalized_v1_base_url + "/responses" if self.wire_api == "responses" else self.base_url + "/chat/completions"
-    def models_endpoint(self) -> str: return self.normalized_v1_base_url + "/models"
+    def models_endpoint(self) -> str:
+        configured = self.provider_metadata.get("model_discovery_endpoint")
+        if isinstance(configured, str) and configured.strip():
+            value = configured.strip()
+            if value.startswith(("https://", "http://")): return value
+            return self.normalized_v1_base_url + "/" + value.lstrip("/")
+        return self.normalized_v1_base_url + "/models"
     def available(self) -> bool: return bool(self.base_url and (not self.requires_bearer_auth or os.getenv(self.key_env)))
     def request_headers(self, content_type: bool = False) -> dict[str, str]:
         headers = dict(self.custom_headers)
@@ -72,11 +79,41 @@ class OpenAICompatibleProvider(BaseProvider):
         if content_type: headers["Content-Type"] = "application/json"
         return headers
 
+    def discovery_request_headers(self) -> dict[str, str]:
+        """Model-list credentials are independent from inference credentials."""
+        style = str(self.provider_metadata.get("model_discovery_auth_style", "inherit")).lower()
+        headers: dict[str, str] = {}
+        mappings = self.provider_metadata.get("model_discovery_headers", {})
+        if isinstance(mappings, dict):
+            for name, env_name in mappings.items():
+                if isinstance(name, str) and isinstance(env_name, str) and (value := os.getenv(env_name)):
+                    headers[name] = value
+        if style == "inherit":
+            return {**self.request_headers(), **headers}
+        if style == "bearer":
+            if not (key := os.getenv(self.key_env)): raise ProviderError("MODEL_DISCOVERY_MISSING_KEY")
+            headers["Authorization"] = "Bearer " + key
+        elif style not in {"none", "custom_header"}:
+            raise ProviderError("INVALID_MODEL_DISCOVERY_AUTH_STYLE")
+        return headers
+
+    def discovery_request(self) -> Request:
+        method = str(self.provider_metadata.get("model_discovery_method", "GET")).upper()
+        if method not in {"GET", "POST"}: raise ProviderError("INVALID_MODEL_DISCOVERY_METHOD")
+        endpoint = self.models_endpoint()
+        query = self.provider_metadata.get("model_discovery_query", {})
+        if isinstance(query, dict) and query:
+            endpoint += ("&" if "?" in endpoint else "?") + urlencode(query)
+        body = self.provider_metadata.get("model_discovery_body") if method == "POST" else None
+        data = json.dumps(body).encode() if isinstance(body, dict) else None
+        headers = self.discovery_request_headers()
+        if data is not None: headers["Content-Type"] = "application/json"
+        return Request(endpoint, data=data, headers=headers, method=method)
+
     def _remote_models(self) -> list[DiscoveredModel]:
         """Attempt the standards endpoint without treating its failure as provider failure."""
-        if not self.available(): self.remote_model_list_status = "UNAVAILABLE"; return []
         try:
-            with urlopen(Request(self.models_endpoint(), headers=self.request_headers()), timeout=self.timeout) as response:
+            with urlopen(self.discovery_request(), timeout=self.timeout) as response:
                 if response.headers.get_content_type() == "text/html": self.remote_model_list_status = "NON_API_RESPONSE"; return []
                 payload = json.loads(response.read()); now = datetime.now(timezone.utc)
                 models = [DiscoveredModel(self.provider_id, item["id"], item.get("id", ""), item.get("owned_by"), {**item, "source": "REMOTE_MODEL_LIST", "validation": "REMOTE_LIST"}, now) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
@@ -106,6 +143,12 @@ class OpenAICompatibleProvider(BaseProvider):
         models = self._remote_models()
         if models:
             self.model_discovery_supported = "YES"; self._model_cache[cache_key] = (time.monotonic(), models, "YES"); return models
+        # Discovery-only callers may explicitly forbid the legacy candidate
+        # validation probe, which uses the inference endpoint.
+        if self.provider_metadata.get("model_discovery_validate_candidates") is False:
+            self.model_discovery_supported = self.remote_model_list_status
+            self._model_cache[cache_key] = (time.monotonic(), [], self.model_discovery_supported)
+            return []
         candidates = list(candidate_signature)
         validated: list[DiscoveredModel] = []
         for candidate, source in candidates:

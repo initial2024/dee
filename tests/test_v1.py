@@ -350,5 +350,35 @@ class RouterV1Tests(unittest.TestCase):
             provider = LMStudioProvider(timeout=60, max_tokens=256); self.assertEqual(provider.ask('brief'), 'ok')
             payload = json.loads(open_.call_args.args[0].data)
             self.assertEqual((payload['max_tokens'], payload['stream']), (256, False))
+    def test_90_openminis_discovery_contract_adapter(self):
+        payload = json.dumps({'data': [{'id': value} for value in ['glm5.2', 'deepseekv4flash-0731', 'minimaxm3', 'grok-4.5', 'grok-4.6', 'grok-imagine-image-lite']]}).encode()
+        metadata = {'model_discovery_endpoint': '/models', 'model_discovery_method': 'GET', 'model_discovery_auth_style': 'bearer', 'model_discovery_headers': {'User-Agent': 'DISCOVERY_UA'}, 'headers': {'X-Inference-Only': 'INFERENCE_ENV'}}
+        with patch.dict(os.environ, {'DISCOVERY_KEY': 'test-key', 'DISCOVERY_UA': 'test-agent', 'INFERENCE_ENV': 'inference-only'}, clear=True), patch('codex_ai_router.providers.openai_compatible.urlopen', return_value=FakeResponse(payload)) as open_:
+            provider = OpenAICompatibleProvider('https://example.test', key_env='DISCOVERY_KEY', requires_bearer_auth=False, provider_id='api1', provider_metadata=metadata, header_env=metadata['headers'])
+            self.assertEqual(provider.models(), ['glm5.2', 'deepseekv4flash-0731', 'minimaxm3', 'grok-4.5', 'grok-4.6', 'grok-imagine-image-lite'])
+            request = open_.call_args.args[0]
+            self.assertEqual((request.get_method(), request.full_url), ('GET', 'https://example.test/v1/models'))
+            self.assertIsNotNone(request.get_header('Authorization')); self.assertIsNotNone(request.get_header('User-agent'))
+            self.assertIsNone(request.get_header('X-inference-only'))
+    def test_91_discovery_auth_is_independent_from_inference_auth(self):
+        metadata = {'model_discovery_auth_style': 'bearer', 'model_discovery_headers': {'X-Discovery': 'DISCOVERY_ENV'}}
+        with patch.dict(os.environ, {'KEY_ENV': 'test-key', 'DISCOVERY_ENV': 'discovery', 'INFERENCE_ENV': 'inference'}, clear=True):
+            provider = OpenAICompatibleProvider('https://example.test', key_env='KEY_ENV', requires_bearer_auth=False, provider_metadata=metadata, header_env={'X-Inference': 'INFERENCE_ENV'})
+            self.assertIn('X-Inference', provider.request_headers())
+            self.assertNotIn('X-Inference', provider.discovery_request_headers())
+            self.assertIn('Authorization', provider.discovery_request_headers())
+    def test_92_custom_discovery_endpoint_post_query_and_body(self):
+        metadata = {'model_discovery_endpoint': '/catalog', 'model_discovery_method': 'POST', 'model_discovery_auth_style': 'none', 'model_discovery_query': {'region': 'test'}, 'model_discovery_body': {'scope': 'models'}}
+        provider = OpenAICompatibleProvider('https://example.test/v1', requires_bearer_auth=False, provider_metadata=metadata)
+        request = provider.discovery_request()
+        self.assertEqual((request.get_method(), request.full_url), ('POST', 'https://example.test/v1/catalog?region=test'))
+        self.assertEqual(json.loads(request.data), {'scope': 'models'})
+    def test_93_discovery_only_mode_never_invokes_inference_validation(self):
+        error = HTTPError('https://host/v1/models', 401, 'unauthorized', None, None)
+        metadata = {'models': ['configured'], 'model_discovery_auth_style': 'none', 'model_discovery_validate_candidates': False}
+        with patch('codex_ai_router.providers.openai_compatible.urlopen', side_effect=error) as open_:
+            provider = OpenAICompatibleProvider('https://host', wire_api='responses', requires_bearer_auth=False, provider_metadata=metadata)
+            self.assertEqual(provider.models(), [])
+            self.assertEqual(open_.call_count, 1)
 
 if __name__ == '__main__': unittest.main()
