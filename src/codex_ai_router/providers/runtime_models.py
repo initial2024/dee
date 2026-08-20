@@ -51,6 +51,10 @@ def text_candidates(models: list[str]) -> tuple[list[str], list[str]]:
 
 def probe_model(provider: OpenAICompatibleProvider, model: str, state: RuntimeModelState, timeout: int = 20) -> dict:
     """One bounded non-streaming Responses request; values are never logged or returned."""
+    if hasattr(provider, "probe"):
+        result = provider.probe(model, timeout=min(timeout, 20))
+        state.record(provider.provider_id, model, result["status"], result["elapsed_seconds"], result.get("error_class", ""))
+        return result
     started = time.monotonic(); status = "TRANSPORT_ERROR"; content_type = "UNKNOWN"; valid_json = False; has_text = False
     payload = {"model": model, "input": "只回复：LB_OK", "max_output_tokens": 8, "stream": False}
     try:

@@ -30,6 +30,7 @@ function Get-SuggestedProviderType {
   param([string]$BaseUrl)
   $uri = [uri]$BaseUrl
   if ($uri.Host -in @('localhost', '127.0.0.1') -and $uri.Port -eq 1234) { return 'lmstudio' }
+  if ($uri.Host -eq 'api.groq.com' -and $uri.AbsolutePath -match '/openai/v1/?$') { return 'groq' }
   return 'openai_compatible'
 }
 
@@ -43,7 +44,7 @@ function Use-DefaultNoCustomHeader {
 
 function Get-SuggestedWireApi {
   param([string]$BaseUrl, [string]$ProviderType)
-  if ($ProviderType -eq 'lmstudio') { return 'chat_completions' }
+  if ($ProviderType -in @('lmstudio','groq')) { return 'chat_completions' }
   $normalized = $BaseUrl.TrimEnd('/'); if ($normalized -notmatch '/v1$') { $normalized += '/v1' }
   foreach ($candidate in @(@{ Name = 'responses'; Url = "$normalized/responses" }, @{ Name = 'chat_completions'; Url = "$normalized/chat/completions" })) {
     try {
@@ -66,7 +67,7 @@ function Set-ProviderConfiguration {
     [switch]$SkipEnvironmentUpdate
   )
   if ($ProviderId -notmatch '^[a-z0-9_-]+$') { throw 'Provider ID must match [a-z0-9_-]+.' }
-  if ($ProviderType -notin @('openai_compatible', 'custom_openai_compatible', 'lmstudio')) { throw 'Provider type is invalid.' }
+  if ($ProviderType -notin @('openai_compatible', 'custom_openai_compatible', 'lmstudio', 'groq')) { throw 'Provider type is invalid.' }
   if ($WireApi -notin @('responses', 'chat_completions', 'auto_if_supported')) { throw 'Wire API is invalid.' }
   if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw 'Base URL is required.' }
   if ($ProviderType -ne 'lmstudio' -and $ApiKeyEnvironmentName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'API key environment variable name is invalid.' }
@@ -96,7 +97,7 @@ if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
   $providerId = if ($Advanced) { (Read-Host "Provider ID [$suggestedId]").Trim() } else { $suggestedId }
   if ([string]::IsNullOrWhiteSpace($providerId)) { $providerId = $suggestedId }
   $suggestedType = Get-SuggestedProviderType $baseUrl
-  $providerType = if ($Advanced) { (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible)').Trim() } else { $suggestedType }
+  $providerType = if ($Advanced) { (Read-Host 'Provider type (openai_compatible, lmstudio, custom_openai_compatible, groq)').Trim() } else { $suggestedType }
   Write-Host "Detected provider type: $providerType"
   Write-Host "Suggested Provider ID: $providerId"
   $defaultDisplayName = Get-DefaultDisplayName $providerId

@@ -34,7 +34,7 @@ try {
   $empty = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest -ProviderConfigPath $emptyFixture 2>&1
   $bad = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest -ProviderConfigPath $badFixture 2>&1
   Assert-True (($fake -join "`n") -match 'PROVIDER_TABLE_ROWS=1') 'provider_refresh_populates_fake_row'
-  Assert-True (($fake -join "`n") -match 'PROVIDER_TABLE_COLUMNS=9') 'provider_table_has_fixed_columns'
+  Assert-True (($fake -join "`n") -match 'PROVIDER_TABLE_COLUMNS=10') 'provider_table_has_fixed_columns'
   Assert-True (($empty -join "`n") -match '暂无供应商') 'provider_empty_state_visible'
   Assert-True (($bad -join "`n") -match '读取供应商列表失败') 'provider_error_state_visible'
 } finally { foreach($path in @($providerFixture,$emptyFixture,$badFixture)){ if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force} } }
@@ -47,6 +47,7 @@ Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provi
 . (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
 Assert-True (Use-DefaultNoCustomHeader 'https://api.groq.com/openai/v1') 'groq_runtime_default_header_is_no'
 Assert-True (-not (Use-DefaultNoCustomHeader 'https://api.example.com/v1')) 'non_groq_header_choice_remains_available'
+Assert-True ($source -match 'Groq（https://api.groq.com/openai/v1）使用官方 SDK' -and $source -match '转换为 Groq SDK') 'groq_sdk_control_panel_hint_and_migration_present'
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-desktop-shortcut-' + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $temp | Out-Null
@@ -58,7 +59,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=28'
+Write-Output 'POWERSHELL_TEST_TOTAL=29'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }

@@ -7,7 +7,7 @@ name = "codex-ai-router"
 version = "0.1.0"
 description = "Safe companion router for Codex, OpenAI-compatible APIs, and LM Studio"
 requires-python = ">=3.10"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "groq>=0.11.0"]
 
 [project.scripts]
 xiaoyu-router = "codex_ai_router.cli:main"

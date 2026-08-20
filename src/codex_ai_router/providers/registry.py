@@ -7,7 +7,7 @@ class ModelRegistry:
     """In-memory unified model pool; provider discovery remains authoritative."""
     CAPABILITIES = ("TEXT", "VISION", "TOOL_CALLING", "STRUCTURED_OUTPUT", "REASONING", "CODING", "CONTEXT_WINDOW", "COST_CLASS")
 
-    def __init__(self): self._models: dict[str, DiscoveredModel] = {}; self._capabilities: dict[str, set[str]] = {}; self._profiles: dict[str, dict[str, str]] = {}
+    def __init__(self): self._models: dict[str, DiscoveredModel] = {}; self._capabilities: dict[str, set[str]] = {}; self._profiles: dict[str, dict[str, str]] = {}; self._states: dict[str, dict[str, list[str] | str | None]] = {}
 
     def update(self, provider_id: str, models: list[DiscoveredModel]) -> None:
         active = {model.qualified_id for model in models}
@@ -30,3 +30,11 @@ class ModelRegistry:
 
     def capability_profile(self, qualified_id: str) -> dict[str, str]:
         return dict(self._profiles.get(qualified_id, {capability: "UNKNOWN" for capability in self.CAPABILITIES}))
+
+    def set_model_states(self, provider_id: str, states: dict[str, list[str] | str | None]) -> None:
+        """Keep discovery, policy and runtime buckets separate for a provider."""
+        keys = ("DISCOVERED_MODELS", "USABLE_MODELS", "ALLOWED_MODELS", "DENIED_MODELS", "RUNTIME_RESPONSIVE_MODELS", "TIMEOUT_COOLDOWN_MODELS", "CURRENT_RUNTIME_MODEL")
+        self._states[provider_id] = {key: states.get(key, [] if key != "CURRENT_RUNTIME_MODEL" else None) for key in keys}
+
+    def model_states(self, provider_id: str) -> dict[str, list[str] | str | None]:
+        return dict(self._states.get(provider_id, {}))

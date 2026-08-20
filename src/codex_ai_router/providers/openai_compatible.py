@@ -122,10 +122,48 @@ class OpenAICompatibleProvider(BaseProvider):
             with urlopen(self.discovery_request(), timeout=self.timeout) as response:
                 if response.headers.get_content_type() == "text/html": self.remote_model_list_status = "NON_API_RESPONSE"; return []
                 payload = json.loads(response.read()); now = datetime.now(timezone.utc)
-                models = [DiscoveredModel(self.provider_id, item["id"], item.get("id", ""), item.get("owned_by"), {**item, "source": "REMOTE_MODEL_LIST", "validation": "REMOTE_LIST"}, now) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
+                items = self._model_items(payload)
+                if items is None:
+                    shape = self._payload_shape(payload)
+                    self.remote_model_list_status = f"MODEL_RESPONSE_SCHEMA_UNSUPPORTED:{shape}"
+                    return []
+                models = []
+                for item in items:
+                    model_id, raw = self._model_id(item)
+                    if model_id:
+                        models.append(DiscoveredModel(self.provider_id, model_id, model_id, raw.get("owned_by"), {**raw, "source": "REMOTE_MODEL_LIST", "validation": "REMOTE_LIST"}, now))
                 self.remote_model_list_status = "PASS"; return models
         except HTTPError as exc: self.remote_model_list_status = f"HTTP_{exc.code}"; return []
         except (URLError, TimeoutError, json.JSONDecodeError, ProviderError): self.remote_model_list_status = "ERROR"; return []
+
+    @staticmethod
+    def _payload_shape(payload: object) -> str:
+        if isinstance(payload, dict): return "OBJECT:" + ",".join(sorted(str(key) for key in payload)[:8])
+        if isinstance(payload, list): return "ARRAY"
+        return type(payload).__name__.upper()
+
+    @staticmethod
+    def _model_items(payload: object) -> list[object] | None:
+        if isinstance(payload, list): return payload
+        if not isinstance(payload, dict): return None
+        for key in ("data", "models", "items"):
+            value = payload.get(key)
+            if isinstance(value, list): return value
+        return None
+
+    @staticmethod
+    def _model_id(item: object) -> tuple[str | None, dict]:
+        if isinstance(item, str) and item.strip(): return item.strip(), {"id": item.strip()}
+        if not isinstance(item, dict): return None, {}
+        for key in ("id", "name", "model", "model_id"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip(): return value.strip(), item
+        for key in ("model", "data", "attributes"):
+            nested = item.get(key)
+            if isinstance(nested, dict):
+                value, raw = OpenAICompatibleProvider._model_id(nested)
+                if value: return value, {**item, **raw}
+        return None, item
 
     def validate_model_candidate(self, model: str) -> bool:
         previous = self.model
@@ -148,6 +186,15 @@ class OpenAICompatibleProvider(BaseProvider):
             self.model_discovery_supported = cached[2]; return cached[1]
         models = self._remote_models()
         if models:
+            self.model_discovery_supported = "YES"
+        if models:
+            # Allowed seeds are intentionally candidates, not proof of availability.
+            # Merge them only with an actual remote list; a remote failure keeps the
+            # existing validated-candidate fallback semantics.
+            known = {model.model_id for model in models}; now = datetime.now(timezone.utc)
+            for candidate in self.provider_metadata.get("allowed_model_seeds", []):
+                if isinstance(candidate, str) and candidate and candidate not in known:
+                    models.append(DiscoveredModel(self.provider_id, candidate, candidate, None, {"source": "ALLOWED_MODEL_SEED", "validation": "NOT_PROBED"}, now)); known.add(candidate)
             self.model_discovery_supported = "YES"; self._model_cache[cache_key] = (time.monotonic(), models, "YES"); return models
         # Discovery-only callers may explicitly forbid the legacy candidate
         # validation probe, which uses the inference endpoint.

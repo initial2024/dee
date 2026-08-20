@@ -12,7 +12,7 @@ from . import provider_config
 from .classifier import classify
 from .network import NetworkMode, NetworkState
 from .policy import FastLocalGate, FastLocalPolicy
-from .providers import LMStudioProvider, OpenAICompatibleProvider
+from .providers import LMStudioProvider, OpenAICompatibleProvider, GroqProvider
 from .providers.local_backend import LocalBackend
 from .providers.openai_compatible import ResponsesResponseAdapter
 from .providers.runtime_models import RuntimeModelState, text_candidates
@@ -70,24 +70,24 @@ class RouterService:
 
     def _provider_entries(self) -> list[tuple[str, dict]]:
         records = provider_config.load().get("providers", {})
-        values = [(key, value) for key, value in records.items() if isinstance(value, dict) and value.get("enabled", True) and value.get("type") in {"openai_compatible", "custom_openai_compatible"}]
+        values = [(key, value) for key, value in records.items() if isinstance(value, dict) and value.get("enabled", True) and value.get("type") in {"openai_compatible", "custom_openai_compatible", "groq"}]
         return sorted(values, key=lambda item: int(item[1].get("priority", 100)))
 
-    def _api_provider(self, requested: str) -> tuple[str, OpenAICompatibleProvider]:
+    def _api_provider(self, requested: str) -> tuple[str, object]:
         entries = self._provider_entries()
         if requested == "xiaoyu-lightboat":
             entries = [item for item in entries if item[0].startswith("lightboat")]
         if not entries:
             raise RuntimeError("API_PROVIDER_UNAVAILABLE")
         provider_id, entry = entries[0]
-        provider = OpenAICompatibleProvider(
+        provider = GroqProvider(key_env=entry.get("api_key_env", "GROQ_API_KEY"), provider_id=provider_id, timeout=int(entry.get("request_timeout", 20))) if entry.get("type") == "groq" else OpenAICompatibleProvider(
             entry.get("base_url"), key_env=entry.get("api_key_env", ""), wire_api=entry.get("wire_api", "responses"),
             requires_bearer_auth=entry.get("requires_bearer_auth", False), header_env=entry.get("headers", {}),
             provider_id=provider_id, provider_metadata=entry, model_env=entry.get("model_env"), timeout=int(entry.get("request_timeout", 60)),
         )
         return provider_id, provider
 
-    def _select_text_model(self, provider: OpenAICompatibleProvider) -> str:
+    def _select_text_model(self, provider: object) -> str:
         candidates, _ = text_candidates(provider.candidate_models())
         selected = self.runtime_models.select(provider.provider_id, candidates)
         if not selected:
@@ -105,12 +105,19 @@ class RouterService:
         _, provider = self._api_provider(virtual_model)
         # AUTO makes a short reachability decision per invocation.  A later
         # invocation probes again, so recovery needs no VPN-specific logic.
-        if self.network.mode is NetworkMode.AUTO and self.network.probe(provider.models_endpoint(), timeout=2.0) == "OFFLINE_OR_REMOTE_UNAVAILABLE":
+        if isinstance(provider, OpenAICompatibleProvider) and self.network.mode is NetworkMode.AUTO and self.network.probe(provider.models_endpoint(), timeout=2.0) == "OFFLINE_OR_REMOTE_UNAVAILABLE":
             raise RuntimeError("REMOTE_UNAVAILABLE")
         selected = self._select_text_model(provider)
         # Lightboat's minimal path accepts a plain Responses input.  Normalize
         # array-shaped Codex input into the equivalent text to avoid sending a
         # provider-specific content array downstream.
+        if isinstance(provider, GroqProvider):
+            try:
+                provider.model = selected
+                result = provider.complete(request_payload.get("input"), max_tokens=_bounded_output_tokens(request_payload) or 16)
+                return self._response(virtual_model, result.text, result.usage)
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
         outbound = {"input": _input_text(request_payload.get("input"))}
         if isinstance(request_payload.get("instructions"), str):
             outbound["instructions"] = request_payload["instructions"]

@@ -60,6 +60,7 @@ class ModelDiscoveryChain:
 
     def candidates(self) -> list[tuple[str, str]]:
         values: list[tuple[str, str]] = []
+        values += [(model, "ALLOWED_MODEL_SEED") for model in _values(self.metadata.get("allowed_model_seeds"))]
         values += [(model, "EXISTING_PROVIDER_METADATA") for model in _values(self.metadata.get("models"))]
         values += [(model, "EXISTING_PROVIDER_METADATA") for model in _values(self.metadata.get("model"))]
         for env_name in filter(None, [self.model_env, self.metadata.get("model_env"), "XIAOYU_CODER_API_MODEL"]):

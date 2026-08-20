@@ -8,7 +8,7 @@ from .task import Mode
 from .model_policy import SelectionPolicy
 from .configuration import load_config
 from . import provider_config
-from .providers import LMStudioProvider, OpenAICompatibleProvider
+from .providers import LMStudioProvider, OpenAICompatibleProvider, GroqProvider
 from .provider_setup import default_display_name, suggested_provider_id, suggested_provider_type
 from .providers.model_discovery import codex_profile_requires_bearer_auth
 from .policy import FastLocalPolicy
@@ -16,11 +16,29 @@ from .network import NetworkMode
 from .server import RouterResponsesServer, RouterService
 from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend
 from .providers.runtime_models import RuntimeModelState, probe_model, text_candidates
+from .providers.model_states import model_state_report
 from .handoff import compact_handoff
 from .codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
+
+
+def provider_diagnostic(provider_id: str, entry: dict, remote_status: str) -> dict:
+    """Non-secret operational classification for the provider table and CLI."""
+    base_url = str(entry.get("base_url", "")).rstrip("/")
+    is_groq = "api.groq.com/openai/v1" in base_url.lower()
+    return {
+        "provider_id": provider_id,
+        "base_url": base_url,
+        "wire_api": entry.get("wire_api"),
+        "auth_style": entry.get("model_discovery_auth_style", "inherit"),
+        "api_key_env": entry.get("api_key_env", ""),
+        "api_key_configured": "YES" if entry.get("api_key_env") and __import__("os").getenv(entry["api_key_env"]) else "NO",
+        "custom_header_names": sorted(entry.get("headers", {}).keys()) if isinstance(entry.get("headers"), dict) else [],
+        "status": "GROQ_AUTH_OR_PERMISSION_ERROR" if is_groq and remote_status in {"HTTP_401", "HTTP_403"} else remote_status,
+        "GROQ_CUSTOM_HEADER_NOT_REQUIRED": "YES" if is_groq and not entry.get("headers") else "NO" if is_groq else "NOT_APPLICABLE",
+    }
 
 
 def add_policy_args(command):
@@ -54,7 +72,7 @@ def main() -> None:
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
     provider_show = provider_sub.add_parser("show"); provider_show.add_argument("id")
-    for action in ("enable", "disable", "remove"):
+    for action in ("enable", "disable", "remove", "migrate-groq"):
         item = provider_sub.add_parser(action); item.add_argument("id")
     provider_models = provider_sub.add_parser("models"); provider_models.add_argument("id")
     provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("id")
@@ -88,24 +106,38 @@ def main() -> None:
         elif args.provider_action == "show": emit(provider_config.load()["providers"].get(args.id) or (_ for _ in ()).throw(KeyError("provider not found")))
         elif args.provider_action in {"enable", "disable"}: emit(provider_config.set_enabled(args.id, args.provider_action == "enable"))
         elif args.provider_action == "remove": provider_config.remove(args.id); emit({"status": "REMOVED", "id": args.id})
+        elif args.provider_action == "migrate-groq":
+            entry = provider_config.load()["providers"].get(args.id)
+            if not entry: raise KeyError("provider not found")
+            if "api.groq.com/openai/v1" not in str(entry.get("base_url", "")).rstrip("/").lower(): raise ValueError("NOT_GROQ_BASE_URL")
+            emit(provider_config.migrate_to_groq(args.id))
         else:
             if args.id == "local": provider = router.local
             else:
                 entry = provider_config.load()["providers"].get(args.id)
                 if not entry: raise KeyError("provider not found")
                 if entry.get("type") == "lmstudio": provider = LMStudioProvider(entry.get("base_url", "http://127.0.0.1:1234/v1"))
+                elif entry.get("type") == "groq": provider = GroqProvider(key_env=entry.get("api_key_env", "GROQ_API_KEY"), provider_id=args.id, timeout=int(entry.get("request_timeout", 20)))
                 else:
                     profile_auth = codex_profile_requires_bearer_auth(entry.get("base_url", ""))
                     provider = OpenAICompatibleProvider(entry.get("base_url"), key_env=entry.get("api_key_env", ""), wire_api=entry.get("wire_api", "chat_completions"), requires_bearer_auth=entry.get("requires_bearer_auth", profile_auth), header_env=entry.get("headers", {}), provider_id=args.id, provider_metadata=entry, model_env=entry.get("model_env"))
             if args.provider_action == "probe-runtime":
-                records = provider.discover_models(); candidates, excluded = text_candidates([record.model_id for record in records]); state = RuntimeModelState(); results = []
+                records = provider.discover_models(); state = RuntimeModelState()
+                states = model_state_report(args.id, entry if args.id != "local" else {}, records, policy, state)
+                candidates, excluded = text_candidates(states["ALLOWED_MODELS"]); results = []
                 for model in candidates:
                     result = probe_model(provider, model, state); results.append(result)
                     if result["status"] == "PASS" and not args.all: break
-                emit({"provider": args.id, "text_candidates": candidates, "excluded_models": excluded, "probe_results": results, "selected_runtime_model": state.select(args.id, candidates)})
+                states = model_state_report(args.id, entry if args.id != "local" else {}, records, policy, state)
+                emit({"provider": args.id, "text_candidates": candidates, "excluded_models": excluded, "probe_results": results, **states})
             else:
                 records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
-                emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records]})
+                states = model_state_report(args.id, entry if args.id != "local" else {}, records, policy, RuntimeModelState())
+                if args.provider_action == "refresh-models" and args.id != "local":
+                    provider_config.record_discovery(args.id, states["DISCOVERED_MODELS"], getattr(provider, "remote_model_list_status", "UNKNOWN"))
+                payload = {"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records], **states}
+                if args.id != "local": payload["diagnostic"] = provider_diagnostic(args.id, entry, payload["REMOTE_MODEL_LIST_STATUS"])
+                emit(payload)
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
     elif args.command == "serve":

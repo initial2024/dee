@@ -26,6 +26,7 @@ def default_display_name(provider_id: str) -> str:
 
 def suggested_provider_type(base_url: str) -> str:
     host = (urlparse(base_url).hostname or "").lower()
+    if host == "api.groq.com" and "/openai/v1" in base_url.rstrip("/").lower(): return "groq"
     return "lmstudio" if host in {"localhost", "127.0.0.1"} and "1234" in base_url else "openai_compatible"
 
 
