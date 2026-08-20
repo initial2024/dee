@@ -13,7 +13,7 @@ from codex_ai_router.network import NetworkMode, NetworkState
 from codex_ai_router.providers.base import DiscoveredModel
 from codex_ai_router.providers.local_backend import LocalBackend, ManagedLlamaCppBackend
 from codex_ai_router.providers.registry import ModelRegistry
-from codex_ai_router.server import RouterResponsesServer, RouterService, VIRTUAL_MODELS
+from codex_ai_router.server import RouterResponsesServer, RouterService, VIRTUAL_MODELS, _bounded_output_tokens, _input_text
 from codex_ai_router.vision import VisionProxy
 from codex_ai_router.codex_status import ChatGPTCodexQuota, CodexAgentAvailability, CodexHarnessState
 
@@ -108,6 +108,23 @@ class RouterV11Tests(unittest.TestCase):
     def test_116_codex_quota_never_disables_harness_by_inference(self):
         state = CodexHarnessState(ChatGPTCodexQuota.EXHAUSTED, CodexAgentAvailability.AVAILABLE)
         self.assertEqual(state.as_dict(), {"CHATGPT_CODEX_QUOTA": "EXHAUSTED", "CODEX_AGENT": "AVAILABLE"})
+
+    def test_117_responses_input_mapping_and_token_cap_are_bounded(self):
+        value = [{"role": "user", "content": [{"type": "input_text", "text": "short"}]}]
+        self.assertEqual((_input_text(value), _bounded_output_tokens({"max_output_tokens": 99})), ("short", 16))
+
+    def test_118_streaming_request_gets_basic_sse_completed_event(self):
+        server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal()), port=0)
+        server.start()
+        try:
+            port = server.httpd.server_address[1]
+            request = Request(f"http://127.0.0.1:{port}/v1/responses", data=json.dumps({"model": "xiaoyu-local", "input": "ok", "stream": True}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=3) as response:
+                raw = response.read().decode("utf-8")
+                self.assertEqual(response.headers.get_content_type(), "text/event-stream")
+            self.assertIn("response.completed", raw)
+        finally:
+            server.stop()
 
 
 if __name__ == "__main__":

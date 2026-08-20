@@ -39,6 +39,17 @@ def _input_text(value: object) -> str:
     return "\n".join(pieces)
 
 
+def _bounded_output_tokens(payload: dict, maximum: int = 16) -> int | None:
+    """Preserve the caller's small output cap without ever increasing it."""
+    value = payload.get("max_output_tokens", payload.get("max_tokens"))
+    if value is None:
+        return None
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError):
+        raise RuntimeError("INVALID_MAX_OUTPUT_TOKENS")
+
+
 def _has_image(value: object) -> bool:
     raw = json.dumps(value, ensure_ascii=False).lower()
     return "input_image" in raw or "image_url" in raw
@@ -96,7 +107,18 @@ class RouterService:
         if self.network.mode is NetworkMode.AUTO and self.network.probe(provider.models_endpoint(), timeout=2.0) == "OFFLINE_OR_REMOTE_UNAVAILABLE":
             raise RuntimeError("REMOTE_UNAVAILABLE")
         selected = self._select_text_model(provider)
-        outbound = {key: request_payload[key] for key in ("input", "instructions", "tools", "tool_choice", "reasoning", "max_output_tokens", "store", "stream") if key in request_payload}
+        # Lightboat's minimal path accepts a plain Responses input.  Normalize
+        # array-shaped Codex input into the equivalent text to avoid sending a
+        # provider-specific content array downstream.
+        outbound = {"input": _input_text(request_payload.get("input"))}
+        if isinstance(request_payload.get("instructions"), str):
+            outbound["instructions"] = request_payload["instructions"]
+        limit = _bounded_output_tokens(request_payload)
+        if limit is not None:
+            token_field = str(provider.provider_metadata.get("responses_token_limit_field", "max_output_tokens"))
+            if token_field not in {"max_output_tokens", "max_tokens"}:
+                raise RuntimeError("INVALID_TOKEN_LIMIT_FIELD")
+            outbound[token_field] = limit
         outbound["model"] = selected
         outbound["stream"] = False
         request = Request(provider.endpoint(), data=json.dumps(outbound).encode("utf-8"), headers=provider.request_headers(content_type=True), method="POST")
@@ -107,7 +129,9 @@ class RouterService:
                 raw = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             raise RuntimeError(f"DOWNSTREAM_HTTP_{exc.code}") from exc
-        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except TimeoutError as exc:
+            raise RuntimeError(f"DOWNSTREAM_TIMEOUT:{provider.timeout}") from exc
+        except (URLError, json.JSONDecodeError) as exc:
             raise RuntimeError("DOWNSTREAM_UNAVAILABLE") from exc
         text = ResponsesResponseAdapter.text(raw)
         if not text:
@@ -157,6 +181,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _send_sse(self, body: dict) -> None:
+        raw = json.dumps({"type": "response.completed", "response": body}, ensure_ascii=False)
+        encoded = ("event: response.completed\ndata: " + raw + "\n\ndata: [DONE]\n\n").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def do_GET(self) -> None:
         if self.path == "/v1/models":
             self._send(200, {"object": "list", "data": self.service.models()})
@@ -176,12 +210,16 @@ class _Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise RuntimeError("INVALID_REQUEST")
-            self._send(200, self.service.respond(payload))
+            response = self.service.respond(payload)
+            if payload.get("stream") is True:
+                self._send_sse(response)
+            else:
+                self._send(200, response)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self._send(400, {"error": {"code": "invalid_json"}})
         except RuntimeError as exc:
             code = str(exc)
-            status = 503 if code in {"LOCAL_UNAVAILABLE", "API_PROVIDER_UNAVAILABLE", "DOWNSTREAM_UNAVAILABLE", "REMOTE_FALLBACK_DISABLED_OFFLINE"} else 400
+            status = 504 if code.startswith("DOWNSTREAM_TIMEOUT:") else (503 if code in {"LOCAL_UNAVAILABLE", "API_PROVIDER_UNAVAILABLE", "DOWNSTREAM_UNAVAILABLE", "REMOTE_FALLBACK_DISABLED_OFFLINE", "REMOTE_UNAVAILABLE"} else 400)
             self._send(status, {"error": {"code": code}})
 
 
