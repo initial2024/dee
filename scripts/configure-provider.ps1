@@ -33,6 +33,14 @@ function Get-SuggestedProviderType {
   return 'openai_compatible'
 }
 
+function Use-DefaultNoCustomHeader {
+  param([string]$BaseUrl)
+  try {
+    $uri = [uri]$BaseUrl
+    return ($uri.Host -eq 'api.groq.com' -and $uri.AbsolutePath.TrimEnd('/') -eq '/openai/v1')
+  } catch { return $false }
+}
+
 function Get-SuggestedWireApi {
   param([string]$BaseUrl, [string]$ProviderType)
   if ($ProviderType -eq 'lmstudio') { return 'chat_completions' }
@@ -109,11 +117,15 @@ if (-not $NonInteractive -and $MyInvocation.InvocationName -ne '.') {
     $response = Invoke-WebRequest -UseBasicParsing -Uri $modelsEndpoint -TimeoutSec 10
     if ($response.Headers['Content-Type'] -notmatch 'text/html') { $count = (($response.Content | ConvertFrom-Json).data | Measure-Object).Count; Write-Host "Discovered models: $count" }
   } catch { Write-Host 'Model discovery will run when the configured provider is available.' }
-  while ((Read-Host 'Configure a custom header? (yes/no)').Trim().ToLowerInvariant() -eq 'yes') {
-    $headerName = (Read-Host 'Header name').Trim(); $headerEnv = (Read-Host 'Header value environment variable name').Trim()
-    $secureHeader = Read-Host 'Header value' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureHeader)
-    try { Set-ProviderHeaderMapping -ProviderName $providerId -HeaderName $headerName -HeaderEnvironmentName $headerEnv -ConfigPath $activeConfigPath -SkipEnvironmentUpdate:$SkipEnvironmentUpdate; if (-not $SkipEnvironmentUpdate) { [Environment]::SetEnvironmentVariable($headerEnv, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 'User') } }
-    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+  if (Use-DefaultNoCustomHeader $baseUrl) {
+    Write-Host 'Standard Groq Bearer API Key provider detected; custom headers default to no.'
+  } else {
+    while ((Read-Host 'Configure a custom header? (yes/no)').Trim().ToLowerInvariant() -eq 'yes') {
+      $headerName = (Read-Host 'Header name').Trim(); $headerEnv = (Read-Host 'Header value environment variable name').Trim()
+      $secureHeader = Read-Host 'Header value' -AsSecureString; $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureHeader)
+      try { Set-ProviderHeaderMapping -ProviderName $providerId -HeaderName $headerName -HeaderEnvironmentName $headerEnv -ConfigPath $activeConfigPath -SkipEnvironmentUpdate:$SkipEnvironmentUpdate; if (-not $SkipEnvironmentUpdate) { [Environment]::SetEnvironmentVariable($headerEnv, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 'User') } }
+      finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    }
   }
   if ($SkipEnvironmentUpdate) { Write-Host 'Saved provider metadata to the supplied configuration path. No environment variables were written.' }
   else { Write-Host 'Saved provider metadata and sensitive values to current-user environment variables. No secret was displayed.' }

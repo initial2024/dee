@@ -23,6 +23,31 @@ Assert-True ($source -match 'AutoScaleMode.*Dpi') 'dpi_scaling_is_enabled'
 Assert-True ($source -match 'Router：\{0\}`r`n监听地址：\{1\}') 'status_fields_are_line_separated'
 Assert-True ($source -notmatch '(?i)api[_ -]?key\s*=' -and $source -notmatch '(?i)authorization\s*=') 'ui_does_not_embed_secret_values'
 
+$providerFixture = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-provider-grid-' + [guid]::NewGuid().ToString() + '.json')
+$emptyFixture = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-provider-empty-' + [guid]::NewGuid().ToString() + '.json')
+$badFixture = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-provider-bad-' + [guid]::NewGuid().ToString() + '.json')
+try {
+  [IO.File]::WriteAllText($providerFixture, '{"providers":{"fake-provider":{"display_name":"Fake Provider","type":"openai_compatible","base_url":"https://example.invalid/v1","wire_api":"responses","enabled":true,"api_key_env":"FAKE_KEY_ENV","headers":{"x-header":{"env":"FAKE_HEADER_ENV"}},"models":["model-a"]}}}', (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($emptyFixture, '{"providers":{}}', (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($badFixture, '{not json', (New-Object Text.UTF8Encoding($false)))
+  $fake = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest -ProviderConfigPath $providerFixture 2>&1
+  $empty = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest -ProviderConfigPath $emptyFixture 2>&1
+  $bad = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest -ProviderConfigPath $badFixture 2>&1
+  Assert-True (($fake -join "`n") -match 'PROVIDER_TABLE_ROWS=1') 'provider_refresh_populates_fake_row'
+  Assert-True (($fake -join "`n") -match 'PROVIDER_TABLE_COLUMNS=9') 'provider_table_has_fixed_columns'
+  Assert-True (($empty -join "`n") -match '暂无供应商') 'provider_empty_state_visible'
+  Assert-True (($bad -join "`n") -match '读取供应商列表失败') 'provider_error_state_visible'
+} finally { foreach($path in @($providerFixture,$emptyFixture,$badFixture)){ if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force} } }
+Assert-True ($source -match '请先选择一个供应商') 'no_provider_selection_prompt_is_present'
+Assert-True ($source -match '最近操作日志（已脱敏）' -and $source -match 'Add-ProviderLog') 'provider_tab_redacted_log_is_present'
+Assert-True ($source -match 'Header 名称' -and $source -notmatch 'Header value') 'provider_details_expose_header_names_only'
+Assert-True ($source.Contains("'provider','refresh-models',`$id") -and $source.Contains("'provider','probe-runtime',`$id")) 'model_refresh_and_runtime_probe_actions_are_bound'
+Assert-True ($source -match '供应商元数据解析失败') 'provider_metadata_error_is_surfaced'
+Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
+. (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
+Assert-True (Use-DefaultNoCustomHeader 'https://api.groq.com/openai/v1') 'groq_runtime_default_header_is_no'
+Assert-True (-not (Use-DefaultNoCustomHeader 'https://api.example.com/v1')) 'non_groq_header_choice_remains_available'
+
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-desktop-shortcut-' + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
@@ -33,7 +58,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=16'
+Write-Output 'POWERSHELL_TEST_TOTAL=28'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }
