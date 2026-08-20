@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$DesktopPath = [Environment]::GetFolderPath('Desktop'))
 
 $ErrorActionPreference = 'Stop'
@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $DesktopPath)) { New-Item -ItemType Directory -
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($shortcut)
 $link.TargetPath = (Get-Command powershell.exe).Source
-$link.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $target + '"'
+$link.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $target + '" -FontScale 1.2'
 $link.WorkingDirectory = $root
 $link.IconLocation = $link.TargetPath
 $link.Save()
