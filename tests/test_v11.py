@@ -16,6 +16,7 @@ from codex_ai_router.providers.registry import ModelRegistry
 from codex_ai_router.server import RouterResponsesServer, RouterService, VIRTUAL_MODELS, _bounded_output_tokens, _input_text
 from codex_ai_router.vision import VisionProxy
 from codex_ai_router.codex_status import ChatGPTCodexQuota, CodexAgentAvailability, CodexHarnessState
+from codex_ai_router.providers.runtime_models import RuntimeModelState, text_candidates
 
 
 class FakeLocal:
@@ -125,6 +126,18 @@ class RouterV11Tests(unittest.TestCase):
             self.assertIn("response.completed", raw)
         finally:
             server.stop()
+
+    def test_119_runtime_selection_uses_passed_fastest_text_model_and_cools_timeouts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = RuntimeModelState(Path(temp) / "runtime.json", cooldown_seconds=900)
+            state.record("lightboat-3", "slow", "TIMEOUT", 20, "TIMEOUT")
+            state.record("lightboat-3", "fast", "PASS", 1.2, "HTTP_200")
+            state.record("lightboat-3", "other", "PASS", 2.4, "HTTP_200")
+            self.assertEqual((state.select("lightboat-3", ["slow", "fast", "other"]), state.recent_timeout("lightboat-3", "slow")), ("fast", True))
+
+    def test_120_runtime_text_candidates_exclude_only_explicit_image_names(self):
+        candidates, excluded = text_candidates(["text-unknown", "grok-imagine-image-lite"])
+        self.assertEqual((candidates, excluded), (["text-unknown"], ["grok-imagine-image-lite"]))
 
 
 if __name__ == "__main__":

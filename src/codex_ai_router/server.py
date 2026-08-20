@@ -15,6 +15,7 @@ from .policy import FastLocalGate, FastLocalPolicy
 from .providers import LMStudioProvider, OpenAICompatibleProvider
 from .providers.local_backend import LocalBackend
 from .providers.openai_compatible import ResponsesResponseAdapter
+from .providers.runtime_models import RuntimeModelState, text_candidates
 from .vision import VisionProxy
 
 
@@ -57,11 +58,12 @@ def _has_image(value: object) -> bool:
 
 class RouterService:
     """Secret-free local Responses facade for a Codex custom provider."""
-    def __init__(self, network_mode: NetworkMode = NetworkMode.AUTO, local: object | None = None, fast_local_policy: FastLocalPolicy | None = None):
+    def __init__(self, network_mode: NetworkMode = NetworkMode.AUTO, local: object | None = None, fast_local_policy: FastLocalPolicy | None = None, runtime_models: RuntimeModelState | None = None):
         self.network = NetworkState(network_mode)
         self.local = local or LocalBackend(lmstudio=LMStudioProvider())
         self.fast_local_policy = fast_local_policy or FastLocalPolicy()
         self.vision = VisionProxy()
+        self.runtime_models = runtime_models or RuntimeModelState()
 
     def models(self) -> list[dict]:
         return [{"id": name, "object": "model", "owned_by": "xiaoyu-router"} for name in VIRTUAL_MODELS]
@@ -85,12 +87,11 @@ class RouterService:
         )
         return provider_id, provider
 
-    @staticmethod
-    def _select_text_model(provider: OpenAICompatibleProvider) -> str:
-        candidates = [model for model in provider.candidate_models() if "image" not in model.lower()]
-        selected = next((model for model in candidates if "deepseek" in model.lower()), candidates[0] if candidates else "")
+    def _select_text_model(self, provider: OpenAICompatibleProvider) -> str:
+        candidates, _ = text_candidates(provider.candidate_models())
+        selected = self.runtime_models.select(provider.provider_id, candidates)
         if not selected:
-            raise RuntimeError("NO_ELIGIBLE_MODEL")
+            raise RuntimeError("DOWNSTREAM_UNAVAILABLE")
         return selected
 
     def _local_response(self, prompt: str, virtual_model: str) -> dict:

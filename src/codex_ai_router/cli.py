@@ -15,6 +15,7 @@ from .policy import FastLocalPolicy
 from .network import NetworkMode
 from .server import RouterResponsesServer, RouterService
 from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend
+from .providers.runtime_models import RuntimeModelState, probe_model, text_candidates
 from .handoff import compact_handoff
 from .codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
 
@@ -57,6 +58,7 @@ def main() -> None:
         item = provider_sub.add_parser(action); item.add_argument("id")
     provider_models = provider_sub.add_parser("models"); provider_models.add_argument("id")
     provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("id")
+    provider_probe = provider_sub.add_parser("probe-runtime"); provider_probe.add_argument("id"); provider_probe.add_argument("--all", action="store_true")
     args = parser.parse_args()
     task_policy = SelectionPolicy.from_values(getattr(args, "allow_provider", ()), getattr(args, "deny_provider", ()), getattr(args, "allow_model", ()), getattr(args, "deny_model", ()), getattr(args, "no_api", False), getattr(args, "no_local", False))
     config_data = load_config(args.config) if args.config else {}
@@ -95,8 +97,15 @@ def main() -> None:
                 else:
                     profile_auth = codex_profile_requires_bearer_auth(entry.get("base_url", ""))
                     provider = OpenAICompatibleProvider(entry.get("base_url"), key_env=entry.get("api_key_env", ""), wire_api=entry.get("wire_api", "chat_completions"), requires_bearer_auth=entry.get("requires_bearer_auth", profile_auth), header_env=entry.get("headers", {}), provider_id=args.id, provider_metadata=entry, model_env=entry.get("model_env"))
-            records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
-            emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records]})
+            if args.provider_action == "probe-runtime":
+                records = provider.discover_models(); candidates, excluded = text_candidates([record.model_id for record in records]); state = RuntimeModelState(); results = []
+                for model in candidates:
+                    result = probe_model(provider, model, state); results.append(result)
+                    if result["status"] == "PASS" and not args.all: break
+                emit({"provider": args.id, "text_candidates": candidates, "excluded_models": excluded, "probe_results": results, "selected_runtime_model": state.select(args.id, candidates)})
+            else:
+                records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
+                emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records]})
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
     elif args.command == "serve":
