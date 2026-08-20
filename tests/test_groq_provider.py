@@ -11,6 +11,9 @@ from unittest.mock import patch
 from codex_ai_router import provider_config
 from codex_ai_router.provider_setup import suggested_provider_type
 from codex_ai_router.providers.groq import GroqProvider, classify_groq_error, groq_messages
+from codex_ai_router.providers.base import DiscoveredModel
+from codex_ai_router.providers.model_states import model_state_report
+from codex_ai_router.providers.runtime_models import RuntimeModelState
 
 
 class _Model:
@@ -69,6 +72,33 @@ class GroqProviderTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             provider = GroqProvider(key_env='MISSING_GROQ_KEY')
             self.assertEqual((provider.models(), provider.remote_model_list_status), ([], 'GROQ_AUTH_ERROR'))
+
+    def test_discovered_and_usable_models_are_persisted_for_control_panel(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path, state_path = Path(temp) / 'providers.json', Path(temp) / 'runtime.json'
+            provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','api_key_env':'KEY'}, path)
+            runtime = RuntimeModelState(state_path); runtime.record('groq', 'remote-model', 'PASS', 0.2)
+            records = [DiscoveredModel('groq', 'remote-model', 'remote-model', None, {}, __import__('datetime').datetime.now())]
+            states = model_state_report('groq', provider_config.load(path)['providers']['groq'], records, runtime=runtime)
+            saved = provider_config.record_model_registry('groq', states, 'PASS', path)
+            snapshot = saved['model_registry']
+            self.assertEqual((snapshot['DISCOVERED_MODELS'], snapshot['USABLE_MODELS'], snapshot['CURRENT_RUNTIME_MODEL']), (['remote-model'], ['remote-model'], 'remote-model'))
+
+    def test_runtime_selected_model_is_retained_when_refresh_has_no_remote_models(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path, state_path = Path(temp) / 'providers.json', Path(temp) / 'runtime.json'
+            provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','api_key_env':'KEY'}, path)
+            runtime = RuntimeModelState(state_path); runtime.record('groq', 'runtime-only', 'PASS', 0.1)
+            states = model_state_report('groq', provider_config.load(path)['providers']['groq'], [], runtime=runtime)
+            saved = provider_config.record_model_registry('groq', states, 'GROQ_AUTH_ERROR', path)
+            self.assertEqual((saved['model_registry']['DISCOVERED_MODELS'], saved['model_registry']['SOURCES']['runtime-only']), (['runtime-only'], 'RUNTIME_PROBE'))
+
+    def test_failed_refresh_does_not_clear_previous_discovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','api_key_env':'KEY'}, path)
+            provider_config.record_discovery('groq', ['old-model'], 'PASS', path)
+            self.assertEqual(provider_config.record_discovery('groq', [], 'GROQ_AUTH_ERROR', path)['last_discovery_models'], ['old-model'])
 
 
 if __name__ == '__main__': unittest.main()

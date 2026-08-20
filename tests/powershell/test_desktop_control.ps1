@@ -43,6 +43,8 @@ Assert-True ($source -match '最近操作日志（已脱敏）' -and $source -ma
 Assert-True ($source -match 'Header 名称' -and $source -notmatch 'Header value') 'provider_details_expose_header_names_only'
 Assert-True ($source.Contains("'provider','refresh-models',`$id") -and $source.Contains("'provider','probe-runtime',`$id")) 'model_refresh_and_runtime_probe_actions_are_bound'
 Assert-True ($source -match '供应商元数据解析失败') 'provider_metadata_error_is_surfaced'
+Assert-True ($source -match 'model_registry' -and $source -match '发现模型数' -and $source -match '可用模型数') 'control_panel_model_counts_use_registry_snapshot'
+Assert-True ($source -match '可用模型：' -and $source -match '运行可用模型：' -and $source -match '当前运行模型：') 'provider_details_show_model_state_buckets'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
 . (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
 Assert-True (Use-DefaultNoCustomHeader 'https://api.groq.com/openai/v1') 'groq_runtime_default_header_is_no'
@@ -59,7 +61,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=29'
+Write-Output 'POWERSHELL_TEST_TOTAL=31'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }

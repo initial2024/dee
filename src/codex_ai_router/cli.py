@@ -129,12 +129,13 @@ def main() -> None:
                     result = probe_model(provider, model, state); results.append(result)
                     if result["status"] == "PASS" and not args.all: break
                 states = model_state_report(args.id, entry if args.id != "local" else {}, records, policy, state)
+                if args.id != "local": provider_config.record_model_registry(args.id, states, getattr(provider, "remote_model_list_status", "UNKNOWN"))
                 emit({"provider": args.id, "text_candidates": candidates, "excluded_models": excluded, "probe_results": results, **states})
             else:
                 records = provider.refresh_models() if args.provider_action == "refresh-models" else provider.discover_models()
                 states = model_state_report(args.id, entry if args.id != "local" else {}, records, policy, RuntimeModelState())
                 if args.provider_action == "refresh-models" and args.id != "local":
-                    provider_config.record_discovery(args.id, states["DISCOVERED_MODELS"], getattr(provider, "remote_model_list_status", "UNKNOWN"))
+                    provider_config.record_model_registry(args.id, states, getattr(provider, "remote_model_list_status", "UNKNOWN"))
                 payload = {"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records], **states}
                 if args.id != "local": payload["diagnostic"] = provider_diagnostic(args.id, entry, payload["REMOTE_MODEL_LIST_STATUS"])
                 emit(payload)

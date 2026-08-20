@@ -33,7 +33,7 @@ def _read(target: Path) -> dict:
 def _safe_legacy_provider(provider_id: str, value: object) -> dict | None:
     if not VALID_ID.fullmatch(provider_id) or not isinstance(value, dict): return None
     if value.get("type") not in VALID_TYPES or not isinstance(value.get("base_url"), str) or not value["base_url"].strip(): return None
-    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode", "requires_bearer_auth", "inference_auth_style", "model_env", "request_timeout", "responses_token_limit_field", "model_discovery_endpoint", "model_discovery_method", "model_discovery_auth_style", "model_discovery_headers", "model_discovery_query", "model_discovery_body", "model_discovery_validate_candidates", "allowed_model_seeds", "preferred_model", "model_policy", "last_discovery_status", "last_discovery_models"}
+    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode", "requires_bearer_auth", "inference_auth_style", "model_env", "request_timeout", "responses_token_limit_field", "model_discovery_endpoint", "model_discovery_method", "model_discovery_auth_style", "model_discovery_headers", "model_discovery_query", "model_discovery_body", "model_discovery_validate_candidates", "allowed_model_seeds", "preferred_model", "model_policy", "last_discovery_status", "last_discovery_models", "model_registry"}
     record = {key: value[key] for key in allowed if key in value}
     headers = record.get("headers", {})
     if not isinstance(headers, dict) or not all(isinstance(name, str) and isinstance(env_name, str) for name, env_name in headers.items()): return None
@@ -112,8 +112,49 @@ def record_discovery(provider_id: str, models: list[str], status: str, path: Pat
     data = load(path)
     if provider_id not in data["providers"]: raise KeyError("provider not found")
     provider = data["providers"][provider_id]
-    provider["last_discovery_models"] = [model for model in models if isinstance(model, str)]
+    # A transient authentication/permission failure must not erase a previously
+    # successful remote catalogue.  It is still recorded as the latest status.
+    if models:
+        provider["last_discovery_models"] = [model for model in models if isinstance(model, str)]
     provider["last_discovery_status"] = status
+    save(data, path)
+    return provider
+
+
+def record_model_registry(provider_id: str, states: dict, discovery_status: str, path: Path | None = None) -> dict:
+    """Persist a secret-free, unified model snapshot for the CLI and control panel."""
+    data = load(path)
+    if provider_id not in data["providers"]: raise KeyError("provider not found")
+    provider = data["providers"][provider_id]
+    previous = provider.get("model_registry", {}) if isinstance(provider.get("model_registry"), dict) else {}
+    previous_discovered = previous.get("DISCOVERED_MODELS", provider.get("last_discovery_models", []))
+    discovered = list(states.get("DISCOVERED_MODELS", []))
+    if not discovered and isinstance(previous_discovered, list): discovered = list(previous_discovered)
+    runtime = list(states.get("RUNTIME_RESPONSIVE_MODELS", []))
+    for model in runtime:
+        if model not in discovered: discovered.append(model)
+    sources = dict(previous.get("SOURCES", {})) if isinstance(previous.get("SOURCES"), dict) else {}
+    for model in runtime:
+        sources.setdefault(model, "RUNTIME_PROBE")
+    if states.get("DISCOVERED_MODELS"):
+        for model in states["DISCOVERED_MODELS"]: sources[model] = sources.get(model, "REMOTE_MODEL_LIST")
+    seeds = provider.get("allowed_model_seeds", []) if isinstance(provider.get("allowed_model_seeds"), list) else []
+    allowed = [model for model in discovered if (not seeds or model in seeds)]
+    denied = [model for model in discovered if model not in allowed]
+    usable = list(allowed)
+    snapshot = {
+        "DISCOVERED_MODELS": discovered,
+        "USABLE_MODELS": usable,
+        "ALLOWED_MODELS": allowed,
+        "DENIED_MODELS": denied,
+        "RUNTIME_RESPONSIVE_MODELS": runtime,
+        "TIMEOUT_COOLDOWN_MODELS": list(states.get("TIMEOUT_COOLDOWN_MODELS", [])),
+        "CURRENT_RUNTIME_MODEL": states.get("CURRENT_RUNTIME_MODEL"),
+        "SOURCES": sources,
+    }
+    provider["model_registry"] = snapshot
+    if discovered: provider["last_discovery_models"] = discovered
+    provider["last_discovery_status"] = discovery_status
     save(data, path)
     return provider
 
