@@ -33,7 +33,7 @@ def _read(target: Path) -> dict:
 def _safe_legacy_provider(provider_id: str, value: object) -> dict | None:
     if not VALID_ID.fullmatch(provider_id) or not isinstance(value, dict): return None
     if value.get("type") not in VALID_TYPES or not isinstance(value.get("base_url"), str) or not value["base_url"].strip(): return None
-    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode"}
+    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode", "requires_bearer_auth", "inference_auth_style", "model_env", "request_timeout", "model_discovery_endpoint", "model_discovery_method", "model_discovery_auth_style", "model_discovery_headers", "model_discovery_query", "model_discovery_body", "model_discovery_validate_candidates"}
     record = {key: value[key] for key in allowed if key in value}
     headers = record.get("headers", {})
     if not isinstance(headers, dict) or not all(isinstance(name, str) and isinstance(env_name, str) for name, env_name in headers.items()): return None

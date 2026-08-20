@@ -12,6 +12,11 @@ from .providers import LMStudioProvider, OpenAICompatibleProvider
 from .provider_setup import default_display_name, suggested_provider_id, suggested_provider_type
 from .providers.model_discovery import codex_profile_requires_bearer_auth
 from .policy import FastLocalPolicy
+from .network import NetworkMode
+from .server import RouterResponsesServer, RouterService
+from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend
+from .handoff import compact_handoff
+from .codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -31,6 +36,7 @@ def add_policy_args(command):
 def main() -> None:
     parser = argparse.ArgumentParser(prog="xiaoyu-router")
     parser.add_argument("--config", type=Path, help="optional policy/config YAML")
+    parser.add_argument("--offline", action="store_true", help="disable every external API request for this invocation")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("doctor", "status", "models"):
         sub.add_parser(name)
@@ -39,6 +45,9 @@ def main() -> None:
     delegate = sub.add_parser("delegate"); delegate.add_argument("--mode", choices=[m.value for m in Mode]); add_policy_args(delegate); delegate.add_argument("task")
     auto = sub.add_parser("auto"); add_policy_args(auto); auto.add_argument("task")
     review = sub.add_parser("review"); review.add_argument("path")
+    serve = sub.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=18789); serve.add_argument("--gguf-dir", action="append", default=[]); serve.add_argument("--managed-gguf", help="optional discovered GGUF id to start persistently")
+    handoff = sub.add_parser("handoff"); handoff.add_argument("task"); handoff.add_argument("--tests", default="NOT_RUN"); handoff.add_argument("--blockers", default="NONE"); handoff.add_argument("--constraints", default="")
+    codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
     config = sub.add_parser("config"); config.add_argument("action", choices=("show",))
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
@@ -90,6 +99,20 @@ def main() -> None:
             emit({"provider": args.id, "MODEL_DISCOVERY_SUPPORTED": getattr(provider, "model_discovery_supported", "YES"), "REMOTE_MODEL_LIST_STATUS": getattr(provider, "remote_model_list_status", "NOT_APPLICABLE"), "models": [{"id": record.model_id, "owned_by": record.owned_by, "availability": record.availability, "source": (record.raw_metadata or {}).get("source"), "validation": (record.raw_metadata or {}).get("validation")} for record in records]})
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
+    elif args.command == "serve":
+        mode = NetworkMode.OFFLINE if args.offline else NetworkMode.AUTO
+        configured_dirs = config_data.get("local", {}).get("model_directories", []) if isinstance(config_data.get("local", {}), dict) else []
+        managed = ManagedLlamaCppBackend([Path(path) for path in [*configured_dirs, *args.gguf_dir]])
+        if args.managed_gguf:
+            selected = next((model for model in managed.discover() if model.model_id == args.managed_gguf), None)
+            if not selected: raise SystemExit("MANAGED_GGUF_NOT_FOUND")
+            managed.start(selected)
+        server = RouterResponsesServer(RouterService(mode, local=LocalBackend(managed=managed), fast_local_policy=FastLocalPolicy.from_config(config_data)), args.host, args.port)
+        print(json.dumps({"ROUTER_RESPONSES_SERVER": "RUNNING", "ROUTER_LISTEN_ADDRESS": f"http://{args.host}:{args.port}/v1", "LOCALHOST_ONLY": "YES", "NETWORK_MODE": mode.value}))
+        server.serve_forever()
+    elif args.command == "handoff": emit(compact_handoff(Path.cwd(), args.task, args.tests, args.blockers, args.constraints))
+    elif args.command == "codex-provider":
+        emit(install_xiaoyu_router_provider(port=args.port) if args.action == "install" else {"SAME_THREAD_PROVIDER_SWITCH": same_thread_provider_switch_support()})
     else: emit({"config_example": str(Path(__file__).parents[2] / "config" / "config.example.yaml"), "api_key_env": "XIAOYU_CODER_API_KEY"})
 
 

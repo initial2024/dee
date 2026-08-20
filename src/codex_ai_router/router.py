@@ -17,6 +17,7 @@ from .result import AgentResult
 from .task import Mode, Task
 from .model_policy import SelectionPolicy
 from .orchestration.sequential import api_local
+from .codex_status import CodexHarnessState
 
 
 @dataclass
@@ -44,7 +45,7 @@ class Router:
     def status(self) -> dict:
         local_models = self.provider_models("local")[1]
         api_models = self.provider_models("api")[1]
-        return {"LOCAL_AVAILABLE": "YES" if local_models else "NO", "API_CONFIGURED": "YES" if api_models else "NO", "MULTI_AGENT_SHARED_WRITE_TREE": "NO", "DEFAULT_MODE": "AUTO_TRIAD", "CODEX_BUDGET_MODE": os.getenv("CODEX_BUDGET_MODE", "SAVE"), "EXTERNAL_API_ALLOWED": "YES" if self.selection_policy.providers.permits("api") else "NO"}
+        return {"LOCAL_AVAILABLE": "YES" if local_models else "NO", "API_CONFIGURED": "YES" if api_models else "NO", "MULTI_AGENT_SHARED_WRITE_TREE": "NO", "DEFAULT_MODE": "AUTO_TRIAD", "CODEX_BUDGET_MODE": os.getenv("CODEX_BUDGET_MODE", "SAVE"), "EXTERNAL_API_ALLOWED": "YES" if self.selection_policy.providers.permits("api") else "NO", **CodexHarnessState().as_dict()}
 
     def route(self, prompt: str, requested: Mode | None = None) -> dict:
         category, risk = classify(prompt)

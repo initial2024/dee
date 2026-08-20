@@ -5,7 +5,9 @@ from .base import DiscoveredModel
 
 class ModelRegistry:
     """In-memory unified model pool; provider discovery remains authoritative."""
-    def __init__(self): self._models: dict[str, DiscoveredModel] = {}; self._capabilities: dict[str, set[str]] = {}
+    CAPABILITIES = ("TEXT", "VISION", "TOOL_CALLING", "STRUCTURED_OUTPUT", "REASONING", "CODING", "CONTEXT_WINDOW", "COST_CLASS")
+
+    def __init__(self): self._models: dict[str, DiscoveredModel] = {}; self._capabilities: dict[str, set[str]] = {}; self._profiles: dict[str, dict[str, str]] = {}
 
     def update(self, provider_id: str, models: list[DiscoveredModel]) -> None:
         active = {model.qualified_id for model in models}
@@ -18,6 +20,13 @@ class ModelRegistry:
 
     def set_capabilities(self, qualified_id: str, capabilities: set[str]) -> None:
         self._capabilities[qualified_id] = set(capabilities)
+        profile = {capability: "UNKNOWN" for capability in self.CAPABILITIES}
+        for capability in capabilities:
+            if capability in profile: profile[capability] = "YES"
+        self._profiles[qualified_id] = profile
 
     def capabilities(self, qualified_id: str) -> set[str]:
         return set(self._capabilities.get(qualified_id, {"TEXT"}))
+
+    def capability_profile(self, qualified_id: str) -> dict[str, str]:
+        return dict(self._profiles.get(qualified_id, {capability: "UNKNOWN" for capability in self.CAPABILITIES}))
