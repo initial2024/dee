@@ -11,8 +11,11 @@ Assert-True ($text -match 'CODEX_STATUS_VISIBLE=YES') 'desktop_control_codex_sta
 Assert-True ($text -match 'PROVIDER_LIST_VISIBLE=YES') 'desktop_control_provider_list_visible'
 Assert-True ($text -match 'USAGE_GUARD_VISIBLE=YES') 'desktop_control_usage_guard_visible'
 Assert-True ($text -match 'SECRET_VALUES_VISIBLE=NO') 'desktop_control_hides_secret_values'
+  $ui = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest 2>&1
+  Assert-True (($ui -join "`n") -match 'CONTROL_UI_INITIALIZATION=PASS') 'desktop_control_initializes_without_home_variable_error'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Official remaining quota: open the official Usage panel') 'official_quota_not_faked'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Router Direct Smoke') 'safe_router_smoke_button_present'
+Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Use OpenAI Luna \(low\)') 'desktop_control_exposes_light_openai_profile'
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-desktop-shortcut-' + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $temp | Out-Null
@@ -23,7 +26,7 @@ try {
   Assert-True ($null -ne $shortcut) 'shortcut_created'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=8'
+Write-Output 'POWERSHELL_TEST_TOTAL=10'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }

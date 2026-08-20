@@ -42,7 +42,7 @@ foreach ($line in $source) {
 if (-not $providerId) { throw 'No Xiaoyu Router provider pointing at the configured localhost URL was found.' }
 
 $statePath = Join-Path (Split-Path -Parent $ConfigPath) 'xiaoyu-router-switch-state.json'
-$state = @{ provider_id = (Get-TopLevelValue $source 'model_provider'); model = (Get-TopLevelValue $source 'model'); reasoning_effort = (Get-TopLevelValue $source 'reasoning_effort') }
+$state = @{ provider_id = (Get-TopLevelValue $source 'model_provider'); model = (Get-TopLevelValue $source 'model'); model_reasoning_effort = (Get-TopLevelValue $source 'model_reasoning_effort'); reasoning_effort = (Get-TopLevelValue $source 'reasoning_effort') }
 [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
 Copy-Item -LiteralPath $ConfigPath -Destination ($ConfigPath + '.xiaoyu-router.bak') -Force
 $lines = [System.Collections.Generic.List[string]]::new([string[]]$source)

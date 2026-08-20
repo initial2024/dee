@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([switch]$NoShow)
+param(
+    [switch]$NoShow,
+    [switch]$SelfTest
+)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -73,9 +76,9 @@ if ($NoShow) {
 
 $form = New-Object System.Windows.Forms.Form; $form.Text = 'Xiaoyu Router Control Panel'; $form.Size = New-Object System.Drawing.Size(1120,700); $form.StartPosition = 'CenterScreen'
 $tabs = New-Object System.Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $form.Controls.Add($tabs)
-$home = New-Object System.Windows.Forms.TabPage('Home'); $providersTab = New-Object System.Windows.Forms.TabPage('Providers'); $usageTab = New-Object System.Windows.Forms.TabPage('Usage Guard'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('Diagnostics'); [void]$tabs.TabPages.AddRange(@($home,$providersTab,$usageTab,$diagnosticsTab))
-$statusBox = New-Object System.Windows.Forms.TextBox; $statusBox.Multiline = $true; $statusBox.ReadOnly = $true; $statusBox.Dock = 'Top'; $statusBox.Height = 150; $home.Controls.Add($statusBox)
-$homeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeButtons.Dock = 'Top'; $homeButtons.Top = 155; $homeButtons.Height = 42; $home.Controls.Add($homeButtons)
+$homeTab = New-Object System.Windows.Forms.TabPage('Home'); $providersTab = New-Object System.Windows.Forms.TabPage('Providers'); $usageTab = New-Object System.Windows.Forms.TabPage('Usage Guard'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('Diagnostics'); [void]$tabs.TabPages.AddRange(@($homeTab,$providersTab,$usageTab,$diagnosticsTab))
+$statusBox = New-Object System.Windows.Forms.TextBox; $statusBox.Multiline = $true; $statusBox.ReadOnly = $true; $statusBox.Dock = 'Top'; $statusBox.Height = 150; $homeTab.Controls.Add($statusBox)
+$homeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeButtons.Dock = 'Top'; $homeButtons.Top = 155; $homeButtons.Height = 42; $homeTab.Controls.Add($homeButtons)
 $grid = New-Object System.Windows.Forms.DataGridView; $grid.Dock = 'Fill'; $grid.ReadOnly = $true; $grid.AutoSizeColumnsMode = 'Fill'; $providersTab.Controls.Add($grid)
 $providerButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $providerButtons.Dock = 'Top'; $providerButtons.Height = 42; $providersTab.Controls.Add($providerButtons)
 $usageText = New-Object System.Windows.Forms.TextBox; $usageText.Multiline = $true; $usageText.ReadOnly = $true; $usageText.Dock = 'Fill'; $usageTab.Controls.Add($usageText)
@@ -86,7 +89,7 @@ function Selected-Provider { if ($grid.CurrentRow) { return [string]$grid.Curren
 function Refresh-Usage {
     $summary = Get-UsageSummary; $codex = Get-CodexStatus
     if ($codex.provider -eq 'XiaoyuRouter') { $warning = 'Inference is routed through XiaoyuRouter first. This is not an official quota conclusion.' } elseif ($summary.openai -ge 5) { $warning = 'Current activity may consume Codex quota quickly. Switch to XiaoyuRouter if appropriate.' } else { $warning = 'Current provider may consume official Codex inference quota.' }
-    $usageText.Text = ("Official remaining quota: open the official Usage panel. This console never fabricates a quota balance.`n`nLocal estimate, not official quota:`nToday tasks: {0}`nWeek tasks: {1}`nOpenAI Provider tasks: {2}`nXiaoyuRouter tasks: {3}`nLightboat tasks: {4}`nLocal tasks: {5}`nFailures/timeouts: {6}`n`n{7}`n`nRouting guidance: short low-risk tasks -> XiaoyuRouter/Local; medium coding -> XiaoyuRouter API; complex or high-risk -> OpenAI Codex or strong API plus review." -f $summary.today,$summary.week,$summary.openai,$summary.xiaoyu,$summary.lightboat,$summary.local,$summary.failed,$warning)
+    $usageText.Text = ("Official remaining quota: open the official Usage panel. This console never fabricates a quota balance.`n`nLocal estimate, not official quota:`nToday tasks: {0}`nWeek tasks: {1}`nOpenAI Provider tasks: {2}`nXiaoyuRouter tasks: {3}`nLightboat tasks: {4}`nLocal tasks: {5}`nFailures/timeouts: {6}`n`n{7}`n`nOpenAI light test profile: gpt-5.6-luna with low reasoning, for smoke tests only. Do not use it as the default for complex or high-risk work.`n`nRouting guidance: short low-risk tasks -> XiaoyuRouter/Local; medium coding -> XiaoyuRouter API; complex or high-risk -> stronger OpenAI Codex or strong API plus review." -f $summary.today,$summary.week,$summary.openai,$summary.xiaoyu,$summary.lightboat,$summary.local,$summary.failed,$warning)
 }
 function Refresh-Home { $router = Get-RouterStatus; $codex = Get-CodexStatus; $statusBox.Text = ("Router: {0}`nListen: {1}`nLocalhost only: YES`nNetwork mode: {2}`nCodex provider: {3}`nCodex model: {4}`nXiaoyuRouter installed: {5}" -f $(if ($router.running) { 'RUNNING' } else { 'STOPPED' }),$router.address,$router.mode,$codex.provider,$codex.model,$codex.xiaoyu); $diagnosticsText.Text = Redact-Text ((Get-ProviderRows | Format-Table -AutoSize | Out-String) + "`n" + $statusBox.Text); Refresh-Providers; Refresh-Usage }
 function Add-HomeButton([string]$Caption,[scriptblock]$Action) { $button = New-Object System.Windows.Forms.Button; $button.Text = $Caption; $button.Width = 140; $button.Height = 32; $button.Add_Click($Action); [void]$homeButtons.Controls.Add($button) }
@@ -96,7 +99,7 @@ Add-HomeButton 'Stop Router' { Stop-Router; Refresh-Home }
 Add-HomeButton 'Restart Router' { Stop-Router; Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
 Add-HomeButton 'Router Models' { [System.Windows.Forms.MessageBox]::Show(((Get-RouterStatus).models | ConvertTo-Json -Depth 5),'Router models') }
 Add-HomeButton 'Use XiaoyuRouter' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'use-xiaoyu-codex.ps1'); Add-UsageRecord @{ active_provider='XiaoyuRouter'; active_model='xiaoyu-lightboat'; router_virtual_model='xiaoyu-lightboat'; task_mode='switch'; success=$true; estimated_route='lightboat'; remote_provider_used='YES'; local_provider_used='NO' }; Refresh-Home }
-Add-HomeButton 'Use OpenAI Codex' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'use-openai-codex.ps1'); Refresh-Home }
+Add-HomeButton 'Use OpenAI Luna (low)' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'use-openai-codex.ps1'); Refresh-Home }
 Add-HomeButton 'Read-only check' { $router = Get-RouterStatus; $codex = Get-CodexStatus; [System.Windows.Forms.MessageBox]::Show(("Router running: {0}`nActive provider: {1}`nActive model: {2}" -f $router.running,$codex.provider,$codex.model),'Read-only check') }
 Add-HomeButton 'Router Direct Smoke' { $smoke = Invoke-RouterDirectSmoke; Add-UsageRecord @{ active_provider = (Get-CodexStatus).provider; active_model = (Get-CodexStatus).model; router_virtual_model = 'xiaoyu-lightboat'; task_mode = 'safe_smoke'; duration_seconds = $smoke.seconds; success = $smoke.success; error_code = $smoke.error_code; estimated_route = 'lightboat'; remote_provider_used = 'YES'; local_provider_used = 'NO' }; [System.Windows.Forms.MessageBox]::Show(("Status: {0}`nDuration seconds: {1}`nResponse content is intentionally not logged." -f $smoke.status,$smoke.seconds),'Router direct smoke'); Refresh-Usage }
 Add-ProviderButton 'Add Provider' { Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'configure-provider.ps1') + '"') }
@@ -111,5 +114,6 @@ function Add-UsageButton([string]$Caption,[scriptblock]$Action) { $button = New-
 Add-UsageButton 'Open Codex Usage' { Start-Process 'https://chatgpt.com/#settings'; [System.Windows.Forms.MessageBox]::Show('Open Codex Settings then Usage to see official quota information.','Official Usage') }
 Add-UsageButton 'Save quota mode' { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'use-xiaoyu-codex.ps1'); Refresh-Home }
 Add-UsageButton 'Refresh local trends' { Refresh-Usage }
+if ($SelfTest) { Write-Output 'CONTROL_UI_INITIALIZATION=PASS'; exit 0 }
 $form.Add_Shown({ Refresh-Home })
 [void]$form.ShowDialog()

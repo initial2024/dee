@@ -17,12 +17,13 @@ try {
   Assert-True (Test-Path -LiteralPath ($config + '.xiaoyu-router.bak')) 'backup_created'
   $restore = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\use-openai-codex.ps1') -ConfigPath $config 2>&1
   $restored = Get-Content -LiteralPath $config -Raw -Encoding UTF8
-  Assert-True (($restore -join "`n") -match 'ACTIVE_MODEL=openai-existing') 'restore_recovers_model'
-  Assert-True ($restored -match '(?m)^model = "openai-existing"') 'restore_sets_original_model'
+  Assert-True (($restore -join "`n") -match 'ACTIVE_MODEL=gpt-5.6-luna') 'restore_uses_light_test_model'
+  Assert-True ($restored -match '(?m)^model = "gpt-5.6-luna"') 'restore_sets_light_test_model'
+  Assert-True ($restored -match '(?m)^model_reasoning_effort = "low"') 'restore_sets_light_test_reasoning'
   Assert-True ($restored -notmatch '(?m)^model_provider =') 'restore_removes_absent_original_provider'
   Assert-True ($restored -match '\[model_providers\.XiaoyuRouter\]') 'restore_keeps_xiaoyu_provider'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
-Write-Output 'POWERSHELL_TEST_TOTAL=9'
+Write-Output 'POWERSHELL_TEST_TOTAL=10'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }
