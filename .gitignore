@@ -6,3 +6,4 @@ build/
 .env
 .ai-worktrees/
 reports/*.runtime.json
+.codex-ai-router/

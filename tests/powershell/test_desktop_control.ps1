@@ -15,7 +15,7 @@ Assert-True ($text -match 'SECRET_VALUES_VISIBLE=NO') 'desktop_control_hides_sec
   Assert-True (($ui -join "`n") -match 'CONTROL_UI_INITIALIZATION=PASS') 'desktop_control_initializes_without_home_variable_error'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Official remaining quota: open the official Usage panel') 'official_quota_not_faked'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Router Direct Smoke') 'safe_router_smoke_button_present'
-Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Use OpenAI Luna \(low\)') 'desktop_control_exposes_light_openai_profile'
+Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'OpenAI \+ Handoff') 'desktop_control_exposes_handoff_openai_profile'
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-desktop-shortcut-' + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $temp | Out-Null

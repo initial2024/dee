@@ -2,7 +2,7 @@
 param(
   [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex\config.toml'),
   [string]$TestModel = 'gpt-5.6-luna',
-  [ValidateSet('low','light')]
+  [ValidateSet('low','medium','high','light')]
   [string]$TestReasoning = 'low'
 )
 

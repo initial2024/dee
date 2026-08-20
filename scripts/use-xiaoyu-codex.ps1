@@ -47,8 +47,9 @@ $state = @{ provider_id = (Get-TopLevelValue $source 'model_provider'); model = 
 Copy-Item -LiteralPath $ConfigPath -Destination ($ConfigPath + '.xiaoyu-router.bak') -Force
 $lines = [System.Collections.Generic.List[string]]::new([string[]]$source)
 Set-TopLevelString $lines 'model_provider' $providerId
-Set-TopLevelString $lines 'model' 'xiaoyu-lightboat'
+Set-TopLevelString $lines 'model' 'xiaoyu-auto'
 Save-Utf8Atomic $ConfigPath $lines
 Write-Output ('ACTIVE_PROVIDER=' + $providerId)
-Write-Output 'ACTIVE_MODEL=xiaoyu-lightboat'
+Write-Output 'ACTIVE_MODEL=xiaoyu-auto'
+Write-Output 'CODEX_OUTER_MODEL_STABLE=YES'
 Write-Output 'CONFIG_WRITE_ATOMIC=YES'

@@ -12,7 +12,7 @@ try {
   $active = Get-Content -LiteralPath $config -Raw -Encoding UTF8
   Assert-True (($activate -join "`n") -match 'ACTIVE_PROVIDER=XiaoyuRouter') 'switch_detects_real_provider_id'
   Assert-True ($active -match '(?m)^model_provider = "XiaoyuRouter"') 'switch_sets_provider'
-  Assert-True ($active -match '(?m)^model = "xiaoyu-lightboat"') 'switch_sets_virtual_model'
+  Assert-True ($active -match '(?m)^model = "xiaoyu-auto"') 'switch_sets_stable_outer_model'
   Assert-True ($active -match '\[model_providers\.XiaoyuRouter\]') 'switch_preserves_provider_sections'
   Assert-True (Test-Path -LiteralPath ($config + '.xiaoyu-router.bak')) 'backup_created'
   $restore = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'scripts\use-openai-codex.ps1') -ConfigPath $config 2>&1
