@@ -17,6 +17,7 @@ from codex_ai_router.server import RouterResponsesServer, RouterService, VIRTUAL
 from codex_ai_router.vision import VisionProxy
 from codex_ai_router.codex_status import ChatGPTCodexQuota, CodexAgentAvailability, CodexHarnessState
 from codex_ai_router.providers.runtime_models import RuntimeModelState, text_candidates
+from codex_ai_router.accounting.usage_ledger import UsageLedger, provider_usage_warning
 
 
 class FakeLocal:
@@ -138,6 +139,17 @@ class RouterV11Tests(unittest.TestCase):
     def test_120_runtime_text_candidates_exclude_only_explicit_image_names(self):
         candidates, excluded = text_candidates(["text-unknown", "grok-imagine-image-lite"])
         self.assertEqual((candidates, excluded), (["text-unknown"], ["grok-imagine-image-lite"]))
+
+    def test_121_usage_ledger_never_stores_prompt_or_secret(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = UsageLedger(Path(temp) / "usage.jsonl")
+            record = ledger.append({"active_provider": "XiaoyuRouter", "active_model": "xiaoyu-lightboat", "success": True, "error_code": "Bearer fake", "prompt": "must not persist"})
+            raw = ledger.path.read_text(encoding="utf-8")
+            self.assertNotIn("prompt", record); self.assertNotIn("fake", raw); self.assertNotIn("must not persist", raw)
+
+    def test_122_usage_warning_does_not_fake_quota(self):
+        self.assertIn("may consume", provider_usage_warning("OpenAI", 5))
+        self.assertIn("not an official quota", provider_usage_warning("XiaoyuRouter"))
 
 
 if __name__ == "__main__":
