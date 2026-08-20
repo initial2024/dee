@@ -23,7 +23,8 @@ def model_state_report(provider_id: str, metadata: dict, records: list[Discovere
     candidates = _unique([*discovered, *seeds])
     provider_permitted = bool(metadata.get("enabled", True)) and policy.providers.permits(provider_id)
     usable = candidates if provider_permitted else []
-    allowed = [model for model in usable if (not seeds or model in seeds) and policy.models.permits(provider_id, model)]
+    denied_metadata = set(metadata.get("denied_model_ids", [])) if isinstance(metadata.get("denied_model_ids"), list) else set()
+    allowed = [model for model in usable if (not seeds or model in seeds) and model not in denied_metadata and policy.models.permits(provider_id, model)]
     denied = [model for model in candidates if model not in allowed]
     runtime = runtime or RuntimeModelState()
     runtime_records = runtime.data.get("providers", {}).get(provider_id, {})
@@ -31,15 +32,15 @@ def model_state_report(provider_id: str, metadata: dict, records: list[Discovere
     for model in runtime_passed:
         if model not in discovered: discovered.append(model)
     usable = _unique([*usable, *runtime_passed]) if provider_permitted else []
-    allowed = [model for model in usable if (not seeds or model in seeds) and policy.models.permits(provider_id, model)]
+    allowed = [model for model in usable if (not seeds or model in seeds) and model not in denied_metadata and policy.models.permits(provider_id, model)]
     # Runtime-probed models are usable unless an explicit deny exists.  This
     # handles a model selected before a remote list was cached.
-    allowed += [model for model in runtime_passed if model not in allowed and policy.models.permits(provider_id, model)]
+    allowed += [model for model in runtime_passed if model not in allowed and model not in denied_metadata and policy.models.permits(provider_id, model)]
     denied = [model for model in discovered if model not in allowed]
     responsive = [model for model in allowed if model in runtime_passed]
     cooldown = [model for model in allowed if runtime.recent_timeout(provider_id, model)]
     selected = runtime.select(provider_id, responsive)
-    preferred = metadata.get("preferred_model")
+    preferred = metadata.get("preferred_runtime_model", metadata.get("preferred_model"))
     if isinstance(preferred, str) and preferred in responsive and not runtime.recent_timeout(provider_id, preferred):
         selected = preferred
     report = {

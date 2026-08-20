@@ -22,6 +22,9 @@ from .vision import VisionProxy
 VIRTUAL_MODELS = ("xiaoyu-auto", "xiaoyu-local", "xiaoyu-api-auto", "xiaoyu-api-local", "xiaoyu-lightboat")
 
 
+def provider_virtual_model(provider_id: str) -> str: return "xiaoyu-api-" + provider_id
+
+
 def _input_text(value: object) -> str:
     if isinstance(value, str):
         return value
@@ -66,17 +69,34 @@ class RouterService:
         self.runtime_models = runtime_models or RuntimeModelState()
 
     def models(self) -> list[dict]:
-        return [{"id": name, "object": "model", "owned_by": "xiaoyu-router"} for name in VIRTUAL_MODELS]
+        names = [*VIRTUAL_MODELS, *(provider_virtual_model(provider_id) for provider_id, _ in self._provider_entries())]
+        return [{"id": name, "object": "model", "owned_by": "xiaoyu-router"} for name in names]
 
     def _provider_entries(self) -> list[tuple[str, dict]]:
         records = provider_config.load().get("providers", {})
         values = [(key, value) for key, value in records.items() if isinstance(value, dict) and value.get("enabled", True) and value.get("type") in {"openai_compatible", "custom_openai_compatible", "groq"}]
         return sorted(values, key=lambda item: int(item[1].get("priority", 100)))
 
-    def _api_provider(self, requested: str) -> tuple[str, object]:
+    def _metadata_candidates(self, entry: dict) -> list[str]:
+        snapshot = entry.get("model_registry", {}) if isinstance(entry.get("model_registry"), dict) else {}
+        values = snapshot.get("ALLOWED_MODELS", snapshot.get("USABLE_MODELS", entry.get("last_discovery_models", [])))
+        return [model for model in values if isinstance(model, str)] if isinstance(values, list) else []
+
+    def _api_provider(self, requested: str) -> tuple[str, object, dict]:
         entries = self._provider_entries()
         if requested == "xiaoyu-lightboat":
             entries = [item for item in entries if item[0].startswith("lightboat")]
+        elif requested.startswith("xiaoyu-api-") and requested != "xiaoyu-api-auto":
+            provider_id = requested.removeprefix("xiaoyu-api-")
+            entries = [item for item in entries if item[0] == provider_id]
+        elif requested == "xiaoyu-api-auto":
+            ranked: list[tuple[float, str, dict]] = []
+            for provider_id, entry in entries:
+                selected = self._select_text_model_for_entry(provider_id, entry)
+                if selected:
+                    elapsed = self.runtime_models.data.get("providers", {}).get(provider_id, {}).get(selected, {}).get("elapsed_seconds", float("inf"))
+                    ranked.append((float(elapsed), provider_id, entry))
+            entries = [(provider_id, entry) for _, provider_id, entry in sorted(ranked)]
         if not entries:
             raise RuntimeError("API_PROVIDER_UNAVAILABLE")
         provider_id, entry = entries[0]
@@ -85,11 +105,21 @@ class RouterService:
             requires_bearer_auth=entry.get("requires_bearer_auth", False), header_env=entry.get("headers", {}),
             provider_id=provider_id, provider_metadata=entry, model_env=entry.get("model_env"), timeout=int(entry.get("request_timeout", 60)),
         )
-        return provider_id, provider
+        return provider_id, provider, entry
 
-    def _select_text_model(self, provider: object) -> str:
-        candidates, _ = text_candidates(provider.candidate_models())
-        selected = self.runtime_models.select(provider.provider_id, candidates)
+    def _select_text_model_for_entry(self, provider_id: str, entry: dict) -> str | None:
+        candidates, _ = text_candidates(self._metadata_candidates(entry))
+        preferred = entry.get("preferred_runtime_model")
+        if isinstance(preferred, str) and preferred in candidates and not self.runtime_models.recent_timeout(provider_id, preferred):
+            details = self.runtime_models.data.get("providers", {}).get(provider_id, {}).get(preferred, {})
+            if details.get("status") == "PASS": return preferred
+        return self.runtime_models.select(provider_id, candidates)
+
+    def _select_text_model(self, provider: object, entry: dict) -> str:
+        selected = self._select_text_model_for_entry(provider.provider_id, entry)
+        if not selected and not self._metadata_candidates(entry):
+            candidates, _ = text_candidates(provider.candidate_models())
+            selected = self.runtime_models.select(provider.provider_id, candidates)
         if not selected:
             raise RuntimeError("DOWNSTREAM_UNAVAILABLE")
         return selected
@@ -102,12 +132,12 @@ class RouterService:
     def _api_response(self, request_payload: dict, virtual_model: str) -> dict:
         if not self.network.remote_allowed:
             raise RuntimeError("REMOTE_FALLBACK_DISABLED_OFFLINE")
-        _, provider = self._api_provider(virtual_model)
+        _, provider, entry = self._api_provider(virtual_model)
         # AUTO makes a short reachability decision per invocation.  A later
         # invocation probes again, so recovery needs no VPN-specific logic.
         if isinstance(provider, OpenAICompatibleProvider) and self.network.mode is NetworkMode.AUTO and self.network.probe(provider.models_endpoint(), timeout=2.0) == "OFFLINE_OR_REMOTE_UNAVAILABLE":
             raise RuntimeError("REMOTE_UNAVAILABLE")
-        selected = self._select_text_model(provider)
+        selected = self._select_text_model(provider, entry)
         # Lightboat's minimal path accepts a plain Responses input.  Normalize
         # array-shaped Codex input into the equivalent text to avoid sending a
         # provider-specific content array downstream.
@@ -153,7 +183,7 @@ class RouterService:
 
     def respond(self, request_payload: dict) -> dict:
         virtual_model = request_payload.get("model")
-        if virtual_model not in VIRTUAL_MODELS:
+        if virtual_model not in {model["id"] for model in self.models()}:
             raise RuntimeError("UNKNOWN_VIRTUAL_MODEL")
         if _has_image(request_payload.get("input")):
             outcome = self.vision.route(True, [], self.network.mode is NetworkMode.OFFLINE)

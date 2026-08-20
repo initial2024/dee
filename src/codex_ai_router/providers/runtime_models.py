@@ -42,6 +42,13 @@ class RuntimeModelState:
         passed = [(float(records.get(model, {}).get("elapsed_seconds", float("inf"))), model) for model in candidates if records.get(model, {}).get("status") == "PASS"]
         return min(passed)[1] if passed else None
 
+    def clear_cooldown(self, provider_id: str, model_id: str) -> None:
+        item = self.data.get("providers", {}).get(provider_id, {}).get(model_id)
+        if isinstance(item, dict) and item.get("status") == "TIMEOUT":
+            item.pop("status", None); item.pop("checked_at", None)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.path.with_suffix(".tmp"); temp.write_text(json.dumps(self.data, indent=2), encoding="utf-8"); temp.replace(self.path)
+
 
 def text_candidates(models: list[str]) -> tuple[list[str], list[str]]:
     """Only exclude explicit image-only names; all other capabilities remain unknown."""

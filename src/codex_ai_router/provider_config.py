@@ -33,7 +33,7 @@ def _read(target: Path) -> dict:
 def _safe_legacy_provider(provider_id: str, value: object) -> dict | None:
     if not VALID_ID.fullmatch(provider_id) or not isinstance(value, dict): return None
     if value.get("type") not in VALID_TYPES or not isinstance(value.get("base_url"), str) or not value["base_url"].strip(): return None
-    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode", "requires_bearer_auth", "inference_auth_style", "model_env", "request_timeout", "responses_token_limit_field", "model_discovery_endpoint", "model_discovery_method", "model_discovery_auth_style", "model_discovery_headers", "model_discovery_query", "model_discovery_body", "model_discovery_validate_candidates", "allowed_model_seeds", "preferred_model", "model_policy", "last_discovery_status", "last_discovery_models", "model_registry"}
+    allowed = {"display_name", "type", "base_url", "base_url_env", "wire_api", "enabled", "api_key_env", "headers", "model_discovery", "models", "priority", "setup_mode", "requires_bearer_auth", "inference_auth_style", "model_env", "request_timeout", "responses_token_limit_field", "model_discovery_endpoint", "model_discovery_method", "model_discovery_auth_style", "model_discovery_headers", "model_discovery_query", "model_discovery_body", "model_discovery_validate_candidates", "allowed_model_seeds", "preferred_model", "preferred_runtime_model", "denied_model_ids", "model_policy", "last_discovery_status", "last_discovery_models", "model_registry"}
     record = {key: value[key] for key in allowed if key in value}
     headers = record.get("headers", {})
     if not isinstance(headers, dict) or not all(isinstance(name, str) and isinstance(env_name, str) for name, env_name in headers.items()): return None
@@ -165,5 +165,34 @@ def migrate_to_groq(provider_id: str, path: Path | None = None) -> dict:
     if provider_id not in data["providers"]: raise KeyError("provider not found")
     provider = data["providers"][provider_id]
     provider.update({"type": "groq", "wire_api": "chat_completions", "headers": {}})
+    save(data, path)
+    return provider
+
+
+def set_runtime_model_preference(provider_id: str, model_id: str | None, path: Path | None = None) -> dict:
+    data = load(path)
+    if provider_id not in data["providers"]: raise KeyError("provider not found")
+    provider = data["providers"][provider_id]
+    states = provider.get("model_registry", {}) if isinstance(provider.get("model_registry"), dict) else {}
+    usable = states.get("USABLE_MODELS", [])
+    denied = set(states.get("DENIED_MODELS", [])) | set(provider.get("denied_model_ids", []))
+    if model_id is not None and (model_id not in usable or model_id in denied): raise ValueError("MODEL_NOT_USABLE")
+    if model_id is None: provider.pop("preferred_runtime_model", None)
+    else: provider["preferred_runtime_model"] = model_id
+    save(data, path)
+    return provider
+
+
+def set_model_denied(provider_id: str, model_id: str, denied: bool, path: Path | None = None) -> dict:
+    data = load(path)
+    if provider_id not in data["providers"]: raise KeyError("provider not found")
+    provider = data["providers"][provider_id]
+    snapshot = provider.get("model_registry", {}) if isinstance(provider.get("model_registry"), dict) else {}
+    if model_id not in snapshot.get("DISCOVERED_MODELS", []): raise ValueError("MODEL_NOT_DISCOVERED")
+    values = set(provider.get("denied_model_ids", []))
+    if denied: values.add(model_id)
+    else: values.discard(model_id)
+    provider["denied_model_ids"] = sorted(values)
+    if provider.get("preferred_runtime_model") == model_id and denied: provider.pop("preferred_runtime_model")
     save(data, path)
     return provider

@@ -14,6 +14,8 @@ from codex_ai_router.providers.groq import GroqProvider, classify_groq_error, gr
 from codex_ai_router.providers.base import DiscoveredModel
 from codex_ai_router.providers.model_states import model_state_report
 from codex_ai_router.providers.runtime_models import RuntimeModelState
+from codex_ai_router.providers.base import ProviderResponse
+from codex_ai_router.network import NetworkMode
 
 
 class _Model:
@@ -99,6 +101,43 @@ class GroqProviderTests(unittest.TestCase):
             provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','api_key_env':'KEY'}, path)
             provider_config.record_discovery('groq', ['old-model'], 'PASS', path)
             self.assertEqual(provider_config.record_discovery('groq', [], 'GROQ_AUTH_ERROR', path)['last_discovery_models'], ['old-model'])
+
+    def test_manual_runtime_model_selection_is_persisted_and_rejects_unknown_models(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','model_registry':{'USABLE_MODELS':['a'], 'DENIED_MODELS':[]}}, path)
+            self.assertEqual(provider_config.set_runtime_model_preference('groq', 'a', path)['preferred_runtime_model'], 'a')
+            with self.assertRaises(ValueError): provider_config.set_runtime_model_preference('groq', 'b', path)
+
+    def test_server_lists_and_routes_provider_specific_groq_virtual_model(self):
+        from codex_ai_router import server
+        class FakeGroq:
+            def __init__(self, **kwargs): self.provider_id = kwargs['provider_id']; self.model = ''
+            def complete(self, prompt, max_tokens=16): return ProviderResponse('GROQ_ROUTER_OK', self.model, usage={})
+        metadata = {'providers': {'groq-2': {'type':'groq','enabled':True,'api_key_env':'KEY','model_registry':{'ALLOWED_MODELS':['allam-2-7b'], 'USABLE_MODELS':['allam-2-7b']}}}}
+        with tempfile.TemporaryDirectory() as temp, patch('codex_ai_router.server.provider_config.load', return_value=metadata), patch('codex_ai_router.server.GroqProvider', FakeGroq):
+            state = RuntimeModelState(Path(temp) / 'runtime.json'); state.record('groq-2', 'allam-2-7b', 'PASS', 0.1)
+            service = server.RouterService(NetworkMode.AUTO, runtime_models=state)
+            self.assertIn('xiaoyu-api-groq-2', [model['id'] for model in service.models()])
+            response = service.respond({'model':'xiaoyu-api-groq-2','input':'only reply','max_output_tokens':16})
+            self.assertEqual((response['object'], response['output_text']), ('response', 'GROQ_ROUTER_OK'))
+
+    def test_auto_prefers_runtime_groq_provider_and_manual_choice_is_not_overridden(self):
+        from codex_ai_router import server
+        metadata = {'providers': {'groq-2': {'type':'groq','enabled':True,'model_registry':{'ALLOWED_MODELS':['a','b'], 'USABLE_MODELS':['a','b']}, 'preferred_runtime_model':'b'}}}
+        with tempfile.TemporaryDirectory() as temp, patch('codex_ai_router.server.provider_config.load', return_value=metadata):
+            state = RuntimeModelState(Path(temp) / 'runtime.json'); state.record('groq-2', 'a', 'PASS', 0.01); state.record('groq-2', 'b', 'PASS', 0.2)
+            service = server.RouterService(NetworkMode.AUTO, runtime_models=state)
+            self.assertEqual(service._select_text_model_for_entry('groq-2', metadata['providers']['groq-2']), 'b')
+
+    def test_denied_model_cannot_be_selected_and_cooldown_can_be_cleared(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path, state_path = Path(temp) / 'providers.json', Path(temp) / 'runtime.json'
+            provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','model_registry':{'DISCOVERED_MODELS':['a'], 'USABLE_MODELS':['a'], 'DENIED_MODELS':[]}}, path)
+            provider_config.set_model_denied('groq', 'a', True, path)
+            with self.assertRaises(ValueError): provider_config.set_runtime_model_preference('groq', 'a', path)
+            state = RuntimeModelState(state_path); state.record('groq', 'a', 'TIMEOUT', 20); state.clear_cooldown('groq', 'a')
+            self.assertFalse(state.recent_timeout('groq', 'a'))
 
 
 if __name__ == '__main__': unittest.main()

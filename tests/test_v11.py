@@ -40,7 +40,9 @@ class RouterV11Tests(unittest.TestCase):
             port = server.httpd.server_address[1]
             with urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=3) as response:
                 body = json.loads(response.read())
-            self.assertEqual([item["id"] for item in body["data"]], list(VIRTUAL_MODELS))
+            model_ids = [item["id"] for item in body["data"]]
+            self.assertEqual(model_ids[:len(VIRTUAL_MODELS)], list(VIRTUAL_MODELS))
+            self.assertIn("xiaoyu-api-groq-2", model_ids)
         finally:
             server.stop()
 

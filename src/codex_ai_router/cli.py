@@ -74,6 +74,9 @@ def main() -> None:
     provider_show = provider_sub.add_parser("show"); provider_show.add_argument("id")
     for action in ("enable", "disable", "remove", "migrate-groq"):
         item = provider_sub.add_parser(action); item.add_argument("id")
+    provider_preferred = provider_sub.add_parser("set-runtime-model"); provider_preferred.add_argument("id"); provider_preferred.add_argument("model", nargs="?")
+    provider_deny = provider_sub.add_parser("set-model-denied"); provider_deny.add_argument("id"); provider_deny.add_argument("model"); provider_deny.add_argument("--allow", action="store_true")
+    provider_clear = provider_sub.add_parser("clear-cooldown"); provider_clear.add_argument("id"); provider_clear.add_argument("model")
     provider_models = provider_sub.add_parser("models"); provider_models.add_argument("id")
     provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("id")
     provider_probe = provider_sub.add_parser("probe-runtime"); provider_probe.add_argument("id"); provider_probe.add_argument("--all", action="store_true")
@@ -111,6 +114,9 @@ def main() -> None:
             if not entry: raise KeyError("provider not found")
             if "api.groq.com/openai/v1" not in str(entry.get("base_url", "")).rstrip("/").lower(): raise ValueError("NOT_GROQ_BASE_URL")
             emit(provider_config.migrate_to_groq(args.id))
+        elif args.provider_action == "set-runtime-model": emit(provider_config.set_runtime_model_preference(args.id, args.model))
+        elif args.provider_action == "set-model-denied": emit(provider_config.set_model_denied(args.id, args.model, not args.allow))
+        elif args.provider_action == "clear-cooldown": RuntimeModelState().clear_cooldown(args.id, args.model); emit({"status": "COOLDOWN_CLEARED", "id": args.id, "model": args.model})
         else:
             if args.id == "local": provider = router.local
             else:
