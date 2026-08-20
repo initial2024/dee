@@ -410,5 +410,14 @@ class RouterV1Tests(unittest.TestCase):
         from codex_ai_router.policy import FastLocalPolicy
         policy = FastLocalPolicy.from_config({'local': {'hard_timeout_seconds': 25, 'max_agent_steps': 2}})
         self.assertEqual((policy.hard_timeout_seconds, policy.max_agent_steps), (25, 2))
+    def test_100_inference_auth_style_is_independent_and_secret_free(self):
+        with patch.dict(os.environ, {'KEY_ENV': 'test-key', 'CUSTOM_ENV': 'custom'}, clear=True):
+            common = {'headers': {'X-Custom': 'CUSTOM_ENV'}}
+            bearer = OpenAICompatibleProvider('https://host', key_env='KEY_ENV', requires_bearer_auth=False, header_env=common['headers'], provider_metadata={**common, 'inference_auth_style': 'bearer'})
+            custom = OpenAICompatibleProvider('https://host', key_env='KEY_ENV', requires_bearer_auth=True, header_env=common['headers'], provider_metadata={**common, 'inference_auth_style': 'custom_header'})
+            both = OpenAICompatibleProvider('https://host', key_env='KEY_ENV', requires_bearer_auth=False, header_env=common['headers'], provider_metadata={**common, 'inference_auth_style': 'bearer_plus_custom_header'})
+            self.assertEqual(set(bearer.request_headers()), {'Authorization'})
+            self.assertEqual(set(custom.request_headers()), {'X-Custom'})
+            self.assertEqual(set(both.request_headers()), {'Authorization', 'X-Custom'})
 
 if __name__ == '__main__': unittest.main()

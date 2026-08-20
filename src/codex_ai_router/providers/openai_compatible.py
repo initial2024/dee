@@ -70,10 +70,16 @@ class OpenAICompatibleProvider(BaseProvider):
         return self.normalized_v1_base_url + "/models"
     def available(self) -> bool: return bool(self.base_url and (not self.requires_bearer_auth or os.getenv(self.key_env)))
     def request_headers(self, content_type: bool = False) -> dict[str, str]:
-        headers = dict(self.custom_headers)
-        for name, env_name in self.header_env.items():
-            if value := os.getenv(env_name): headers[name] = value
-        if self.requires_bearer_auth:
+        style = str(self.provider_metadata.get("inference_auth_style", "inherit")).lower()
+        if style not in {"inherit", "bearer", "custom_header", "bearer_plus_custom_header"}:
+            raise ProviderError("INVALID_INFERENCE_AUTH_STYLE")
+        include_custom = style in {"inherit", "custom_header", "bearer_plus_custom_header"}
+        include_bearer = style in {"bearer", "bearer_plus_custom_header"} or (style == "inherit" and self.requires_bearer_auth)
+        headers = dict(self.custom_headers) if include_custom else {}
+        if include_custom:
+            for name, env_name in self.header_env.items():
+                if value := os.getenv(env_name): headers[name] = value
+        if include_bearer:
             if not (key := os.getenv(self.key_env)): raise ProviderError("API_PROVIDER_UNAVAILABLE_OR_MISSING_KEY")
             headers["Authorization"] = "Bearer " + key
         if content_type: headers["Content-Type"] = "application/json"
