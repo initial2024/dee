@@ -48,7 +48,7 @@ class Router:
         api_models = self.provider_models("api")[1]
         direct_backend = getattr(self.local, "managed", None)
         direct = direct_backend.status() if direct_backend is not None else {"server_running": "NO", "model_count": 0}
-        return {"LOCAL_AVAILABLE": "YES" if local_models else "NO", "LOCAL_BACKEND_CONFIG": "YES", "DIRECT_LOCAL_BACKEND": "YES", "DIRECT_LOCAL_SERVER_RUNNING": direct["server_running"], "DIRECT_LOCAL_MODEL_COUNT": direct["model_count"], "LMSTUDIO_FALLBACK_ONLY": "YES", "API_CONFIGURED": "YES" if api_models else "NO", "MULTI_AGENT_SHARED_WRITE_TREE": "NO", "DEFAULT_MODE": "AUTO_TRIAD", "CODEX_BUDGET_MODE": os.getenv("CODEX_BUDGET_MODE", "SAVE"), "EXTERNAL_API_ALLOWED": "YES" if self.selection_policy.providers.permits("api") else "NO", **CodexHarnessState().as_dict()}
+        return {"LOCAL_AVAILABLE": "YES" if local_models else "NO", "LOCAL_BACKEND_CONFIG": "YES", "DIRECT_LOCAL_BACKEND": "YES", "DIRECT_LOCAL_SERVER_RUNNING": direct["server_running"], "DIRECT_LOCAL_MODEL_COUNT": direct["model_count"], "DIRECT_LOCAL_PORT": direct.get("port"), "DIRECT_LOCAL_PORT_IN_USE": direct.get("port_in_use"), "DIRECT_LOCAL_PORT_OWNER": direct.get("port_owner"), "DIRECT_LOCAL_AUTO_PORT_FALLBACK": direct.get("auto_port_fallback"), "LMSTUDIO_FALLBACK_ONLY": "YES", "API_CONFIGURED": "YES" if api_models else "NO", "MULTI_AGENT_SHARED_WRITE_TREE": "NO", "DEFAULT_MODE": "AUTO_TRIAD", "CODEX_BUDGET_MODE": os.getenv("CODEX_BUDGET_MODE", "SAVE"), "EXTERNAL_API_ALLOWED": "YES" if self.selection_policy.providers.permits("api") else "NO", **CodexHarnessState().as_dict()}
 
     def route(self, prompt: str, requested: Mode | None = None) -> dict:
         category, risk = classify(prompt)
