@@ -495,7 +495,8 @@ class ManagedLlamaCppBackend:
     def repair(self) -> dict:
         try:
             result = self.restart(self.selected) if self.running() else self.start(self.selected)
-            return {"status": "PASS", "action": "repair", **result}
+            response = self.ask("只回复 LOCAL_DIRECT_OK")
+            return {"status": "PASS", "action": "repair", "response": response, **result}
         except ProviderError as exc:
             return {"status": "ERROR", "action": "repair", "error_code": str(exc), **self.status()}
 
