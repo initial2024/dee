@@ -162,6 +162,7 @@ class ManagedLlamaCppBackend:
     name = "llama_cpp_managed"
 
     def __init__(self, model_directories: list[Path] | None = None, executable: str = "llama-server", host: str = "127.0.0.1", port: int = 18790, config_path: Path | None = None):
+        self._uses_default_state = config_path is None
         self.config_path = config_path or local_backend_config_path()
         config = load_local_backend_config(self.config_path)
         self.model_directories = [Path(path) for path in (model_directories if model_directories is not None else config.get("model_dirs", []))]
@@ -182,11 +183,11 @@ class ManagedLlamaCppBackend:
 
     @property
     def pid_path(self) -> Path:
-        return router_user_dir() / "local-backend.pid"
+        return router_user_dir() / "local-backend.pid" if self._uses_default_state else self.config_path.with_name("local-backend.pid")
 
     @property
     def state_path(self) -> Path:
-        return router_user_dir() / "local-backend.state.json"
+        return router_user_dir() / "local-backend.state.json" if self._uses_default_state else self.config_path.with_name("local-backend.state.json")
 
     def discover(self) -> list[GGUFModel]:
         return discover_gguf_models(self.model_directories)
