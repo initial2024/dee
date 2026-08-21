@@ -300,10 +300,12 @@ class ManagedLlamaCppBackend:
         if self.process is not None and self.process.poll() is None:
             return True
         pid = self._external_pid()
+        owner = self.port_owner(self.port)
+        if owner and self._owner_matches_backend(owner):
+            return True
         if not self._pid_alive(pid):
             self._clear_state_files()
             return False
-        owner = self.port_owner(self.port)
         return bool(owner and owner.get("pid") == pid and self._owner_matches_backend(owner))
 
     def endpoint(self) -> str:
@@ -342,8 +344,10 @@ class ManagedLlamaCppBackend:
             self._clear_state_files()
             return {"state_reconciled": "STALE_PID_CLEARED", "managed_pid": None}
         owner = self.port_owner(self.port)
-        if pid and owner and owner.get("pid") == pid and self._owner_matches_backend(owner):
-            return {"state_reconciled": "MANAGED_PROCESS_MATCH", "managed_pid": pid}
+        if owner and self._owner_matches_backend(owner):
+            if pid and owner.get("pid") == pid:
+                return {"state_reconciled": "MANAGED_PROCESS_MATCH", "managed_pid": pid}
+            return {"state_reconciled": "EXTERNAL_MANAGED_PROCESS_DETECTED", "managed_pid": owner.get("pid")}
         if pid and owner and owner.get("pid") == pid:
             return {"state_reconciled": "PID_OWNER_MISMATCH", "managed_pid": pid}
         return {"state_reconciled": "YES", "managed_pid": pid}
@@ -479,7 +483,8 @@ class ManagedLlamaCppBackend:
         return self.status()
 
     def stop(self) -> dict:
-        pid = self.process.pid if self.process is not None else self._external_pid()
+        owner = self.port_owner(self.port) if self.process is None else None
+        pid = self.process.pid if self.process is not None else (self._external_pid() or (owner or {}).get("pid"))
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             try:
@@ -487,7 +492,6 @@ class ManagedLlamaCppBackend:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         elif pid and self._pid_alive(pid):
-            owner = self.port_owner(self.port)
             if owner and owner.get("pid") == pid and self._owner_matches_backend(owner):
                 self._terminate_owner(owner)
         self.process = None
