@@ -15,6 +15,8 @@ Assert-True ($delegateText -match '\[switch\]\$AllowWrite') 'delegate_accepts_ex
 Assert-True ($delegateText -match 'Read-only advisory task') 'delegate_defaults_readonly'
 Assert-True ($delegateText -match 'delegation-ledger.jsonl') 'delegation_ledger_present'
 Assert-True ($delegateText -match 'delegate-fast --max-seconds \$budget') 'delegate_passes_user_timeout_to_fast_route'
+Assert-True ($delegateText -match "ValidateSet\('auto','read','review','plan','local'\)") 'delegate_supports_direct_local_mode'
+Assert-True ($delegateText -match 'xiaoyu-router local smoke') 'delegate_local_mode_routes_direct_backend'
 Assert-True ($delegateText -match 'provider=\$payload.provider;model=\$payload.model') 'ledger_records_selected_provider_and_model'
 Assert-True ($delegateText -notmatch '(?i)api[_ -]?key\s*=\s*["''][^"'']+') 'delegate_has_no_embedded_key'
 Assert-True ($officialModeText -match 'high-risk.*official Codex control') 'instructions_keep_high_risk_official'
@@ -24,7 +26,7 @@ Assert-True ($usageText -match 'DELEGATION_DOES_NOT_AUTO_CHANGE_MODEL_NOTICE') '
 Assert-True ($usageText -match 'HIGH_RISK_STRONG_MODEL_RECOMMENDATION=YES') 'usage_shows_strong_model_guidance'
 Assert-True ($usageText -notmatch '(?i)Get-Content[^\r\n]*(cookie|token)|\.sqlite|Cookies\\') 'usage_does_not_read_cookie_or_token'
 
-Write-Output 'POWERSHELL_TEST_TOTAL=12'
+Write-Output 'POWERSHELL_TEST_TOTAL=14'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }

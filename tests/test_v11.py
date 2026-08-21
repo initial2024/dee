@@ -12,7 +12,7 @@ from codex_ai_router.codex_integration import install_xiaoyu_router_provider, sa
 from codex_ai_router.handoff import compact_handoff
 from codex_ai_router.network import NetworkMode, NetworkState
 from codex_ai_router.providers.base import DiscoveredModel
-from codex_ai_router.providers.local_backend import LocalBackend, ManagedLlamaCppBackend
+from codex_ai_router.providers.local_backend import LocalBackend, ManagedLlamaCppBackend, load_local_backend_config, save_local_backend_config, discover_llama_server
 from codex_ai_router.providers.registry import ModelRegistry
 from codex_ai_router.server import RouterResponsesServer, RouterService, VIRTUAL_MODELS, _bounded_output_tokens, _input_text
 from codex_ai_router.vision import VisionProxy
@@ -66,7 +66,7 @@ class RouterV11Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / "sample.Q4_K_M.gguf"; file.write_bytes(b"GGUF")
             models = ManagedLlamaCppBackend([Path(temp)]).discover()
-            self.assertEqual((models[0].model_id, models[0].size_bytes, models[0].quantization), ("sample.Q4_K_M", 4, "UNKNOWN"))
+            self.assertEqual((models[0].model_id, models[0].size_bytes, models[0].quantization), ("sample.Q4_K_M", 4, "Q4_K_M"))
 
     def test_108_local_backend_can_be_unavailable_without_lmstudio_requirement(self):
         backend = LocalBackend(lmstudio=FakeLocal(False), managed=ManagedLlamaCppBackend())
@@ -212,6 +212,54 @@ class RouterV11Tests(unittest.TestCase):
         reasons = {(item.get("model"), item["reason"]) for item in explanation["skipped"]}
         self.assertIn(("denied", "POLICY_DENIED"), reasons)
         self.assertIn(("slow", "TIMEOUT_COOLDOWN"), reasons)
+
+    def test_127_direct_local_config_and_selected_model_persist(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); models_dir = root / "lmstudio"; models_dir.mkdir()
+            model_path = models_dir / "demo-Q4_K_M.gguf"; model_path.write_bytes(b"GGUF")
+            config_path = root / "local-backend.json"
+            save_local_backend_config({"model_dirs": [str(models_dir)], "selected_model_path": "", "port": 18791}, config_path)
+            self.assertEqual(load_local_backend_config(config_path)["port"], 18791)
+            backend = ManagedLlamaCppBackend(config_path=config_path, model_directories=[models_dir], executable=str(root / "llama-server.exe"), port=18791)
+            found = backend.discover(); self.assertEqual((len(found), found[0].quantization, found[0].source), (1, "Q4_K_M", "configured"))
+            backend.select("demo-Q4_K_M")
+            restored = ManagedLlamaCppBackend(config_path=config_path, model_directories=[models_dir], executable=str(root / "llama-server.exe"), port=18791)
+            self.assertEqual(restored.selected.model_id, "demo-Q4_K_M")
+
+    def test_128_direct_local_model_scan_is_bounded_to_configured_dirs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); allowed = root / "allowed"; outside = root / "outside"; allowed.mkdir(); outside.mkdir()
+            (allowed / "ok.gguf").write_bytes(b"1"); (outside / "no.gguf").write_bytes(b"1")
+            models = ManagedLlamaCppBackend([allowed], executable="missing-llama-server").discover()
+            self.assertEqual([item.model_id for item in models], ["ok"])
+
+    def test_129_direct_local_server_error_is_explicit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); model = root / "demo.gguf"; model.write_bytes(b"GGUF")
+            backend = ManagedLlamaCppBackend([root], executable=str(root / "missing-llama-server.exe"), config_path=root / "local-backend.json")
+            backend.select("demo")
+            with self.assertRaisesRegex(Exception, "LLAMA_SERVER_NOT_FOUND"):
+                backend.start()
+
+    def test_130_direct_local_command_is_loopback_and_shell_free(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); model = root / "demo-Q5_K_M.gguf"; model.write_bytes(b"GGUF")
+            executable = root / "llama-server.exe"; executable.write_bytes(b"stub")
+            backend = ManagedLlamaCppBackend([root], executable=str(executable), config_path=root / "local-backend.json")
+            selected = backend.select("demo-Q5_K_M")
+            command = backend._command(selected)
+            self.assertEqual(command[3:7], ["--host", "127.0.0.1", "--port", "18790"])
+            self.assertNotIn(";", command); self.assertNotIn("&", command)
+
+    def test_131_direct_local_port_conflict_is_classified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); model = root / "demo.gguf"; model.write_bytes(b"GGUF")
+            executable = root / "llama-server.exe"; executable.write_bytes(b"stub")
+            backend = ManagedLlamaCppBackend([root], executable=str(executable), config_path=root / "local-backend.json")
+            backend.select("demo")
+            with patch.object(backend, "port_in_use", return_value=True):
+                with self.assertRaisesRegex(Exception, "PORT_IN_USE"):
+                    backend.start()
 
 
 if __name__ == "__main__":

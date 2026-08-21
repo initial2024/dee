@@ -14,7 +14,7 @@ from .providers.model_discovery import codex_profile_requires_bearer_auth
 from .policy import FastLocalPolicy
 from .network import NetworkMode
 from .server import RouterResponsesServer, RouterService
-from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend
+from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend, load_local_backend_config, save_local_backend_config, local_backend_config_path
 from .providers.runtime_models import RuntimeModelState, probe_model, text_candidates
 from .providers.model_states import model_state_report
 from .handoff import compact_handoff
@@ -66,7 +66,14 @@ def main() -> None:
     auto = sub.add_parser("auto"); add_policy_args(auto); auto.add_argument("task")
     review = sub.add_parser("review"); review.add_argument("path")
     explain_delegation_command = sub.add_parser("explain-delegation"); explain_delegation_command.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); explain_delegation_command.add_argument("task")
+    explain_route = sub.add_parser("explain-route"); explain_route.add_argument("--prefer-local", action="store_true"); explain_route.add_argument("task")
     delegate_fast = sub.add_parser("delegate-fast"); delegate_fast.add_argument("--max-seconds", type=int, default=60); delegate_fast.add_argument("task")
+    local = sub.add_parser("local"); local_sub = local.add_subparsers(dest="local_action", required=True)
+    for action in ("start", "stop", "restart", "status", "models", "smoke"):
+        item = local_sub.add_parser(action)
+        if action == "smoke": item.add_argument("task", nargs="?", default="只回复 LOCAL_DIRECT_OK")
+    local_select = local_sub.add_parser("select"); local_select.add_argument("model")
+    local_configure = local_sub.add_parser("configure"); local_configure.add_argument("--llama-server-path"); local_configure.add_argument("--model-dir", action="append"); local_configure.add_argument("--port", type=int); local_configure.add_argument("--ctx-size", type=int); local_configure.add_argument("--timeout-seconds", type=int)
     serve = sub.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=18789); serve.add_argument("--gguf-dir", action="append", default=[]); serve.add_argument("--managed-gguf", help="optional discovered GGUF id to start persistently")
     handoff = sub.add_parser("handoff"); handoff.add_argument("task"); handoff.add_argument("--tests", default="NOT_RUN"); handoff.add_argument("--blockers", default="NONE"); handoff.add_argument("--constraints", default="")
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
@@ -96,6 +103,15 @@ def main() -> None:
         ld = router.local.models(); ad = router.api.models(); _, le = router.provider_models("local"); _, ae = router.provider_models("api")
         emit({"DISCOVERED_MODELS": {"local": ld, "api": ad}, "ALLOWED_MODELS": {"local": le, "api": ae}, "ELIGIBLE_MODELS": {"local": le, "api": ae}, "MODEL_DISCOVERY_SUPPORTED": {"local": "YES", "api": router.api.model_discovery_supported}})
     elif args.command == "classify": emit(router.route(args.task))
+    elif args.command == "explain-route":
+        direct = router.local.managed
+        status = direct.status()
+        if status["server_running"] == "YES": reason = "direct local server is running and preferred"
+        elif status["llama_server_found"] == "YES" and status["selected_model"]: reason = "direct local is configured and will auto-start on request"
+        elif status["llama_server_found"] == "NO": reason = "llama-server was not found"
+        elif status["model_count"] == 0: reason = "no configured GGUF model was discovered"
+        else: reason = "a GGUF model must be selected before direct local can start"
+        emit({"direct_local_configured": status["configured"], "llama_server_found": status["llama_server_found"], "selected_gguf_model": status["selected_model"], "server_running": status["server_running"], "why_selected": reason if args.prefer_local else "AUTO policy decides by risk and task size", "skipped_reason": None if args.prefer_local and status["selected_model"] else reason, "fallback_provider": "lmstudio"})
     elif args.command == "ask":
         found, eligible = router.provider_models(args.provider)
         selected = router.selection_policy.choose(args.provider, found, "coder", args.local_model if args.provider == "local" else args.api_model)
@@ -154,12 +170,34 @@ def main() -> None:
                 emit(payload)
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
+    elif args.command == "local":
+        backend = router.local.managed
+        try:
+            if args.local_action == "configure":
+                local_data = load_local_backend_config()
+                if args.llama_server_path is not None: local_data["llama_server_path"] = args.llama_server_path
+                if args.model_dir: local_data["model_dirs"] = list(dict.fromkeys([*local_data.get("model_dirs", []), *args.model_dir]))
+                if args.port is not None: local_data["port"] = args.port; backend.port = args.port
+                if args.ctx_size is not None: local_data["ctx_size"] = args.ctx_size
+                if args.timeout_seconds is not None: local_data["timeout_seconds"] = args.timeout_seconds
+                emit({"status": "CONFIGURED", "config_path": str(save_local_backend_config(local_data))})
+            elif args.local_action == "status": emit(backend.status())
+            elif args.local_action == "models": emit({"models": [model.as_dict() for model in backend.discover()], "llama_server_found": "YES" if backend.executable_available() else "NO", "source": "lmstudio_gguf_direct", "LMSTUDIO_GGUF_REUSE": "YES", "NO_FULL_DISK_SCAN": "YES"})
+            elif args.local_action == "select": emit({"status": "SELECTED", "model": backend.select(args.model).as_dict()})
+            elif args.local_action == "start": emit(backend.start())
+            elif args.local_action == "stop": emit(backend.stop())
+            elif args.local_action == "restart": emit(backend.restart())
+            elif args.local_action == "smoke": emit({"status": "PASS", "response": backend.ask(args.task), "model": backend.selected.model_id if backend.selected else None, "endpoint": backend.endpoint()})
+        except Exception as exc:
+            code = str(exc) or "LOCAL_DIRECT_BACKEND_ERROR"
+            emit({"status": "ERROR", "error_code": code})
     elif args.command == "explain-delegation": emit({**explain_delegation(args.task, risk_override=args.risk), **RouterService().explain_fast_delegation()})
     elif args.command == "delegate-fast": emit(RouterService().delegate_fast_readonly(args.task, max_seconds=max(1, min(args.max_seconds, 300))))
     elif args.command == "serve":
         mode = NetworkMode.OFFLINE if args.offline else NetworkMode.AUTO
         configured_dirs = config_data.get("local", {}).get("model_directories", []) if isinstance(config_data.get("local", {}), dict) else []
-        managed = ManagedLlamaCppBackend([Path(path) for path in [*configured_dirs, *args.gguf_dir]])
+        all_dirs = [Path(path) for path in [*configured_dirs, *args.gguf_dir]]
+        managed = ManagedLlamaCppBackend(all_dirs if all_dirs else None)
         if args.managed_gguf:
             selected = next((model for model in managed.discover() if model.model_id == args.managed_gguf), None)
             if not selected: raise SystemExit("MANAGED_GGUF_NOT_FOUND")

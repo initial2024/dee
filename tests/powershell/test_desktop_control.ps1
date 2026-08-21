@@ -51,6 +51,9 @@ Assert-True ($source -match 'Open-BatchManager' -and $source -match '批量允�
 Assert-True ($source -match '筛选模型/状态' -and $source -match 'Set-ModelGridFilter') 'batch_management_has_filter'
 Assert-True ($source -match '供应商操作' -and $source -match '模型操作' -and $source -match '迁移') 'provider_tab_actions_are_grouped'
 Assert-True (($ui -join "`n") -match 'MODEL_PICKER_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)' -and ($ui -join "`n") -match 'BATCH_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)') 'model_and_batch_ui_selftest_reported'
+Assert-True (($ui -join "`n") -match 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS') 'direct_local_ui_selftest_reported'
+Assert-True ($source -match '直接本地模型（推荐）' -and $source -match '扫描 LM Studio 模型' -and $source -match '启动本地后端' -and $source -match '测试本地推理') 'direct_local_controls_present'
+Assert-True ($source -match 'llama.cpp direct' -and $source -match 'LM Studio：仅作可选 fallback') 'direct_local_is_primary_lmstudio_is_fallback'
 Assert-True ($source -match '选择方式：' -and $source -match '手动选择' -and $source -match '自动选择') 'control_panel_marks_auto_and_manual_model_selection'
 Assert-True ($source -match '允许模型' -and $source -match '拒绝模型' -and $source -match '清除冷却') 'control_panel_model_picker_has_policy_and_cooldown_actions'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
@@ -69,7 +72,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=39'
+Write-Output 'POWERSHELL_TEST_TOTAL=42'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }

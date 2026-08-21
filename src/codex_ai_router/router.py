@@ -11,6 +11,7 @@ from .classifier import classify
 from .policy import FastLocalGate, FastLocalPolicy, choose_mode, requires_codex_gate
 from .accounting.performance import PerformanceTracker
 from .providers import LMStudioProvider, OpenAICompatibleProvider
+from .providers.local_backend import LocalBackend
 from .providers.base import DiscoveredModel
 from .providers.registry import ModelRegistry
 from .result import AgentResult
@@ -23,7 +24,7 @@ from .codex_status import CodexHarnessState
 @dataclass
 class Router:
     root: Path
-    local: LMStudioProvider
+    local: LocalBackend
     api: OpenAICompatibleProvider
     max_iterations: int = 6
     selection_policy: SelectionPolicy = SelectionPolicy()
@@ -33,7 +34,7 @@ class Router:
 
     @classmethod
     def default(cls, root: Path | None = None, selection_policy: SelectionPolicy | None = None, fast_local_policy: FastLocalPolicy | None = None) -> "Router":
-        return cls((root or Path.cwd()).resolve(), LMStudioProvider(), OpenAICompatibleProvider(), selection_policy=selection_policy or SelectionPolicy(), performance=PerformanceTracker.for_current_user(), fast_local_policy=fast_local_policy or FastLocalPolicy())
+        return cls((root or Path.cwd()).resolve(), LocalBackend(), OpenAICompatibleProvider(), selection_policy=selection_policy or SelectionPolicy(), performance=PerformanceTracker.for_current_user(), fast_local_policy=fast_local_policy or FastLocalPolicy())
 
     def provider_models(self, provider_name: str) -> tuple[list[str], list[str]]:
         if not self.selection_policy.providers.permits(provider_name):
@@ -45,7 +46,9 @@ class Router:
     def status(self) -> dict:
         local_models = self.provider_models("local")[1]
         api_models = self.provider_models("api")[1]
-        return {"LOCAL_AVAILABLE": "YES" if local_models else "NO", "API_CONFIGURED": "YES" if api_models else "NO", "MULTI_AGENT_SHARED_WRITE_TREE": "NO", "DEFAULT_MODE": "AUTO_TRIAD", "CODEX_BUDGET_MODE": os.getenv("CODEX_BUDGET_MODE", "SAVE"), "EXTERNAL_API_ALLOWED": "YES" if self.selection_policy.providers.permits("api") else "NO", **CodexHarnessState().as_dict()}
+        direct_backend = getattr(self.local, "managed", None)
+        direct = direct_backend.status() if direct_backend is not None else {"server_running": "NO", "model_count": 0}
+        return {"LOCAL_AVAILABLE": "YES" if local_models else "NO", "LOCAL_BACKEND_CONFIG": "YES", "DIRECT_LOCAL_BACKEND": "YES", "DIRECT_LOCAL_SERVER_RUNNING": direct["server_running"], "DIRECT_LOCAL_MODEL_COUNT": direct["model_count"], "LMSTUDIO_FALLBACK_ONLY": "YES", "API_CONFIGURED": "YES" if api_models else "NO", "MULTI_AGENT_SHARED_WRITE_TREE": "NO", "DEFAULT_MODE": "AUTO_TRIAD", "CODEX_BUDGET_MODE": os.getenv("CODEX_BUDGET_MODE", "SAVE"), "EXTERNAL_API_ALLOWED": "YES" if self.selection_policy.providers.permits("api") else "NO", **CodexHarnessState().as_dict()}
 
     def route(self, prompt: str, requested: Mode | None = None) -> dict:
         category, risk = classify(prompt)
@@ -134,4 +137,5 @@ class Router:
 
     def doctor(self) -> dict:
         import shutil
-        return {**self.status(), "PYTHON": "YES", "GIT": "YES" if shutil.which("git") else "NO", "CURRENT_REPO": "YES" if (self.root / ".git").exists() else "NO", "WORKTREE_CAPABLE": "YES" if shutil.which("git") else "NO", "LMSTUDIO_BASE_URL": self.local.base_url, "API_KEY_CONFIGURED": "YES" if self.api.available() else "NO"}
+        lmstudio = getattr(self.local, "lmstudio", self.local)
+        return {**self.status(), "PYTHON": "YES", "GIT": "YES" if shutil.which("git") else "NO", "CURRENT_REPO": "YES" if (self.root / ".git").exists() else "NO", "WORKTREE_CAPABLE": "YES" if shutil.which("git") else "NO", "LMSTUDIO_BASE_URL": getattr(lmstudio, "base_url", "http://127.0.0.1:1234/v1"), "API_KEY_CONFIGURED": "YES" if self.api.available() else "NO"}

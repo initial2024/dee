@@ -12,6 +12,9 @@ api:
 local:
   base_url: http://127.0.0.1:1234/v1
   model: auto
+  direct_backend: llama_cpp
+  direct_endpoint: http://127.0.0.1:18790/v1
+  lmstudio_fallback_only: true
   first_token_budget_seconds: 8
   simple_task_budget_seconds: 20
   hard_timeout_seconds: 30
