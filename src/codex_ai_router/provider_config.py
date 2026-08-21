@@ -155,6 +155,7 @@ def record_model_registry(provider_id: str, states: dict, discovery_status: str,
     provider["model_registry"] = snapshot
     if discovered: provider["last_discovery_models"] = discovered
     provider["last_discovery_status"] = discovery_status
+    _apply_model_policy(provider)
     save(data, path)
     return provider
 
@@ -193,6 +194,43 @@ def set_model_denied(provider_id: str, model_id: str, denied: bool, path: Path |
     if denied: values.add(model_id)
     else: values.discard(model_id)
     provider["denied_model_ids"] = sorted(values)
-    if provider.get("preferred_runtime_model") == model_id and denied: provider.pop("preferred_runtime_model")
+    _apply_model_policy(provider)
     save(data, path)
     return provider
+
+
+def _apply_model_policy(provider: dict) -> None:
+    snapshot = provider.setdefault("model_registry", {})
+    discovered = list(snapshot.get("DISCOVERED_MODELS", provider.get("last_discovery_models", [])))
+    denied = set(provider.get("denied_model_ids", []))
+    allow_list = set(provider.get("allowed_model_ids", []))
+    seeds = set(provider.get("allowed_model_seeds", []))
+    allowed = [model for model in discovered if model not in denied and (not allow_list or model in allow_list) and (not seeds or model in seeds)]
+    snapshot["DISCOVERED_MODELS"] = discovered
+    snapshot["DENIED_MODELS"] = [model for model in discovered if model not in allowed]
+    snapshot["ALLOWED_MODELS"] = allowed
+    snapshot["USABLE_MODELS"] = list(allowed)
+    snapshot["RUNTIME_RESPONSIVE_MODELS"] = [model for model in snapshot.get("RUNTIME_RESPONSIVE_MODELS", []) if model in allowed]
+    if snapshot.get("CURRENT_RUNTIME_MODEL") not in allowed: snapshot["CURRENT_RUNTIME_MODEL"] = None
+    if provider.get("preferred_runtime_model") not in allowed: provider.pop("preferred_runtime_model", None)
+
+
+def batch_model_policy(provider_id: str, model_ids: list[str], action: str, priority: int | None = None, path: Path | None = None) -> dict:
+    data = load(path)
+    if provider_id not in data["providers"]: raise KeyError("provider not found")
+    provider = data["providers"][provider_id]; snapshot = provider.get("model_registry", {})
+    discovered = set(snapshot.get("DISCOVERED_MODELS", []))
+    selected = set(model_ids)
+    if not selected <= discovered: raise ValueError("MODEL_NOT_DISCOVERED")
+    denied = set(provider.get("denied_model_ids", [])); allowed = set(provider.get("allowed_model_ids", [])); priorities = dict(provider.get("model_priorities", {}))
+    if action == "deny": denied |= selected
+    elif action == "allow": denied -= selected; allowed |= selected
+    elif action == "clear_deny": denied -= selected
+    elif action == "priority":
+        if priority is None: raise ValueError("PRIORITY_REQUIRED")
+        priorities.update({model: int(priority) for model in selected})
+    elif action == "only": denied = discovered - selected; allowed = set(selected); provider["preferred_runtime_model"] = next(iter(selected)) if len(selected) == 1 else provider.get("preferred_runtime_model")
+    elif action == "reset": denied.clear(); allowed.clear(); priorities.clear(); provider.pop("preferred_runtime_model", None)
+    else: raise ValueError("UNKNOWN_MODEL_POLICY_ACTION")
+    provider["denied_model_ids"] = sorted(denied); provider["allowed_model_ids"] = sorted(allowed); provider["model_priorities"] = priorities
+    _apply_model_policy(provider); save(data, path); return provider

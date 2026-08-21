@@ -80,7 +80,8 @@ class RouterService:
     def _metadata_candidates(self, entry: dict) -> list[str]:
         snapshot = entry.get("model_registry", {}) if isinstance(entry.get("model_registry"), dict) else {}
         values = snapshot.get("ALLOWED_MODELS", snapshot.get("USABLE_MODELS", entry.get("last_discovery_models", [])))
-        return [model for model in values if isinstance(model, str)] if isinstance(values, list) else []
+        denied = set(entry.get("denied_model_ids", []))
+        return [model for model in values if isinstance(model, str) and model not in denied] if isinstance(values, list) else []
 
     def _api_provider(self, requested: str) -> tuple[str, object, dict]:
         entries = self._provider_entries()
@@ -90,13 +91,14 @@ class RouterService:
             provider_id = requested.removeprefix("xiaoyu-api-")
             entries = [item for item in entries if item[0] == provider_id]
         elif requested == "xiaoyu-api-auto":
-            ranked: list[tuple[float, str, dict]] = []
+            ranked: list[tuple[int, int, float, str, dict]] = []
             for provider_id, entry in entries:
                 selected = self._select_text_model_for_entry(provider_id, entry)
                 if selected:
                     elapsed = self.runtime_models.data.get("providers", {}).get(provider_id, {}).get(selected, {}).get("elapsed_seconds", float("inf"))
-                    ranked.append((float(elapsed), provider_id, entry))
-            entries = [(provider_id, entry) for _, provider_id, entry in sorted(ranked)]
+                    priority = int(entry.get("priority", 100)); model_priority = int(entry.get("model_priorities", {}).get(selected, 100))
+                    ranked.append((priority, model_priority, float(elapsed), provider_id, entry))
+            entries = [(provider_id, entry) for _, _, _, provider_id, entry in sorted(ranked)]
         if not entries:
             raise RuntimeError("API_PROVIDER_UNAVAILABLE")
         provider_id, entry = entries[0]
@@ -113,7 +115,14 @@ class RouterService:
         if isinstance(preferred, str) and preferred in candidates and not self.runtime_models.recent_timeout(provider_id, preferred):
             details = self.runtime_models.data.get("providers", {}).get(provider_id, {}).get(preferred, {})
             if details.get("status") == "PASS": return preferred
-        return self.runtime_models.select(provider_id, candidates)
+        passed = [model for model in candidates if self.runtime_models.data.get("providers", {}).get(provider_id, {}).get(model, {}).get("status") == "PASS" and not self.runtime_models.recent_timeout(provider_id, model)]
+        priorities = entry.get("model_priorities", {}) if isinstance(entry.get("model_priorities"), dict) else {}
+        return min(passed, key=lambda model: (int(priorities.get(model, 100)), float(self.runtime_models.data["providers"][provider_id][model].get("elapsed_seconds", float("inf"))), model)) if passed else None
+
+    def explain_selection(self, virtual_model: str) -> dict:
+        provider_id, _provider, entry = self._api_provider(virtual_model)
+        model = self._select_text_model_for_entry(provider_id, entry)
+        return {"virtual_model": virtual_model, "provider": provider_id, "provider_priority": entry.get("priority", 100), "selected_model": model, "manual_preferred": entry.get("preferred_runtime_model"), "denied_models": entry.get("denied_model_ids", []), "reason": "manual_preferred" if model and model == entry.get("preferred_runtime_model") else "priority_then_runtime_latency"}
 
     def _select_text_model(self, provider: object, entry: dict) -> str:
         selected = self._select_text_model_for_entry(provider.provider_id, entry)

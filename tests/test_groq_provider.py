@@ -139,5 +139,25 @@ class GroqProviderTests(unittest.TestCase):
             state = RuntimeModelState(state_path); state.record('groq', 'a', 'TIMEOUT', 20); state.clear_cooldown('groq', 'a')
             self.assertFalse(state.recent_timeout('groq', 'a'))
 
+    def test_batch_policy_deny_clears_selected_and_refresh_preserves_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'providers.json'
+            provider_config.upsert('groq', {'type':'groq','base_url':'https://api.groq.com/openai/v1','model_registry':{'DISCOVERED_MODELS':['a','b'], 'USABLE_MODELS':['a','b'], 'CURRENT_RUNTIME_MODEL':'a', 'RUNTIME_RESPONSIVE_MODELS':['a','b']}}, path)
+            changed = provider_config.batch_model_policy('groq', ['a'], 'deny', path=path)
+            self.assertEqual((changed['model_registry']['CURRENT_RUNTIME_MODEL'], changed['model_registry']['USABLE_MODELS']), (None, ['b']))
+            refreshed = provider_config.record_model_registry('groq', {'DISCOVERED_MODELS':['a','b'], 'RUNTIME_RESPONSIVE_MODELS':['a','b'], 'TIMEOUT_COOLDOWN_MODELS':[], 'CURRENT_RUNTIME_MODEL':'a'}, 'PASS', path)
+            self.assertEqual((refreshed['denied_model_ids'], refreshed['model_registry']['CURRENT_RUNTIME_MODEL']), (['a'], None))
+
+    def test_priority_and_provider_priority_affect_auto_selection(self):
+        from codex_ai_router import server
+        metadata = {'providers': {
+            'slow': {'type':'groq','enabled':True,'priority':10,'model_registry':{'ALLOWED_MODELS':['a'], 'USABLE_MODELS':['a']}, 'model_priorities':{'a':100}},
+            'fast': {'type':'groq','enabled':True,'priority':20,'model_registry':{'ALLOWED_MODELS':['b'], 'USABLE_MODELS':['b']}, 'model_priorities':{'b':1}},
+        }}
+        with tempfile.TemporaryDirectory() as temp, patch('codex_ai_router.server.provider_config.load', return_value=metadata):
+            state=RuntimeModelState(Path(temp)/'runtime.json');state.record('slow','a','PASS',1);state.record('fast','b','PASS',0.01)
+            service=server.RouterService(NetworkMode.AUTO,runtime_models=state)
+            self.assertEqual(service._api_provider('xiaoyu-api-auto')[0], 'slow')
+
 
 if __name__ == '__main__': unittest.main()
