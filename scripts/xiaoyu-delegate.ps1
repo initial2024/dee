@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][string]$Task,
   [ValidateSet('auto','read','review','plan','local')][string]$Mode='auto',
@@ -18,7 +18,7 @@ try{
   if(-not $explain.delegation_allowed){$summary=$explain.why}
   else {
     $safeTask = if($AllowWrite){$Task}else{"Read-only advisory task. Do not edit files, run commands, or expose secrets. " + $Task}
-    $job=if($Mode -eq 'local'){Start-Job -ScriptBlock { param($prompt) & xiaoyu-router local smoke $prompt 2>&1 } -ArgumentList $safeTask}else{Start-Job -ScriptBlock { param($prompt,$budget) & xiaoyu-router delegate-fast --max-seconds $budget $prompt 2>&1 } -ArgumentList $safeTask,$MaxSeconds}
+    $job=if($Mode -eq 'local'){Start-Job -ScriptBlock { param($prompt,$risk) & xiaoyu-router local auto-smoke --task $prompt --risk $risk 2>&1 } -ArgumentList $safeTask,$Risk}else{Start-Job -ScriptBlock { param($prompt,$budget) & xiaoyu-router delegate-fast --max-seconds $budget $prompt 2>&1 } -ArgumentList $safeTask,$MaxSeconds}
     if(Wait-Job -Job $job -Timeout ($MaxSeconds + 3)){$result=Receive-Job -Job $job; Remove-Job -Job $job -Force; try{$routerResult=($result|Out-String)|ConvertFrom-Json;if($Mode -eq 'local'){$success=($routerResult.status -eq 'PASS');$provider='direct_local';$model=$routerResult.model;$summary=[string]$routerResult.response;$errorCode=if($success){$null}else{[string]$routerResult.error_code}}else{$success=[bool]$routerResult.ok;$provider=$routerResult.provider;$model=$routerResult.model;$summary=[string]$routerResult.summary;$errorCode=$routerResult.error_code}}catch{$summary='Router returned an invalid delegation response.';$errorCode='ROUTER_RESPONSE_INVALID'}}
     else {Stop-Job -Job $job -ErrorAction SilentlyContinue;Remove-Job -Job $job -Force;$errorCode='ROUTER_TIMEOUT';$summary='Router delegation timed out; retain work in official Codex.'}
     if(-not $success -and -not $errorCode){$errorCode='ROUTER_COMMAND_FAILED'}

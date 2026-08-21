@@ -15,6 +15,7 @@ from urllib.request import urlopen
 
 from .base import ProviderError
 from .lmstudio import LMStudioProvider
+from .local_model_selector import LocalModelSelector, profiles_for_models
 
 
 LOCAL_PORT_FALLBACKS = (18791, 18792, 18793, 18794, 18795)
@@ -45,6 +46,13 @@ def default_local_backend_config() -> dict:
         "threads": "auto",
         "gpu_layers": "auto",
         "timeout_seconds": 60,
+        "auto_select_model": True,
+        "manual_disabled_models": [],
+        "manual_preferred_model": "",
+        "manual_only_model": "",
+        "allow_slow_local": False,
+        "allow_bf16_auto": False,
+        "model_profiles": {},
     }
 
 
@@ -121,6 +129,8 @@ class GGUFModel:
     quantization: str = "UNKNOWN"
     context_window: str = "UNKNOWN"
     source: str = "configured"
+    vision_projector: bool = False
+    text_model: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -131,7 +141,8 @@ class GGUFModel:
             "quantization": self.quantization,
             "architecture": self.architecture,
             "context_window": self.context_window,
-            "text_model": "YES",
+            "text_model": "YES" if self.text_model else "NO",
+            "vision_projector": "YES" if self.vision_projector else "NO",
             "source": self.source,
         }
 
@@ -150,7 +161,8 @@ def discover_gguf_models(model_directories: list[Path] | None = None) -> list[GG
                 if not resolved.is_file():
                     continue
                 source = "lmstudio" if any(os.path.normcase(str(resolved)).startswith(item) for item in defaults) else "configured"
-                found[os.path.normcase(str(resolved))] = GGUFModel(resolved, resolved.stem, resolved.stat().st_size, quantization=_quantization(resolved.name), source=source)
+                projector = "mmproj" in resolved.name.lower() or "vision-projector" in resolved.name.lower()
+                found[os.path.normcase(str(resolved))] = GGUFModel(resolved, resolved.stem, resolved.stat().st_size, quantization=_quantization(resolved.name), source=source, vision_projector=projector, text_model=not projector)
             except OSError:
                 continue
     return sorted(found.values(), key=lambda item: str(item.path).lower())
@@ -179,7 +191,8 @@ class ManagedLlamaCppBackend:
         self._last_port_event: dict = {}
         if selected_path and Path(selected_path).is_file():
             selected_file = Path(selected_path).resolve()
-            self.selected = GGUFModel(selected_file, selected_file.stem, selected_file.stat().st_size, quantization=_quantization(selected_file.name), source="lmstudio" if "lmstudio" in str(selected_file).lower() else "configured")
+            projector = "mmproj" in selected_file.name.lower() or "vision-projector" in selected_file.name.lower()
+            self.selected = GGUFModel(selected_file, selected_file.stem, selected_file.stat().st_size, quantization=_quantization(selected_file.name), source="lmstudio" if "lmstudio" in str(selected_file).lower() else "configured", vision_projector=projector, text_model=not projector)
 
     @property
     def pid_path(self) -> Path:
@@ -191,6 +204,58 @@ class ManagedLlamaCppBackend:
 
     def discover(self) -> list[GGUFModel]:
         return discover_gguf_models(self.model_directories)
+
+    def _profile_config(self) -> dict:
+        config = load_local_backend_config(self.config_path)
+        raw = config.get("model_profiles")
+        return raw if isinstance(raw, dict) else {}
+
+    def profiles(self) -> list[dict]:
+        """Discover and persist non-secret model profiles."""
+        models = self.discover()
+        config = load_local_backend_config(self.config_path)
+        persisted = self._profile_config()
+        disabled = set(str(item) for item in config.get("manual_disabled_models", []) if item)
+        preferred = str(config.get("manual_preferred_model") or "")
+        only = str(config.get("manual_only_model") or "")
+        result = profiles_for_models(models, persisted)
+        changed = False
+        for item in result:
+            model_id = str(item.get("model_id"))
+            item["manual_disabled"] = model_id in disabled
+            item["manual_preferred"] = bool(preferred and model_id == preferred)
+            item["manual_only"] = bool(only and model_id == only)
+            if persisted.get(model_id) != item:
+                persisted[model_id] = item
+                changed = True
+        if changed:
+            config["model_profiles"] = persisted
+            save_local_backend_config(config, self.config_path)
+        return result
+
+    def explain_select(self, task: str, risk: str = "auto", mode: str = "auto") -> dict:
+        config = load_local_backend_config(self.config_path)
+        profiles = self.profiles()
+        policy = {
+            "manual_disabled_models": config.get("manual_disabled_models", []),
+            "manual_preferred_model": config.get("manual_preferred_model", ""),
+            "manual_only_model": config.get("manual_only_model", ""),
+        }
+        selector = LocalModelSelector(profiles, self.selected.model_id if self.selected else None, policy)
+        return selector.select(task, risk=risk, mode=mode, allow_slow_local=bool(config.get("allow_slow_local")), allow_bf16_auto=bool(config.get("allow_bf16_auto")))
+
+    def auto_select(self, task: str, risk: str = "auto", mode: str = "auto", apply: bool = True) -> dict:
+        selection = self.explain_select(task, risk=risk, mode=mode)
+        selected_id = selection.get("selected_model")
+        if selected_id and apply:
+            chosen = next((item for item in self.discover() if item.model_id == selected_id), None)
+            if chosen is None:
+                selection["selected_model"] = None
+                selection["error_code"] = "MODEL_NOT_FOUND"
+                selection["requires_api_or_official_codex"] = True
+            elif not self.selected or self.selected.model_id != chosen.model_id:
+                self._persist_selected(chosen)
+        return selection
 
     def executable_path(self) -> Path | None:
         return discover_llama_server(self.configured_executable or self.executable)
@@ -512,6 +577,56 @@ class ManagedLlamaCppBackend:
         except ProviderError as exc:
             return {"status": "ERROR", "action": "repair", "error_code": str(exc), **self.status()}
 
+    def auto_smoke(self, task: str, risk: str = "auto", mode: str = "auto") -> dict:
+        started = time.monotonic()
+        previous_model = self.selected.model_id if self.selected else None
+        was_running = self.running()
+        selection = self.auto_select(task, risk=risk, mode=mode, apply=True)
+        selected_id = selection.get("selected_model")
+        if not selected_id:
+            return {"status": "ERROR", "error_code": selection.get("error_code") or "LOCAL_NO_ELIGIBLE_MODEL", "selection": selection, "model": None, "endpoint": self.endpoint()}
+        chosen = next((item for item in self.discover() if item.model_id == selected_id), None)
+        if chosen is None:
+            return {"status": "ERROR", "error_code": "MODEL_NOT_FOUND", "selection": selection, "model": selected_id, "endpoint": self.endpoint()}
+        try:
+            if not was_running:
+                self.start(chosen)
+            elif previous_model != chosen.model_id:
+                self.restart(chosen)
+            response = self.ask(task)
+            if not response:
+                raise ProviderError("LOCAL_EMPTY_RESPONSE")
+            elapsed = round(time.monotonic() - started, 3)
+            self._record_profile_result(chosen.model_id, "PASS", elapsed, None)
+            result = {"status": "PASS", "response": response, "model": chosen.model_id, "endpoint": self.endpoint(), "selection": selection, "duration_seconds": elapsed}
+            return result
+        except ProviderError as exc:
+            code = str(exc)
+            if code in {"HEALTH_TIMEOUT", "START_FAILED"}:
+                code = "LOCAL_MODEL_LOAD_TIMEOUT"
+            elif "TIMEOUT" in code.upper():
+                code = "LOCAL_MODEL_LOAD_TIMEOUT" if code == "COMPLETION_TIMEOUT" else code
+            elapsed = round(time.monotonic() - started, 3)
+            self._record_profile_result(chosen.model_id, "TIMEOUT" if "TIMEOUT" in code else "FAIL", elapsed, code)
+            result = {"status": "ERROR", "error_code": code, "model": chosen.model_id, "endpoint": self.endpoint(), "selection": selection, "duration_seconds": elapsed}
+            return result
+
+    def _record_profile_result(self, model_id: str, status: str, elapsed: float, error_code: str | None) -> None:
+        config = load_local_backend_config(self.config_path)
+        profiles = config.get("model_profiles") if isinstance(config.get("model_profiles"), dict) else {}
+        profile = dict(profiles.get(model_id) or {})
+        profile.update({"last_smoke_status": status, "last_latency_seconds": elapsed, "last_error_code": error_code})
+        profiles[model_id] = profile
+        config["model_profiles"] = profiles
+        save_local_backend_config(config, self.config_path)
+        try:
+            from ..accounting.performance import PerformanceTracker
+            PerformanceTracker.for_current_user().record(
+                f"local:{model_id}", elapsed, status == "PASS", False, 20
+            )
+        except Exception:
+            pass
+
     def available(self) -> bool:
         return self.running() or (self.selected is not None and self.executable_available())
 
@@ -584,4 +699,15 @@ class LocalBackend:
             return self.lmstudio.ask(prompt)
         if self.managed.discover():
             return self.managed.ask(prompt)
+        raise ProviderError("LOCAL_DIRECT_BACKEND_NOT_CONFIGURED")
+
+    def auto_ask(self, prompt: str, mode: str = "auto", risk: str = "auto") -> str:
+        """Run a bounded local task through the GGUF selector when available."""
+        if self.managed.executable_available() and (self.managed.selected or self.managed.discover()):
+            result = self.managed.auto_smoke(prompt, risk=risk, mode=mode)
+            if result.get("status") != "PASS":
+                raise ProviderError(str(result.get("error_code") or "LOCAL_DIRECT_BACKEND_ERROR"))
+            return str(result.get("response") or "")
+        if self.lmstudio.available():
+            return self.lmstudio.ask(prompt)
         raise ProviderError("LOCAL_DIRECT_BACKEND_NOT_CONFIGURED")

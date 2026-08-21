@@ -21,6 +21,9 @@ local:
   max_agent_steps: 2
   structured_retry_max: 1
   local_write: false
+  auto_select_model: true
+  allow_slow_local: false
+  allow_bf16_auto: false
 routing:
   codex_budget_mode: SAVE
   max_agent_iterations: 6

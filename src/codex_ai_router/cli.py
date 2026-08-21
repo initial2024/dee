@@ -72,6 +72,10 @@ def main() -> None:
     for action in ("start", "stop", "restart", "repair", "status", "models", "smoke"):
         item = local_sub.add_parser(action)
         if action == "smoke": item.add_argument("task", nargs="?", default="只回复 LOCAL_DIRECT_OK")
+    local_profiles = local_sub.add_parser("profiles")
+    local_explain = local_sub.add_parser("explain-select"); local_explain.add_argument("task"); local_explain.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_explain.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
+    local_auto = local_sub.add_parser("auto-smoke"); local_auto.add_argument("--task", required=True); local_auto.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_auto.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
+    local_policy = local_sub.add_parser("policy"); local_policy.add_argument("--disable-model", action="append", default=[]); local_policy.add_argument("--enable-model", action="append", default=[]); local_policy.add_argument("--preferred"); local_policy.add_argument("--only"); local_policy.add_argument("--allow-slow-local", action="store_true"); local_policy.add_argument("--allow-bf16-auto", action="store_true"); local_policy.add_argument("--no-auto", action="store_true")
     local_select = local_sub.add_parser("select"); local_select.add_argument("model")
     local_configure = local_sub.add_parser("configure"); local_configure.add_argument("--llama-server-path"); local_configure.add_argument("--model-dir", action="append"); local_configure.add_argument("--port", type=int); local_configure.add_argument("--ctx-size", type=int); local_configure.add_argument("--timeout-seconds", type=int)
     serve = sub.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=18789); serve.add_argument("--gguf-dir", action="append", default=[]); serve.add_argument("--managed-gguf", help="optional discovered GGUF id to start persistently")
@@ -183,6 +187,21 @@ def main() -> None:
                 emit({"status": "CONFIGURED", "config_path": str(save_local_backend_config(local_data))})
             elif args.local_action == "status": emit(backend.status())
             elif args.local_action == "models": emit({"models": [model.as_dict() for model in backend.discover()], "llama_server_found": "YES" if backend.executable_available() else "NO", "source": "lmstudio_gguf_direct", "LMSTUDIO_GGUF_REUSE": "YES", "NO_FULL_DISK_SCAN": "YES"})
+            elif args.local_action == "profiles":
+                profiles = backend.profiles(); emit({"profiles": profiles, "model_count": len(profiles), "source": "gguf_filename_profile"})
+            elif args.local_action == "explain-select": emit(backend.explain_select(args.task, risk=args.risk, mode=args.mode))
+            elif args.local_action == "auto-smoke": emit(backend.auto_smoke(args.task, risk=args.risk, mode=args.mode))
+            elif args.local_action == "policy":
+                local_data = load_local_backend_config()
+                disabled = set(str(item) for item in local_data.get("manual_disabled_models", []) if item)
+                disabled.update(args.disable_model); disabled.difference_update(args.enable_model)
+                local_data["manual_disabled_models"] = sorted(disabled)
+                if args.preferred is not None: local_data["manual_preferred_model"] = args.preferred
+                if args.only is not None: local_data["manual_only_model"] = args.only
+                if args.allow_slow_local: local_data["allow_slow_local"] = True
+                if args.allow_bf16_auto: local_data["allow_bf16_auto"] = True
+                if args.no_auto: local_data["auto_select_model"] = False
+                emit({"status": "POLICY_SAVED", "config_path": str(save_local_backend_config(local_data)), "auto_select_model": local_data.get("auto_select_model", True), "manual_disabled_models": local_data.get("manual_disabled_models", []), "manual_preferred_model": local_data.get("manual_preferred_model", ""), "manual_only_model": local_data.get("manual_only_model", ""), "allow_slow_local": local_data.get("allow_slow_local", False), "allow_bf16_auto": local_data.get("allow_bf16_auto", False)})
             elif args.local_action == "select": emit({"status": "SELECTED", "model": backend.select(args.model).as_dict()})
             elif args.local_action == "start": emit(backend.start())
             elif args.local_action == "stop": emit(backend.stop())

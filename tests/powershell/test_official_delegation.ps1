@@ -16,7 +16,7 @@ Assert-True ($delegateText -match 'Read-only advisory task') 'delegate_defaults_
 Assert-True ($delegateText -match 'delegation-ledger.jsonl') 'delegation_ledger_present'
 Assert-True ($delegateText -match 'delegate-fast --max-seconds \$budget') 'delegate_passes_user_timeout_to_fast_route'
 Assert-True ($delegateText -match "ValidateSet\('auto','read','review','plan','local'\)") 'delegate_supports_direct_local_mode'
-Assert-True ($delegateText -match 'xiaoyu-router local smoke') 'delegate_local_mode_routes_direct_backend'
+Assert-True ($delegateText -match 'xiaoyu-router local auto-smoke') 'delegate_local_mode_routes_selector_backend'
 Assert-True ($delegateText -match 'provider=\$payload.provider;model=\$payload.model') 'ledger_records_selected_provider_and_model'
 Assert-True ($delegateText -notmatch '(?i)api[_ -]?key\s*=\s*["''][^"'']+') 'delegate_has_no_embedded_key'
 Assert-True ($officialModeText -match 'high-risk.*official Codex control') 'instructions_keep_high_risk_official'

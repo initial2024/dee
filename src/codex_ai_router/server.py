@@ -288,10 +288,20 @@ class RouterService:
         final = "ALL_PROVIDERS_TIMEOUT" if any(item.get("reason", "").find("TIMEOUT") >= 0 for item in skipped) else "NO_AVAILABLE_PROVIDER"
         return {"ok": False, "summary": "No delegated provider completed within the configured budget.", "provider": None, "model": None, "error_code": final, "skipped": skipped}
 
-    def _local_response(self, prompt: str, virtual_model: str) -> dict:
+    def _local_response(self, prompt: str, virtual_model: str, mode: str = "auto") -> dict:
         if not self.local.available():
             raise RuntimeError("LOCAL_UNAVAILABLE")
-        return self._response(virtual_model, self.local.ask(prompt))
+        auto_ask = getattr(self.local, "auto_ask", None)
+        try:
+            text = auto_ask(prompt, mode=mode) if callable(auto_ask) else self.local.ask(prompt)
+        except Exception as exc:
+            code = str(exc) or "LOCAL_DIRECT_BACKEND_ERROR"
+            if code == "LOCAL_EMPTY_RESPONSE":
+                raise RuntimeError(code) from exc
+            if code == "LOCAL_HIGH_RISK_SAFE_STOP":
+                raise RuntimeError(code) from exc
+            raise RuntimeError(code) from exc
+        return self._response(virtual_model, text)
 
     def _api_response(self, request_payload: dict, virtual_model: str) -> dict:
         if not self.network.remote_allowed:
@@ -319,11 +329,11 @@ class RouterService:
         if not prompt:
             raise RuntimeError("INPUT_REQUIRED")
         if virtual_model == "xiaoyu-local":
-            return self._local_response(prompt, virtual_model)
+            return self._local_response(prompt, virtual_model, mode="local")
         if virtual_model == "xiaoyu-auto":
             category, risk = classify(prompt)
             if FastLocalGate(self.fast_local_policy).permits(prompt, category, risk) and self.local.available():
-                return self._local_response(prompt, virtual_model)
+                return self._local_response(prompt, virtual_model, mode="auto")
         return self._api_response(request_payload, virtual_model)
 
 
