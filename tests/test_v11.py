@@ -200,6 +200,19 @@ class RouterV11Tests(unittest.TestCase):
             self.assertEqual((result["ok"], result["provider"], result["model"]), (True, "lightboat", "second"))
             self.assertIn("DOWNSTREAM_TIMEOUT:10", [item["reason"] for item in result["skipped"]])
 
+    def test_126_explain_selection_reports_policy_and_cooldown_skip_reasons(self):
+        from codex_ai_router import server
+        metadata = {"providers": {"groq": {"type": "groq", "enabled": True, "model_registry": {"DISCOVERED_MODELS": ["denied", "slow", "fast"], "ALLOWED_MODELS": ["slow", "fast"]}, "denied_model_ids": ["denied"]}}}
+        with tempfile.TemporaryDirectory() as temp, patch("codex_ai_router.server.provider_config.load", return_value=metadata):
+            state = RuntimeModelState(Path(temp) / "runtime.json", cooldown_seconds=900)
+            state.record("groq", "slow", "TIMEOUT", 20, "TIMEOUT")
+            state.record("groq", "fast", "PASS", 0.1, "HTTP_200")
+            explanation = server.RouterService(NetworkMode.AUTO, runtime_models=state).explain_selection("xiaoyu-api-groq")
+        self.assertEqual((explanation["provider"], explanation["selected_model"]), ("groq", "fast"))
+        reasons = {(item.get("model"), item["reason"]) for item in explanation["skipped"]}
+        self.assertIn(("denied", "POLICY_DENIED"), reasons)
+        self.assertIn(("slow", "TIMEOUT_COOLDOWN"), reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

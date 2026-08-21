@@ -126,7 +126,52 @@ class RouterService:
     def explain_selection(self, virtual_model: str) -> dict:
         provider_id, _provider, entry = self._api_provider(virtual_model)
         model = self._select_text_model_for_entry(provider_id, entry)
-        return {"virtual_model": virtual_model, "provider": provider_id, "provider_priority": entry.get("priority", 100), "selected_model": model, "manual_preferred": entry.get("preferred_runtime_model"), "denied_models": entry.get("denied_model_ids", []), "reason": "manual_preferred" if model and model == entry.get("preferred_runtime_model") else "priority_then_runtime_latency"}
+        runtime = self.runtime_models.data.get("providers", {})
+        provider_runtime = runtime.get(provider_id, {}) if isinstance(runtime, dict) else {}
+        denied = set(entry.get("denied_model_ids", []))
+        skipped: list[dict] = []
+        snapshot = entry.get("model_registry", {}) if isinstance(entry.get("model_registry"), dict) else {}
+        discovered = snapshot.get("DISCOVERED_MODELS", [])
+        candidates, image_models = text_candidates(self._metadata_candidates(entry))
+        for candidate in discovered if isinstance(discovered, list) else []:
+            if candidate in denied:
+                skipped.append({"provider": provider_id, "model": candidate, "reason": "POLICY_DENIED"})
+            elif candidate in image_models:
+                skipped.append({"provider": provider_id, "model": candidate, "reason": "IMAGE_MODEL"})
+            elif candidate not in candidates:
+                skipped.append({"provider": provider_id, "model": candidate, "reason": "NOT_ELIGIBLE"})
+            else:
+                details = provider_runtime.get(candidate, {}) if isinstance(provider_runtime, dict) else {}
+                status = details.get("status")
+                if self.runtime_models.recent_timeout(provider_id, candidate):
+                    skipped.append({"provider": provider_id, "model": candidate, "reason": "TIMEOUT_COOLDOWN"})
+                elif status != "PASS":
+                    skipped.append({"provider": provider_id, "model": candidate, "reason": "NOT_RUNTIME_PASS"})
+        preferred = entry.get("preferred_runtime_model")
+        reason = "manual_preferred" if model and model == preferred else "priority_then_runtime_latency"
+        skipped_providers: list[dict] = []
+        if virtual_model == "xiaoyu-api-auto":
+            for other_id, other_entry in self._provider_entries():
+                if other_id == provider_id:
+                    continue
+                other_model = self._select_text_model_for_entry(other_id, other_entry)
+                skipped_providers.append({
+                    "provider": other_id,
+                    "model": other_model,
+                    "reason": "LOWER_PRIORITY_OR_LATENCY" if other_model else "NO_RUNTIME_PASS_OR_UNAVAILABLE",
+                })
+        return {
+            "virtual_model": virtual_model,
+            "provider": provider_id,
+            "provider_priority": entry.get("priority", 100),
+            "selected_model": model,
+            "manual_preferred": preferred,
+            "denied_models": entry.get("denied_model_ids", []),
+            "reason": reason,
+            "why_selected": "preferred model is allowed and runtime PASS" if reason == "manual_preferred" else "allowed runtime PASS model ranked by priority then latency",
+            "skipped": skipped,
+            "skipped_providers": skipped_providers,
+        }
 
     def _fast_candidates(self) -> tuple[list[tuple[str, object, dict, str]], list[dict]]:
         """Select only proven responsive text models; never rediscover or probe here."""

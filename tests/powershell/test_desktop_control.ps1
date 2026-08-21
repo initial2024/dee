@@ -18,7 +18,7 @@ Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Rou
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match '使用 OpenAI Luna（低）') 'desktop_control_exposes_handoff_openai_profile'
 $source = Get-Content -LiteralPath $control -Raw -Encoding UTF8
 Assert-True ($source -match '小羽 Router 控制台' -and $source -match '使用小羽 Router' -and $source -match '使用 OpenAI Luna（低）') 'chinese_title_and_buttons_present'
-Assert-True ($source -match "Microsoft YaHei UI" -and $source -match '\[double\]\$FontScale = 1\.15') 'large_font_and_scale_parameter_present'
+Assert-True ($source -match "Microsoft YaHei UI" -and $source -match '\[double\]\$FontScale = 1\.25') 'large_font_and_scale_parameter_present'
 Assert-True ($source -match 'AutoScaleMode.*Dpi') 'dpi_scaling_is_enabled'
 Assert-True ($source -match 'Router：\{0\}`r`n监听地址：\{1\}') 'status_fields_are_line_separated'
 Assert-True ($source -notmatch '(?i)api[_ -]?key\s*=' -and $source -notmatch '(?i)authorization\s*=') 'ui_does_not_embed_secret_values'
@@ -45,7 +45,12 @@ Assert-True ($source.Contains("'provider','refresh-models',`$id") -and $source.C
 Assert-True ($source -match '供应商元数据解析失败') 'provider_metadata_error_is_surfaced'
 Assert-True ($source -match 'model_registry' -and $source -match '发现模型数' -and $source -match '可用模型数') 'control_panel_model_counts_use_registry_snapshot'
 Assert-True ($source -match '可用模型：' -and $source -match '运行可用模型：' -and $source -match '当前运行模型：') 'provider_details_show_model_state_buckets'
-Assert-True ($source -match 'Open-ModelPicker' -and $source -match '设为当前/首选模型' -and $source -match '批量禁用') 'control_panel_model_picker_persists_manual_selection'
+Assert-True ($source -match 'Open-ModelPicker' -and $source -match '设为当前模型' -and $source -match '设为首选模型' -and $source -match '批量禁用') 'control_panel_model_picker_persists_manual_selection'
+Assert-True ($source -match 'New-ModelDialogGrid' -and $source -match 'DataGridView' -and $source -match '勾选') 'model_picker_is_real_multiselect_grid'
+Assert-True ($source -match 'Open-BatchManager' -and $source -match '批量允许' -and $source -match '批量清除禁用') 'batch_management_is_real_ui'
+Assert-True ($source -match '筛选模型/状态' -and $source -match 'Set-ModelGridFilter') 'batch_management_has_filter'
+Assert-True ($source -match '供应商操作' -and $source -match '模型操作' -and $source -match '迁移') 'provider_tab_actions_are_grouped'
+Assert-True (($ui -join "`n") -match 'MODEL_PICKER_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)' -and ($ui -join "`n") -match 'BATCH_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)') 'model_and_batch_ui_selftest_reported'
 Assert-True ($source -match '选择方式：' -and $source -match '手动选择' -and $source -match '自动选择') 'control_panel_marks_auto_and_manual_model_selection'
 Assert-True ($source -match '允许模型' -and $source -match '拒绝模型' -and $source -match '清除冷却') 'control_panel_model_picker_has_policy_and_cooldown_actions'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
@@ -64,7 +69,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=34'
+Write-Output 'POWERSHELL_TEST_TOTAL=39'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }
