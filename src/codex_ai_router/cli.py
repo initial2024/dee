@@ -20,6 +20,7 @@ from .providers.model_states import model_state_report
 from .handoff import compact_handoff
 from .codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
 from .delegation import explain_delegation
+from .groq_diagnostics import diagnose as diagnose_groq, live_smoke as live_smoke_groq
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -96,6 +97,8 @@ def main() -> None:
     provider_models = provider_sub.add_parser("models"); provider_models.add_argument("id")
     provider_refresh = provider_sub.add_parser("refresh-models"); provider_refresh.add_argument("id")
     provider_probe = provider_sub.add_parser("probe-runtime"); provider_probe.add_argument("id"); provider_probe.add_argument("--all", action="store_true")
+    provider_diagnose = provider_sub.add_parser("diagnose"); provider_diagnose.add_argument("id")
+    provider_live_smoke = provider_sub.add_parser("live-smoke"); provider_live_smoke.add_argument("id"); provider_live_smoke.add_argument("--confirm", action="store_true")
     args = parser.parse_args()
     task_policy = SelectionPolicy.from_values(getattr(args, "allow_provider", ()), getattr(args, "deny_provider", ()), getattr(args, "allow_model", ()), getattr(args, "deny_model", ()), getattr(args, "no_api", False), getattr(args, "no_local", False))
     config_data = load_config(args.config) if args.config else {}
@@ -139,6 +142,16 @@ def main() -> None:
             if not entry: raise KeyError("provider not found")
             if "api.groq.com/openai/v1" not in str(entry.get("base_url", "")).rstrip("/").lower(): raise ValueError("NOT_GROQ_BASE_URL")
             emit(provider_config.migrate_to_groq(args.id))
+        elif args.provider_action == "diagnose":
+            entry = provider_config.load()["providers"].get(args.id)
+            if not entry: raise KeyError("provider not found")
+            if entry.get("type") != "groq": raise ValueError("PROVIDER_DIAGNOSE_SUPPORTED_FOR_GROQ_ONLY")
+            emit(diagnose_groq(args.id, entry))
+        elif args.provider_action == "live-smoke":
+            entry = provider_config.load()["providers"].get(args.id)
+            if not entry: raise KeyError("provider not found")
+            if entry.get("type") != "groq": raise ValueError("PROVIDER_LIVE_SMOKE_SUPPORTED_FOR_GROQ_ONLY")
+            emit(live_smoke_groq(args.id, entry, args.confirm))
         elif args.provider_action == "set-runtime-model": emit(provider_config.set_runtime_model_preference(args.id, args.model))
         elif args.provider_action == "set-model-denied": emit(provider_config.set_model_denied(args.id, args.model, not args.allow))
         elif args.provider_action == "clear-cooldown": RuntimeModelState().clear_cooldown(args.id, args.model); emit({"status": "COOLDOWN_CLEARED", "id": args.id, "model": args.model})

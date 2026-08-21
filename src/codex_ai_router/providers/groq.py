@@ -14,6 +14,8 @@ def classify_groq_error(exc: Exception) -> str:
     if status == 403: return "GROQ_PERMISSION_ERROR"
     if status == 429: return "GROQ_RATE_LIMIT"
     if status == 404: return "GROQ_MODEL_UNAVAILABLE"
+    if status in {400, 422}: return "GROQ_UPSTREAM_FORMAT_ERROR"
+    if status == 503: return "GROQ_UPSTREAM_HTTP_503"
     name = type(exc).__name__.lower()
     if "timeout" in name: return "GROQ_TIMEOUT"
     if any(value in name for value in ("connection", "network", "api_connection")): return "GROQ_NETWORK_ERROR"

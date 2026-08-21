@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from .base import BaseProvider, DiscoveredModel, ProviderError, ProviderResponse
 from .model_discovery import ModelDiscoveryChain
+from ..response_compat import extract_visible_text
 
 
 class ResponsesRequestAdapter:
@@ -18,15 +19,7 @@ class ResponsesRequestAdapter:
 class ResponsesResponseAdapter:
     @staticmethod
     def text(data: dict) -> str:
-        if isinstance(data.get("output_text"), str): return data["output_text"]
-        parts: list[str] = []
-        for output in data.get("output", []):
-            if isinstance(output.get("output_text"), str): parts.append(output["output_text"])
-            for content in output.get("content", []):
-                value = content.get("text") or content.get("output_text") if isinstance(content, dict) else None
-                if isinstance(value, str): parts.append(value)
-                elif isinstance(value, dict) and isinstance(value.get("value"), str): parts.append(value["value"])
-        return "".join(parts)
+        return extract_visible_text(data)
     @classmethod
     def normalize(cls, data: dict) -> ProviderResponse:
         text = cls.text(data)
@@ -227,7 +220,9 @@ class OpenAICompatibleProvider(BaseProvider):
                 if response.headers.get_content_type() == "text/html": raise ProviderError("NON_API_RESPONSE")
                 data = json.loads(response.read())
                 if self.wire_api == "responses": return ResponsesResponseAdapter.normalize(data)
-                choice = data["choices"][0]; return ProviderResponse(choice["message"]["content"], data.get("model"), choice.get("finish_reason"), data.get("usage"), "chat_completions")
+                text = extract_visible_text(data)
+                if not text: raise ProviderError("UPSTREAM_CONTENT_EMPTY")
+                return ProviderResponse(text, data.get("model"), data.get("choices", [{}])[0].get("finish_reason"), data.get("usage"), "chat_completions")
         except ProviderError: raise
         except HTTPError as exc:
             if exc.code == 404 and not self._validating_candidate:

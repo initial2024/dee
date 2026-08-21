@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -17,6 +18,9 @@ from .providers.local_backend import LocalBackend
 from .providers.openai_compatible import ResponsesResponseAdapter
 from .providers.base import ProviderError
 from .providers.runtime_models import RuntimeModelState, text_candidates
+from .call_records import append as append_call_record
+from .provider_allowlist import model_catalog, providers as allowlisted_providers, resolve as resolve_allowlisted
+from .response_compat import ResponseCompatibilityError, diagnostic_headers, extract_visible_text, iter_normalized_sse, normalize_chat_completion
 from .vision import VisionProxy
 
 
@@ -71,7 +75,9 @@ class RouterService:
 
     def models(self) -> list[dict]:
         names = [*VIRTUAL_MODELS, *(provider_virtual_model(provider_id) for provider_id, _ in self._provider_entries())]
-        return [{"id": name, "object": "model", "owned_by": "xiaoyu-router"} for name in names]
+        existing = [{"id": name, "object": "model", "owned_by": "xiaoyu-router"} for name in names]
+        seen = {item["id"] for item in existing}
+        return existing + [item for item in model_catalog() if item["id"] not in seen]
 
     def _provider_entries(self) -> list[tuple[str, dict]]:
         records = provider_config.load().get("providers", {})
@@ -256,7 +262,7 @@ class RouterService:
             raise RuntimeError("DOWNSTREAM_UNAVAILABLE") from exc
         text = ResponsesResponseAdapter.text(raw)
         if not text:
-            raise RuntimeError("DOWNSTREAM_TEXT_MISSING")
+            raise RuntimeError("UPSTREAM_CONTENT_EMPTY")
         return self._response(virtual_model, text, raw.get("usage"))
 
     def delegate_fast_readonly(self, prompt: str, max_seconds: int = 60) -> dict:
@@ -318,8 +324,139 @@ class RouterService:
     def _response(model: str, text: str, usage: dict | None = None) -> dict:
         return {"id": "resp_xiaoyu_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()), "status": "completed", "model": model, "output": [{"id": "msg_xiaoyu_" + uuid.uuid4().hex, "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text}]}], "output_text": text, "usage": usage or {}}
 
+    @staticmethod
+    def _allowlisted_models() -> set[str]:
+        return {model for provider in allowlisted_providers() for model in provider.get("models", [])} | {"hybrid-agent"}
+
+    @staticmethod
+    def _tools_requested(request_payload: dict) -> bool:
+        return bool(request_payload.get("tools") or request_payload.get("tool_choice") or request_payload.get("function_call"))
+
+    @staticmethod
+    def _manual_plan(prompt: str) -> str:
+        return "\n".join([
+            "Problem Summary: " + prompt,
+            "Analysis: Manual review is required; no tool was executed.",
+            "Proposed Plan: Inspect the relevant files, run bounded tests, and review the diff.",
+            "Codex Instruction: Review this plan and execute only approved, reversible steps.",
+            "Manual Commands: None generated automatically.",
+            "Risk Check: No file, network, or provider mutation was performed.",
+            "Requires User Confirmation: YES",
+        ])
+
+    @staticmethod
+    def _allowlisted_endpoint(provider: dict[str, object]) -> str:
+        endpoint = provider.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint.startswith(("http://", "https://")):
+            raise RuntimeError("INVALID_PROVIDER_ENDPOINT")
+        return endpoint.rstrip("/") + "/chat/completions"
+
+    def _allowlisted_response(self, request_payload: dict, model: str) -> dict:
+        started = time.monotonic()
+        request_id = "req_xiaoyu_" + uuid.uuid4().hex
+        provider, error = resolve_allowlisted(model)
+        if error:
+            append_call_record({"id": request_id, "mode": "NO_QUOTA_CODEX_MODE", "model": model, "provider": provider.get("id") if provider else None, "provider_type": provider.get("type") if provider else None, "status": "ERROR", "duration_ms": 0, "error_code": error, "content_detected": False, "normalized": False})
+            raise RuntimeError(error)
+        assert provider is not None
+        prompt = _input_text(request_payload.get("input", request_payload.get("messages", [])))
+        if not prompt:
+            raise RuntimeError("INPUT_REQUIRED")
+        if provider.get("type") == "MANUAL_PLAN":
+            text = self._manual_plan(prompt)
+            append_call_record({"id": request_id, "mode": "MANUAL_PLAN", "model": model, "provider": provider.get("id"), "provider_type": provider.get("type"), "status": "PASS", "duration_ms": int((time.monotonic() - started) * 1000), "error_code": None, "content_detected": True, "normalized": True})
+            return self._response(model, text)
+        target_model = model
+        if model == "hybrid-agent":
+            target_model = str((provider.get("models") or ["deepseek-web"])[0])
+        outbound: dict[str, object] = {"model": target_model, "messages": [{"role": "user", "content": prompt}], "stream": False}
+        headers = {"Content-Type": "application/json"}
+        if provider.get("type") == "EXTERNAL_API_ALLOWED":
+            key_env = provider.get("api_key_env")
+            if not isinstance(key_env, str) or not os.getenv(key_env):
+                raise RuntimeError("AUTH_MISSING")
+            headers["Authorization"] = "Bearer " + os.environ[key_env]
+        request = Request(self._allowlisted_endpoint(provider), data=json.dumps(outbound).encode("utf-8"), headers=headers, method="POST")
+        status = "ERROR"; error_code: str | None = None; content_detected = False
+        try:
+            with urlopen(request, timeout=30) as upstream:
+                status_code = int(getattr(upstream, "status", 200))
+                raw = json.loads(upstream.read().decode("utf-8"))
+            normalized = normalize_chat_completion(raw, model=model)
+            content_detected = bool(normalized["choices"][0]["message"].get("content"))
+            status = "PASS"
+            append_call_record({"id": request_id, "mode": "NO_QUOTA_CODEX_MODE", "model": model, "provider": provider.get("id"), "provider_type": provider.get("type"), "status": status, "duration_ms": int((time.monotonic() - started) * 1000), "error_code": None, "content_detected": content_detected, "normalized": True})
+            return self._response(model, normalized["choices"][0]["message"]["content"], normalized.get("usage"))
+        except HTTPError as exc:
+            error_code = "UPSTREAM_HTTP_" + str(exc.code)
+            raise RuntimeError(error_code) from exc
+        except ResponseCompatibilityError as exc:
+            error_code = str(exc)
+            raise RuntimeError(error_code) from exc
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            error_code = "UPSTREAM_UNAVAILABLE"
+            raise RuntimeError(error_code) from exc
+        finally:
+            if status != "PASS":
+                append_call_record({"id": request_id, "mode": "NO_QUOTA_CODEX_MODE", "model": model, "provider": provider.get("id"), "provider_type": provider.get("type"), "status": status, "duration_ms": int((time.monotonic() - started) * 1000), "error_code": error_code or "UPSTREAM_ERROR", "content_detected": content_detected, "normalized": False})
+
+    def chat_completion(self, request_payload: dict) -> dict:
+        model = request_payload.get("model")
+        if not isinstance(model, str):
+            raise RuntimeError("MODEL_REQUIRED")
+        if self._tools_requested(request_payload) and model != "manual-plan":
+            raise RuntimeError("TOOLS_NOT_SUPPORTED_BY_BACKEND")
+        if model in self._allowlisted_models():
+            response = self._allowlisted_response({**request_payload, "input": request_payload.get("messages", request_payload.get("input"))}, model)
+        else:
+            response = self.respond({**request_payload, "input": request_payload.get("messages", request_payload.get("input"))})
+        return normalize_chat_completion(response, model=model)
+
+    def stream_chat(self, request_payload: dict):
+        model = request_payload.get("model")
+        if not isinstance(model, str):
+            raise RuntimeError("MODEL_REQUIRED")
+        if self._tools_requested(request_payload) and model != "manual-plan":
+            raise RuntimeError("TOOLS_NOT_SUPPORTED_BY_BACKEND")
+        if model not in self._allowlisted_models():
+            response = self.chat_completion({**request_payload, "stream": False})
+            yield from iter_normalized_sse(["data: " + json.dumps(response, ensure_ascii=False)], model=model)
+            return
+        provider, error = resolve_allowlisted(model)
+        if error:
+            raise RuntimeError(error)
+        assert provider is not None
+        if provider.get("type") == "MANUAL_PLAN":
+            response = self._allowlisted_response({**request_payload, "input": request_payload.get("messages", request_payload.get("input"))}, model)
+            yield from iter_normalized_sse(["data: " + json.dumps(response, ensure_ascii=False)], model=model)
+            return
+        prompt = _input_text(request_payload.get("messages", request_payload.get("input")))
+        if not prompt:
+            raise RuntimeError("INPUT_REQUIRED")
+        target_model = model if model != "hybrid-agent" else str((provider.get("models") or ["deepseek-web"])[0])
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if provider.get("type") == "EXTERNAL_API_ALLOWED":
+            key_env = provider.get("api_key_env")
+            if not isinstance(key_env, str) or not os.getenv(key_env):
+                raise RuntimeError("AUTH_MISSING")
+            headers["Authorization"] = "Bearer " + os.environ[key_env]
+        request = Request(self._allowlisted_endpoint(provider), data=json.dumps({"model": target_model, "messages": [{"role": "user", "content": prompt}], "stream": True}).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urlopen(request, timeout=30) as upstream:
+                yield from iter_normalized_sse(upstream, model=model)
+        except HTTPError as exc:
+            raise RuntimeError("UPSTREAM_HTTP_" + str(exc.code)) from exc
+
     def respond(self, request_payload: dict) -> dict:
         virtual_model = request_payload.get("model")
+        if not isinstance(virtual_model, str):
+            raise RuntimeError("MODEL_REQUIRED")
+        if self._tools_requested(request_payload) and virtual_model != "manual-plan":
+            raise RuntimeError("TOOLS_NOT_SUPPORTED_BY_BACKEND")
+        if virtual_model in self._allowlisted_models():
+            if _has_image(request_payload.get("input")):
+                raise RuntimeError("VISION_PROVIDER_UNAVAILABLE")
+            return self._allowlisted_response(request_payload, virtual_model)
         if virtual_model not in {model["id"] for model in self.models()}:
             raise RuntimeError("UNKNOWN_VIRTUAL_MODEL")
         if _has_image(request_payload.get("input")):
@@ -348,11 +485,12 @@ class _Handler(BaseHTTPRequestHandler):
         # Never include request bodies or headers in server logs.
         return
 
-    def _send(self, status: int, body: dict) -> None:
+    def _send(self, status: int, body: dict, diagnostics: dict[str, str] | None = None) -> None:
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for name, value in (diagnostics or {}).items(): self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -360,11 +498,22 @@ class _Handler(BaseHTTPRequestHandler):
         raw = json.dumps({"type": "response.completed", "response": body}, ensure_ascii=False)
         encoded = ("event: response.completed\ndata: " + raw + "\n\ndata: [DONE]\n\n").encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _send_chat_stream(self, payload: dict) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        for frame in self.service.stream_chat(payload):
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
 
     def do_GET(self) -> None:
         if self.path == "/v1/models":
@@ -375,7 +524,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"code": "not_found"}})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/responses":
+        if self.path not in {"/v1/responses", "/v1/chat/completions"}:
             self._send(404, {"error": {"code": "not_found"}})
             return
         try:
@@ -385,16 +534,23 @@ class _Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise RuntimeError("INVALID_REQUEST")
-            response = self.service.respond(payload)
-            if payload.get("stream") is True:
-                self._send_sse(response)
+            if self.path == "/v1/chat/completions":
+                if payload.get("stream") is True:
+                    self._send_chat_stream(payload)
+                    return
+                response = self.service.chat_completion(payload)
+                self._send(200, response, diagnostic_headers(upstream_status=200, upstream_content_type="application/json", endpoint_mode="ROUTER_CHAT_COMPLETIONS", normalized=True, content_detected=bool(response["choices"][0]["message"].get("content")), stream_mode="non_stream"))
             else:
-                self._send(200, response)
+                response = self.service.respond(payload)
+                if payload.get("stream") is True:
+                    self._send_sse(response)
+                else:
+                    self._send(200, response, diagnostic_headers(upstream_status=200, upstream_content_type="application/json", endpoint_mode="ROUTER_RESPONSES", normalized=True, content_detected=bool(response.get("output_text")), stream_mode="non_stream"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self._send(400, {"error": {"code": "invalid_json"}})
         except RuntimeError as exc:
             code = str(exc)
-            status = 504 if code.startswith("DOWNSTREAM_TIMEOUT:") else (503 if code in {"LOCAL_UNAVAILABLE", "API_PROVIDER_UNAVAILABLE", "DOWNSTREAM_UNAVAILABLE", "REMOTE_FALLBACK_DISABLED_OFFLINE", "REMOTE_UNAVAILABLE"} else 400)
+            status = 504 if code.startswith("DOWNSTREAM_TIMEOUT:") else (503 if code in {"LOCAL_UNAVAILABLE", "API_PROVIDER_UNAVAILABLE", "DOWNSTREAM_UNAVAILABLE", "REMOTE_FALLBACK_DISABLED_OFFLINE", "REMOTE_UNAVAILABLE", "BRIDGE_OFFLINE", "BRIDGE_BUSY", "LOCAL_MODEL_OFFLINE", "NO_HEALTHY_PROVIDER", "UPSTREAM_UNAVAILABLE"} else 400)
             self._send(status, {"error": {"code": code}})
 
 

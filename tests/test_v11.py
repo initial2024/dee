@@ -128,7 +128,21 @@ class RouterV11Tests(unittest.TestCase):
             with urlopen(request, timeout=3) as response:
                 raw = response.read().decode("utf-8")
                 self.assertEqual(response.headers.get_content_type(), "text/event-stream")
+                self.assertEqual(response.headers.get("Cache-Control"), "no-cache")
             self.assertIn("response.completed", raw)
+        finally:
+            server.stop()
+
+    def test_118b_non_stream_response_has_sanitized_compat_diagnostics(self):
+        server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal()), port=0)
+        server.start()
+        try:
+            port = server.httpd.server_address[1]
+            request = Request(f"http://127.0.0.1:{port}/v1/responses", data=json.dumps({"model": "xiaoyu-local", "input": "ok"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=3) as response:
+                self.assertEqual(response.headers.get_content_type(), "application/json")
+                self.assertEqual(response.headers.get("X-Xiaoyu-Normalized"), "yes")
+                self.assertEqual(response.headers.get("X-Xiaoyu-Content-Detected"), "yes")
         finally:
             server.stop()
 

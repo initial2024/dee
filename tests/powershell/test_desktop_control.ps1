@@ -10,9 +10,15 @@ $text = $output -join "`n"
 Assert-True ($text -match 'CODEX_STATUS_VISIBLE=YES') 'desktop_control_codex_status_visible'
 Assert-True ($text -match 'PROVIDER_LIST_VISIBLE=YES') 'desktop_control_provider_list_visible'
 Assert-True ($text -match 'USAGE_GUARD_VISIBLE=YES') 'desktop_control_usage_guard_visible'
+Assert-True ($text -match 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES') 'desktop_control_deepseek_local_bridge_panel_visible'
+Assert-True ($text -match 'CODEX_MODE_PANEL_VISIBLE=YES' -and $text -match 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES' -and $text -match 'LOCAL_RECORDS_PANEL_VISIBLE=YES') 'desktop_control_codex_mode_allowlist_and_records_panels_visible'
+Assert-True ($text -match 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES') 'desktop_control_response_compat_diagnostics_visible'
+Assert-True ($text -match 'DEEPSEEK_HEALTH_PROMPT_SENT=NO') 'desktop_control_deepseek_health_never_sends_prompt'
+Assert-True ($text -match 'CONTROL_PANEL_EXCEPTION_GUARD=YES' -and $text -match 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES') 'desktop_control_has_safe_exception_guard'
 Assert-True ($text -match 'SECRET_VALUES_VISIBLE=NO') 'desktop_control_hides_secret_values'
   $ui = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest 2>&1
 Assert-True (($ui -join "`n") -match 'CONTROL_UI_INITIALIZATION=PASS') 'desktop_control_initializes_without_home_variable_error'
+Assert-True (($ui -join "`n") -match 'UI_SAFE_ACTION_EXCEPTION=CAUGHT') 'desktop_control_button_exception_is_caught'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match '本控制台不会伪造额度') 'official_quota_not_faked'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Router 直连测试') 'safe_router_smoke_button_present'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match '使用 OpenAI Luna（低）') 'desktop_control_exposes_handoff_openai_profile'
@@ -52,15 +58,59 @@ Assert-True ($source -match '筛选模型/状态' -and $source -match 'Set-Model
 Assert-True ($source -match '供应商操作' -and $source -match '模型操作' -and $source -match '迁移') 'provider_tab_actions_are_grouped'
 Assert-True (($ui -join "`n") -match 'MODEL_PICKER_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)' -and ($ui -join "`n") -match 'BATCH_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)') 'model_and_batch_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS') 'direct_local_ui_selftest_reported'
+Assert-True (($ui -join "`n") -match 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS') 'local_repair_ui_selftest_reported'
+Assert-True (($ui -join "`n") -match 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS') 'deepseek_local_bridge_ui_selftest_reported'
 Assert-True ($source -match '直接本地模型（推荐）' -and $source -match '扫描 LM Studio 模型' -and $source -match '启动本地后端' -and $source -match '测试本地推理') 'direct_local_controls_present'
+Assert-True ($source -match '修复本地后端' -and $source -match "local @Arguments") 'direct_local_repair_control_present'
 Assert-True ($source -match 'llama.cpp direct' -and $source -match 'LM Studio：仅作可选 fallback') 'direct_local_is_primary_lmstudio_is_fallback'
 Assert-True ($source -match '选择方式：' -and $source -match '手动选择' -and $source -match '自动选择') 'control_panel_marks_auto_and_manual_model_selection'
 Assert-True ($source -match '允许模型' -and $source -match '拒绝模型' -and $source -match '清除冷却') 'control_panel_model_picker_has_policy_and_cooldown_actions'
+Assert-True ($source -match 'DeepSeek 本地桥接' -and $source -match 'LOCAL_DIRECT' -and $source -match 'http://127.0.0.1:8792/v1') 'deepseek_local_bridge_status_panel_present'
+Assert-True ($source -match 'OFFICIAL_DIRECT' -and $source -match 'CUSTOM_ROUTER' -and $source -match 'OFFICIAL_ASSISTED') 'codex_legacy_modes_documented'
+Assert-True ($source -match 'CUSTOM_DEEPSEEK_HEAD' -and $source -match 'CUSTOM_HYBRID_AGENT') 'deepseek_head_and_hybrid_modes_present'
+Assert-True ($source -match 'CUSTOM_DEEPSEEK_HEAD' -and $source -match 'CUSTOM_LOCAL_LIGHT' -and $source -match 'CUSTOM_EXTERNAL_API' -and $source -match 'CUSTOM_HYBRID_AGENT') 'a4_codex_modes_present'
+Assert-True ($source -match 'Provider Allowlist' -and $source -match '外部 API 默认禁用' -and $source -match 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY') 'allowlist_panel_and_codex_task_boundary_present'
+Assert-True ($source -notmatch '\$lunaTask' -and $source -notmatch 'DeepSeek 首脑 / Luna Agent') 'xiaoyu_console_has_no_primary_task_input'
+Assert-True ($source -match 'Invoke-ModelsOnlyDiagnostic' -and $source -notmatch 'Invoke-ModelsOnlyDiagnostic.*chat/completions') 'models_diagnostic_has_no_chat_prompt'
+Assert-True ($source -match 'Response Compatibility' -or (Test-Path -LiteralPath (Join-Path $root 'src\codex_ai_router\response_compat.py'))) 'response_normalizer_is_present'
+Assert-True ($source -match "start-bridge\.ps1" -and $source -match "start-worker\.ps1" -and $source -match "health-check\.ps1" -and $source -match "smoke-local\.ps1" -and $source -match "stop-local\.ps1") 'deepseek_local_bridge_uses_existing_scripts'
+Assert-True ($source -match '健康检查只读取本地服务与页面状态，不发送 prompt' -and $source -match 'DEEPSEEK_HEALTH_PROMPT_SENT=NO') 'deepseek_health_is_non_generating'
+Assert-True ($source -match 'Wait-DeepSeekLoopbackPort' -and $source -match 'WORKER_START_TIMEOUT') 'deepseek_worker_start_waits_for_loopback_listener'
+Assert-True ($source -match '第一次确认' -and $source -match '第二次确认' -and $source -match '会发送一次真实 DeepSeek 测试对话') 'deepseek_smoke_requires_double_confirmation'
+Assert-True ($source -match '不会显示或保存 prompt、response、key、Cookie 或 Token' -and $source -match 'Add-DeepSeekLog') 'deepseek_panel_log_is_sanitized'
+Assert-True ($source -notmatch '/api/v0/chat/completion' -and $source -notmatch 'x-ds-pow-response' -and $source -notmatch 'storageState') 'deepseek_panel_has_no_private_api_or_browser_state_export'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
 . (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
 Assert-True (Use-DefaultNoCustomHeader 'https://api.groq.com/openai/v1') 'groq_runtime_default_header_is_no'
 Assert-True (-not (Use-DefaultNoCustomHeader 'https://api.example.com/v1')) 'non_groq_header_choice_remains_available'
 Assert-True ($source -match 'Groq（https://api.groq.com/openai/v1）使用官方 SDK' -and $source -match '转换为 Groq SDK') 'groq_sdk_control_panel_hint_and_migration_present'
+Assert-True ($source -match 'Invoke-SafeUiAction' -and $source -match '操作失败' -and $source -match '高级信息 / 调试信息') 'control_panel_uses_safe_chinese_error_summary'
+Assert-True ($source -match 'Groq 诊断' -and $source -match 'Groq 手动真实测试' -and $source -match 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED') 'groq_diagnostics_and_allowlist_gate_visible'
+
+$modeRoot = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-mode-' + [guid]::NewGuid().ToString())
+try {
+  New-Item -ItemType Directory -Path $modeRoot | Out-Null
+  $modeConfig = Join-Path $modeRoot 'config.toml'
+  [IO.File]::WriteAllText($modeConfig, "model = `"official-model`"`nmodel_reasoning_effort = `"medium`"`n", (New-Object Text.UTF8Encoding($false)))
+  $modeManager = Join-Path $root 'scripts\codex-mode-manager.ps1'
+  $custom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-router -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($custom.mode -eq 'CUSTOM_ROUTER' -and $custom.endpoint -eq 'LOCAL_8792') 'custom_router_sets_loopback_only_config'
+  $headCustom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-deepseek-head -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($headCustom.mode -eq 'CUSTOM_DEEPSEEK_HEAD' -and $headCustom.model -eq 'deepseek-head' -and $headCustom.endpoint -eq 'LOCAL_8792') 'custom_deepseek_head_sets_loopback_config'
+  $localCustom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-local-light -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($localCustom.mode -eq 'CUSTOM_LOCAL_LIGHT' -and $localCustom.model -eq 'local-light' -and $localCustom.endpoint -eq 'LOCAL_MODEL_1234') 'custom_local_light_sets_local_config'
+  $externalCustom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-external-api -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($externalCustom.mode -eq 'CUSTOM_EXTERNAL_API' -and $externalCustom.model -eq 'external-fast' -and $externalCustom.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_external_api_uses_local_router'
+  $hybridCustom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-hybrid-agent -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($hybridCustom.mode -eq 'CUSTOM_HYBRID_AGENT' -and $hybridCustom.model -eq 'hybrid-agent' -and $hybridCustom.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_hybrid_uses_local_router'
+  $assisted = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action official-assisted -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($assisted.mode -eq 'OFFICIAL_ASSISTED' -and $assisted.env_mutation -eq 'NONE') 'official_assisted_preserves_endpoint_environment'
+  $head = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action deepseek-head -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($head.mode -eq 'DEEPSEEK_HEAD' -and $head.env_mutation -eq 'NONE') 'deepseek_head_mode_does_not_change_endpoint_or_environment'
+  $official = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action official-direct -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($official.mode -eq 'OFFICIAL_DIRECT' -and ((Get-Content -LiteralPath $modeConfig -Raw -Encoding UTF8) -match 'official-model')) 'official_mode_restores_baseline'
+  Assert-True ((Get-ChildItem -LiteralPath (Join-Path $modeRoot 'state') -Filter 'config-*.toml').Count -ge 2) 'mode_switch_creates_timestamped_backups'
+} finally { if (Test-Path -LiteralPath $modeRoot) { Remove-Item -LiteralPath $modeRoot -Recurse -Force } }
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-desktop-shortcut-' + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $temp | Out-Null
@@ -72,7 +122,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=42'
+Write-Output 'POWERSHELL_TEST_TOTAL=76'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }
