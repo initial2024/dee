@@ -19,6 +19,7 @@ from .providers.runtime_models import RuntimeModelState, probe_model, text_candi
 from .providers.model_states import model_state_report
 from .handoff import compact_handoff
 from .codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
+from .delegation import explain_delegation
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -64,6 +65,7 @@ def main() -> None:
     delegate = sub.add_parser("delegate"); delegate.add_argument("--mode", choices=[m.value for m in Mode]); add_policy_args(delegate); delegate.add_argument("task")
     auto = sub.add_parser("auto"); add_policy_args(auto); auto.add_argument("task")
     review = sub.add_parser("review"); review.add_argument("path")
+    explain_delegation_command = sub.add_parser("explain-delegation"); explain_delegation_command.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); explain_delegation_command.add_argument("task")
     serve = sub.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=18789); serve.add_argument("--gguf-dir", action="append", default=[]); serve.add_argument("--managed-gguf", help="optional discovered GGUF id to start persistently")
     handoff = sub.add_parser("handoff"); handoff.add_argument("task"); handoff.add_argument("--tests", default="NOT_RUN"); handoff.add_argument("--blockers", default="NONE"); handoff.add_argument("--constraints", default="")
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
@@ -151,6 +153,7 @@ def main() -> None:
                 emit(payload)
     elif args.command in {"delegate", "auto"}: emit(router.delegate(args.task, Mode(args.mode) if args.command == "delegate" and args.mode else None, getattr(args, "api_model", None), getattr(args, "local_model", None)))
     elif args.command == "review": emit(router.delegate("Review path: " + args.path))
+    elif args.command == "explain-delegation": emit(explain_delegation(args.task, risk_override=args.risk))
     elif args.command == "serve":
         mode = NetworkMode.OFFLINE if args.offline else NetworkMode.AUTO
         configured_dirs = config_data.get("local", {}).get("model_directories", []) if isinstance(config_data.get("local", {}), dict) else []

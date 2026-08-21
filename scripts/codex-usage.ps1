@@ -48,8 +48,11 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) { throw 'Codex config.toml was no
 $lines = Get-Content -LiteralPath $ConfigPath -Encoding UTF8
 $provider = Get-TopLevelValue $lines 'model_provider'
 $model = Get-TopLevelValue $lines 'model'
+$reasoning = Get-TopLevelValue $lines 'model_reasoning_effort'
+if ([string]::IsNullOrWhiteSpace($reasoning)) { $reasoning = Get-TopLevelValue $lines 'reasoning_effort' }
 if ([string]::IsNullOrWhiteSpace($provider)) { $provider = 'DEFAULT' }
 if ([string]::IsNullOrWhiteSpace($model)) { $model = 'DEFAULT' }
+if ([string]::IsNullOrWhiteSpace($reasoning)) { $reasoning = 'DEFAULT' }
 $summary = Get-UsageSummary $UsageLedgerPath
 
 if ($provider -eq 'XiaoyuRouter') {
@@ -64,6 +67,7 @@ if ($provider -eq 'XiaoyuRouter') {
 
 Write-Output ('ACTIVE_PROVIDER=' + $provider)
 Write-Output ('ACTIVE_MODEL=' + $model)
+Write-Output ('ACTIVE_REASONING=' + $reasoning)
 Write-Output ('LIKELY_CONSUMING_OPENAI_CODEX_QUOTA=' + $quota)
 Write-Output 'OFFICIAL_USAGE_VIEW=OPEN_IN_USAGE_PANEL'
 Write-Output ('LOCAL_USAGE_LEDGER_SUMMARY=TODAY=' + $summary.today + ';WEEK=' + $summary.week + ';OPENAI=' + $summary.openai + ';XIAOYU_ROUTER=' + $summary.xiaoyu + ';LIGHTBOAT=' + $summary.lightboat + ';LOCAL=' + $summary.local + ';FAILED_OR_TIMEOUT=' + $summary.failed)
@@ -74,3 +78,6 @@ Write-Output 'NO_COOKIE_OR_TOKEN_READING=YES'
 Write-Output 'DEFAULT_OPENAI_TEST_PROFILE=YES'
 Write-Output 'DEFAULT_OPENAI_TEST_MODEL=5.6_LUNA'
 Write-Output 'DEFAULT_OPENAI_TEST_REASONING=LIGHT_OR_LOW'
+Write-Output 'OFFICIAL_MODEL_PROFILE_HINTS=LIGHT=gpt-5.6-luna+low;MEDIUM=gpt-5.6-terra+medium;HIGH=gpt-5.6-sol+high/xhigh'
+if ($provider -in @('OpenAI','DEFAULT') -and ($model -ne 'gpt-5.6-luna' -or $reasoning -ne 'low')) { Write-Output ('DELEGATION_DOES_NOT_AUTO_CHANGE_MODEL_NOTICE=Current official scheduler model is ' + $model + '; delegation mode does not change a running Codex model automatically.') }
+Write-Output 'HIGH_RISK_STRONG_MODEL_RECOMMENDATION=YES'
