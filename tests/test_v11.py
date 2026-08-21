@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen, Request
+from unittest.mock import patch
 
 from codex_ai_router.codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
 from codex_ai_router.handoff import compact_handoff
@@ -152,6 +153,52 @@ class RouterV11Tests(unittest.TestCase):
     def test_122_usage_warning_does_not_fake_quota(self):
         self.assertIn("may consume", provider_usage_warning("OpenAI", 5))
         self.assertIn("not an official quota", provider_usage_warning("XiaoyuRouter"))
+
+    def test_123_fast_delegate_skips_denied_and_cooldown_models(self):
+        from codex_ai_router import server
+        metadata = {"providers": {
+            "groq": {"type": "groq", "enabled": True, "model_registry": {"DISCOVERED_MODELS": ["denied", "slow"], "ALLOWED_MODELS": ["slow"]}, "denied_model_ids": ["denied"]},
+            "lightboat": {"type": "openai_compatible", "enabled": True, "model_registry": {"DISCOVERED_MODELS": ["fast"], "ALLOWED_MODELS": ["fast"]}},
+        }}
+        class Provider: timeout = 30
+        with tempfile.TemporaryDirectory() as temp, patch("codex_ai_router.server.provider_config.load", return_value=metadata):
+            state = RuntimeModelState(Path(temp) / "runtime.json", cooldown_seconds=900)
+            state.record("groq", "slow", "TIMEOUT", 20, "TIMEOUT")
+            state.record("lightboat", "fast", "PASS", 0.1, "HTTP_200")
+            service = server.RouterService(NetworkMode.AUTO, runtime_models=state)
+            with patch.object(service, "_provider_for_entry", return_value=Provider()), patch.object(service, "_invoke_selected_api", return_value={"output_text": "summary"}):
+                result = service.delegate_fast_readonly("summarize", max_seconds=30)
+            self.assertEqual((result["ok"], result["provider"], result["model"]), (True, "lightboat", "fast"))
+            self.assertIn("POLICY_DENIED", [item["reason"] for item in result["skipped"]])
+            self.assertIn("TIMEOUT_COOLDOWN", [item["reason"] for item in result["skipped"]])
+
+    def test_124_fast_delegate_explain_matches_runtime_selection(self):
+        from codex_ai_router import server
+        metadata = {"providers": {"groq": {"type": "groq", "enabled": True, "model_registry": {"DISCOVERED_MODELS": ["fast"], "ALLOWED_MODELS": ["fast"]}}}}
+        with tempfile.TemporaryDirectory() as temp, patch("codex_ai_router.server.provider_config.load", return_value=metadata):
+            state = RuntimeModelState(Path(temp) / "runtime.json"); state.record("groq", "fast", "PASS", 0.1, "HTTP_200")
+            explanation = server.RouterService(NetworkMode.AUTO, runtime_models=state).explain_fast_delegation()
+            self.assertEqual((explanation["selected_provider"], explanation["selected_model"]), ("groq", "fast"))
+
+    def test_125_fast_delegate_falls_back_after_provider_timeout(self):
+        from codex_ai_router import server
+        metadata = {"providers": {
+            "groq": {"type": "groq", "enabled": True, "model_registry": {"DISCOVERED_MODELS": ["first"], "ALLOWED_MODELS": ["first"]}},
+            "lightboat": {"type": "openai_compatible", "enabled": True, "model_registry": {"DISCOVERED_MODELS": ["second"], "ALLOWED_MODELS": ["second"]}},
+        }}
+        class Provider: timeout = 30
+        def invoke(_payload, _virtual, _provider, _entry, model):
+            if model == "first": raise RuntimeError("DOWNSTREAM_TIMEOUT:10")
+            return {"output_text": "fallback summary"}
+        with tempfile.TemporaryDirectory() as temp, patch("codex_ai_router.server.provider_config.load", return_value=metadata):
+            state = RuntimeModelState(Path(temp) / "runtime.json")
+            state.record("groq", "first", "PASS", 0.1, "HTTP_200")
+            state.record("lightboat", "second", "PASS", 0.2, "HTTP_200")
+            service = server.RouterService(NetworkMode.AUTO, runtime_models=state)
+            with patch.object(service, "_provider_for_entry", return_value=Provider()), patch.object(service, "_invoke_selected_api", side_effect=invoke):
+                result = service.delegate_fast_readonly("summarize", max_seconds=30)
+            self.assertEqual((result["ok"], result["provider"], result["model"]), (True, "lightboat", "second"))
+            self.assertIn("DOWNSTREAM_TIMEOUT:10", [item["reason"] for item in result["skipped"]])
 
 
 if __name__ == "__main__":

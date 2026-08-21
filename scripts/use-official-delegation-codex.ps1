@@ -8,10 +8,7 @@ $instruction=Join-Path $instructionDir 'official-delegation-instructions.md'
 @'
 # Official Codex Delegation Mode
 
-Classify risk first. Delegate simple and medium advisory work with `scripts/xiaoyu-delegate.ps1`.
-Review any draft before editing files. Keep complex and high-risk changes under official Codex control.
-Delegation is read-only unless an explicit `-AllowWrite` flag is authorized. Never expose credentials.
-This handoff does not copy official Codex cache; use handoff.md and local ledgers for continuity.
-'@ | Set-Content -LiteralPath $instruction -Encoding UTF8
+Classify risk before delegation. For simple or medium advisory work, run `scripts/xiaoyu-delegate.ps1` and integrate its JSON result. Official Codex reviews and performs file changes. Complex and high-risk work remains under official Codex control. Delegation is read-only unless explicitly authorized. Handoff and local ledgers preserve continuity; they do not copy official internal cache.
+'@ | ForEach-Object { [IO.File]::WriteAllText($instruction, ($_ + "`n"), (New-Object Text.UTF8Encoding($false))) }
 Write-Output 'OFFICIAL_DELEGATION_MODE=CONFIGURED'
 Write-Output 'CODEX_DESKTOP_RESTART_MAY_BE_REQUIRED=YES'
