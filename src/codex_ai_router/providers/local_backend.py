@@ -350,6 +350,13 @@ class ManagedLlamaCppBackend:
 
     def _prepare_port(self) -> dict:
         current = self.port
+        stale_pid = self._external_pid()
+        if stale_pid and self._pid_alive(stale_pid) and self.process is None:
+            stale_owner = self._process_info(stale_pid)
+            if self._owner_matches_backend(stale_owner):
+                if self._terminate_owner({**stale_owner, "port": current}):
+                    self._clear_state_files()
+                    self._wait_port_free(current)
         owner = self.port_owner(current)
         if owner is None:
             self._last_port_event = {"port": current, "auto_port_fallback": "NO"}

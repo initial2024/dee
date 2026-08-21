@@ -284,6 +284,15 @@ class RouterV11Tests(unittest.TestCase):
             result = backend.repair()
             self.assertEqual((result["status"], result["error_code"]), ("ERROR", "LLAMA_SERVER_NOT_FOUND"))
 
+    def test_134_stale_pid_state_is_reconciled_without_killing_unknown_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); config = root / "local-backend.json"
+            backend = ManagedLlamaCppBackend([root], executable="missing-llama-server", config_path=config)
+            with patch.object(backend, "_external_pid", return_value=987654), patch.object(backend, "_pid_alive", return_value=False), patch.object(backend, "_clear_state_files") as clear_state:
+                status = backend.status()
+            self.assertEqual(status["state_reconciled"], "STALE_PID_CLEARED")
+            clear_state.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
