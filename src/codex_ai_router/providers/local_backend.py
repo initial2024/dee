@@ -17,6 +17,9 @@ from .base import ProviderError
 from .lmstudio import LMStudioProvider
 
 
+LOCAL_PORT_FALLBACKS = (18791, 18792, 18793, 18794, 18795)
+
+
 def router_user_dir() -> Path:
     return Path(os.environ.get("USERPROFILE") or Path.home()) / ".codex-ai-router"
 
@@ -172,6 +175,7 @@ class ManagedLlamaCppBackend:
         selected_path = str(config.get("selected_model_path") or "")
         self.process: subprocess.Popen | None = None
         self.selected: GGUFModel | None = None
+        self._last_port_event: dict = {}
         if selected_path and Path(selected_path).is_file():
             selected_file = Path(selected_path).resolve()
             self.selected = GGUFModel(selected_file, selected_file.stem, selected_file.stat().st_size, quantization=_quantization(selected_file.name), source="lmstudio" if "lmstudio" in str(selected_file).lower() else "configured")
@@ -200,6 +204,89 @@ class ManagedLlamaCppBackend:
             return None
 
     @staticmethod
+    def _process_info(pid: int) -> dict:
+        info = {"pid": pid, "process_name": None, "executable_path": None, "command_line": None}
+        if os.name == "nt":
+            try:
+                result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; if($p){{[pscustomobject]@{{Name=$p.Name;Path=$p.ExecutablePath;CommandLine=$p.CommandLine}}|ConvertTo-Json -Compress}}"], capture_output=True, text=True, timeout=3, check=False)
+                if result.stdout.strip():
+                    raw = json.loads(result.stdout)
+                    info.update({"process_name": raw.get("Name"), "executable_path": raw.get("Path"), "command_line": raw.get("CommandLine")})
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                pass
+        else:
+            try:
+                info["process_name"] = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True, timeout=2, check=False).stdout.strip() or None
+                exe = Path(f"/proc/{pid}/exe")
+                info["executable_path"] = str(exe.resolve()) if exe.exists() else None
+                cmdline = Path(f"/proc/{pid}/cmdline")
+                if cmdline.exists():
+                    info["command_line"] = cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
+        return info
+
+    def port_owner(self, port: int | None = None) -> dict | None:
+        target_port = int(port or self.port)
+        pids: list[int] = []
+        if os.name == "nt":
+            try:
+                output = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, timeout=3, check=False).stdout
+                for line in output.splitlines():
+                    fields = line.split()
+                    if len(fields) >= 5 and fields[0].upper() == "TCP" and fields[3].upper() == "LISTENING":
+                        local = fields[1].rsplit(":", 1)
+                        if len(local) == 2 and local[1] == str(target_port):
+                            try: pids.append(int(fields[4]))
+                            except ValueError: pass
+            except (OSError, subprocess.SubprocessError):
+                pass
+        else:
+            try:
+                output = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=3, check=False).stdout
+                for line in output.splitlines():
+                    if f":{target_port} " in line or f":{target_port}\n" in line:
+                        match = re.search(r"pid=(\d+)", line)
+                        if match: pids.append(int(match.group(1)))
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if not pids and self.port_in_use(target_port):
+            return {"pid": None, "process_name": "UNKNOWN", "executable_path": None, "command_line": None, "port": target_port}
+        if not pids:
+            return None
+        info = self._process_info(pids[0]); info["port"] = target_port
+        return info
+
+    def _owner_matches_backend(self, owner: dict | None) -> bool:
+        if not owner:
+            return False
+        pid = owner.get("pid")
+        if pid and self.process is not None and pid == self.process.pid and self.process.poll() is None:
+            return True
+        name = str(owner.get("process_name") or "").lower()
+        if Path(name).name not in {"llama-server", "llama-server.exe"}:
+            return False
+        configured = self.executable_path()
+        executable = str(owner.get("executable_path") or "")
+        if configured and executable and os.path.normcase(os.path.abspath(executable)) == os.path.normcase(os.path.abspath(str(configured))):
+            return True
+        selected = str(self.selected.path) if self.selected else ""
+        return bool(selected and selected.lower() in str(owner.get("command_line") or "").lower())
+
+    def _terminate_owner(self, owner: dict) -> bool:
+        pid = owner.get("pid")
+        if not pid or not self._owner_matches_backend(owner):
+            return False
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=5, check=False)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    @staticmethod
     def _pid_alive(pid: int | None) -> bool:
         if not pid:
             return False
@@ -212,13 +299,81 @@ class ManagedLlamaCppBackend:
     def running(self) -> bool:
         if self.process is not None and self.process.poll() is None:
             return True
-        return self._pid_alive(self._external_pid())
+        pid = self._external_pid()
+        if not self._pid_alive(pid):
+            self._clear_state_files()
+            return False
+        owner = self.port_owner(self.port)
+        return bool(owner and owner.get("pid") == pid and self._owner_matches_backend(owner))
 
     def endpoint(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1"
 
+    def _clear_state_files(self) -> None:
+        for path in (self.pid_path, self.state_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _wait_port_free(self, port: int | None = None, timeout: float = 5.0) -> bool:
+        target = int(port or self.port)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.port_in_use(target):
+                return True
+            time.sleep(0.1)
+        return not self.port_in_use(target)
+
+    def set_port(self, port: int, persist: bool = True) -> int:
+        selected = int(port)
+        if selected < 1024 or selected > 65535:
+            raise ProviderError("INVALID_PORT")
+        self.port = selected
+        if persist:
+            config = load_local_backend_config(self.config_path)
+            config["port"] = selected
+            save_local_backend_config(config, self.config_path)
+        return selected
+
+    def _reconcile_state(self) -> dict:
+        pid = self._external_pid()
+        if pid and not self._pid_alive(pid):
+            self._clear_state_files()
+            return {"state_reconciled": "STALE_PID_CLEARED", "managed_pid": None}
+        owner = self.port_owner(self.port)
+        if pid and owner and owner.get("pid") == pid and self._owner_matches_backend(owner):
+            return {"state_reconciled": "MANAGED_PROCESS_MATCH", "managed_pid": pid}
+        if pid and owner and owner.get("pid") == pid:
+            return {"state_reconciled": "PID_OWNER_MISMATCH", "managed_pid": pid}
+        return {"state_reconciled": "YES", "managed_pid": pid}
+
+    def _prepare_port(self) -> dict:
+        current = self.port
+        owner = self.port_owner(current)
+        if owner is None:
+            self._last_port_event = {"port": current, "auto_port_fallback": "NO"}
+            return dict(self._last_port_event)
+        if self._owner_matches_backend(owner):
+            terminated = self._terminate_owner(owner)
+            if terminated and self._wait_port_free(current):
+                self._clear_state_files()
+                self._last_port_event = {"port": current, "auto_port_fallback": "NO", "stale_llama_server_cleaned": "YES"}
+                return dict(self._last_port_event)
+            raise ProviderError("PORT_IN_USE_BY_MANAGED_PROCESS")
+        for candidate in LOCAL_PORT_FALLBACKS:
+            if candidate == current:
+                continue
+            if self.port_owner(candidate) is None:
+                self.set_port(candidate)
+                self._last_port_event = {"port": candidate, "auto_port_fallback": "YES", "port_fallback_from": current}
+                return dict(self._last_port_event)
+        raise ProviderError("PORT_IN_USE_BY_UNKNOWN_PROCESS")
+
     def status(self) -> dict:
         executable = self.executable_path()
+        reconciliation = self._reconcile_state()
+        owner = self.port_owner(self.port)
         return {
             "backend": "llama.cpp direct",
             "LMSTUDIO_SERVER_REQUIRED": "NO",
@@ -232,6 +387,12 @@ class ManagedLlamaCppBackend:
             "server_running": "YES" if self.running() else "NO",
             "endpoint": self.endpoint(),
             "model_count": len(self.discover()),
+            "port": self.port,
+            "port_in_use": "YES" if owner else "NO",
+            "port_owner": owner,
+            "auto_port_fallback": self._last_port_event.get("auto_port_fallback", "NO"),
+            "port_fallback_from": self._last_port_event.get("port_fallback_from"),
+            **reconciliation,
         }
 
     def _persist_selected(self, model: GGUFModel) -> None:
@@ -274,9 +435,10 @@ class ManagedLlamaCppBackend:
                 time.sleep(0.2)
         return False
 
-    def port_in_use(self) -> bool:
+    def port_in_use(self, port: int | None = None) -> bool:
+        target_port = int(port or self.port)
         try:
-            with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
+            with socket.create_connection(("127.0.0.1", target_port), timeout=0.2):
                 return True
         except OSError:
             return False
@@ -284,8 +446,6 @@ class ManagedLlamaCppBackend:
     def start(self, model: GGUFModel | None = None) -> dict:
         if self.running():
             return self.status()
-        if self.port_in_use():
-            raise ProviderError("PORT_IN_USE")
         if not self.executable_available():
             raise ProviderError("LLAMA_SERVER_NOT_FOUND")
         selected = model or self.selected
@@ -296,12 +456,13 @@ class ManagedLlamaCppBackend:
             raise ProviderError("MODEL_NOT_SELECTED")
         if not selected.path.is_file():
             raise ProviderError("NO_GGUF_MODEL")
+        self._prepare_port()
         command = self._command(selected)
         router_user_dir().mkdir(parents=True, exist_ok=True)
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.pid_path.write_text(str(self.process.pid), encoding="utf-8")
-            self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint()}, ensure_ascii=False), encoding="utf-8")
+            self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "executable": str(self.executable_path() or "")}, ensure_ascii=False), encoding="utf-8")
         except OSError as exc:
             raise ProviderError("START_FAILED") from exc
         self.selected = selected
@@ -319,24 +480,24 @@ class ManagedLlamaCppBackend:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         elif pid and self._pid_alive(pid):
-            try:
-                if os.name == "nt":
-                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                else:
-                    os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
+            owner = self.port_owner(self.port)
+            if owner and owner.get("pid") == pid and self._owner_matches_backend(owner):
+                self._terminate_owner(owner)
         self.process = None
-        for path in (self.pid_path, self.state_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        self._wait_port_free(self.port, timeout=5)
+        self._clear_state_files()
         return self.status()
 
     def restart(self, model: GGUFModel | None = None) -> dict:
         self.stop()
         return self.start(model)
+
+    def repair(self) -> dict:
+        try:
+            result = self.restart(self.selected) if self.running() else self.start(self.selected)
+            return {"status": "PASS", "action": "repair", **result}
+        except ProviderError as exc:
+            return {"status": "ERROR", "action": "repair", "error_code": str(exc), **self.status()}
 
     def available(self) -> bool:
         return self.running() or (self.selected is not None and self.executable_available())

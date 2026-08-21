@@ -69,7 +69,7 @@ def main() -> None:
     explain_route = sub.add_parser("explain-route"); explain_route.add_argument("--prefer-local", action="store_true"); explain_route.add_argument("task")
     delegate_fast = sub.add_parser("delegate-fast"); delegate_fast.add_argument("--max-seconds", type=int, default=60); delegate_fast.add_argument("task")
     local = sub.add_parser("local"); local_sub = local.add_subparsers(dest="local_action", required=True)
-    for action in ("start", "stop", "restart", "status", "models", "smoke"):
+    for action in ("start", "stop", "restart", "repair", "status", "models", "smoke"):
         item = local_sub.add_parser(action)
         if action == "smoke": item.add_argument("task", nargs="?", default="只回复 LOCAL_DIRECT_OK")
     local_select = local_sub.add_parser("select"); local_select.add_argument("model")
@@ -187,6 +187,7 @@ def main() -> None:
             elif args.local_action == "start": emit(backend.start())
             elif args.local_action == "stop": emit(backend.stop())
             elif args.local_action == "restart": emit(backend.restart())
+            elif args.local_action == "repair": emit(backend.repair())
             elif args.local_action == "smoke": emit({"status": "PASS", "response": backend.ask(args.task), "model": backend.selected.model_id if backend.selected else None, "endpoint": backend.endpoint()})
         except Exception as exc:
             code = str(exc) or "LOCAL_DIRECT_BACKEND_ERROR"

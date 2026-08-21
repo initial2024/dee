@@ -69,8 +69,9 @@ class RouterV11Tests(unittest.TestCase):
             self.assertEqual((models[0].model_id, models[0].size_bytes, models[0].quantization), ("sample.Q4_K_M", 4, "Q4_K_M"))
 
     def test_108_local_backend_can_be_unavailable_without_lmstudio_requirement(self):
-        backend = LocalBackend(lmstudio=FakeLocal(False), managed=ManagedLlamaCppBackend())
-        self.assertEqual(backend.active_kind(), "LOCAL_UNAVAILABLE")
+        with tempfile.TemporaryDirectory() as temp:
+            backend = LocalBackend(lmstudio=FakeLocal(False), managed=ManagedLlamaCppBackend(config_path=Path(temp) / "local-backend.json", executable="missing-llama-server"))
+            self.assertEqual(backend.active_kind(), "LOCAL_UNAVAILABLE")
 
     def test_109_capability_registry_keeps_unknowns_unknown(self):
         registry = ModelRegistry(); now = datetime.now()
@@ -257,9 +258,31 @@ class RouterV11Tests(unittest.TestCase):
             executable = root / "llama-server.exe"; executable.write_bytes(b"stub")
             backend = ManagedLlamaCppBackend([root], executable=str(executable), config_path=root / "local-backend.json")
             backend.select("demo")
-            with patch.object(backend, "port_in_use", return_value=True):
-                with self.assertRaisesRegex(Exception, "PORT_IN_USE"):
+            with patch.object(backend, "port_owner", side_effect=lambda port=None: {"pid": 999, "process_name": "python.exe", "port": int(port or backend.port)}):
+                with self.assertRaisesRegex(Exception, "PORT_IN_USE_BY_UNKNOWN_PROCESS"):
                     backend.start()
+
+    def test_132_unknown_port_owner_uses_safe_fallback_without_kill(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "demo.gguf").write_bytes(b"GGUF")
+            executable = root / "llama-server.exe"; executable.write_bytes(b"stub")
+            config = root / "local-backend.json"
+            backend = ManagedLlamaCppBackend([root], executable=str(executable), config_path=config)
+            backend.select("demo")
+            owners = lambda port=None: {"pid": 999, "process_name": "python.exe", "port": int(port or backend.port)} if int(port or backend.port) == 18790 else None
+            with patch.object(backend, "port_owner", side_effect=owners), patch.object(backend, "_terminate_owner") as terminate:
+                prepared = backend._prepare_port()
+            terminate.assert_not_called()
+            self.assertEqual((prepared["auto_port_fallback"], prepared["port"], prepared["port_fallback_from"]), ("YES", 18791, 18790))
+            self.assertEqual(load_local_backend_config(config)["port"], 18791)
+
+    def test_133_repair_returns_explicit_missing_server_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "demo.gguf").write_bytes(b"GGUF")
+            backend = ManagedLlamaCppBackend([root], executable=str(root / "missing-llama-server"), config_path=root / "local-backend.json")
+            backend.select("demo")
+            result = backend.repair()
+            self.assertEqual((result["status"], result["error_code"]), ("ERROR", "LLAMA_SERVER_NOT_FOUND"))
 
 
 if __name__ == "__main__":
