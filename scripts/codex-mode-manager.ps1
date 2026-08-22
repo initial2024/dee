@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet('status','repair-wire-api','official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only','official-assisted','deepseek-head','local-agent-pending','restore')][string]$Action = 'status',
+  [ValidateSet('status','repair-wire-api','official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only','official-assisted','official-assisted-coordinator','deepseek-head','local-agent-pending','restore')][string]$Action = 'status',
   [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex\config.toml'),
   [string]$StateRoot = (Join-Path $env:USERPROFILE '.codex-ai-router\codex-mode')
 )
@@ -82,6 +82,7 @@ switch($Action){
  'custom-hybrid-text-only' { $list=[System.Collections.Generic.List[string]]::new([string[]]$lines);Set-CustomMode $list 'CUSTOM_HYBRID_TEXT_ONLY' 'XiaoyuRouterTextOnly' 'hybrid-agent' $RouterEndpoint;Save-Utf8Atomic $list }
  'official-direct' { if(-not $state.PSObject.Properties['no_quota_mode']){$state|Add-Member -NotePropertyName no_quota_mode -NotePropertyValue $false};[void](Backup-Config $state);$baseline=Join-Path $StateRoot 'official-baseline.toml';if(-not(Test-Path -LiteralPath $baseline)){throw 'OFFICIAL_BASELINE_MISSING'};Copy-Item -LiteralPath $baseline -Destination $ConfigPath -Force;$state.mode='OFFICIAL_DIRECT';$state.no_quota_mode=$false }
  'official-assisted' { $state.mode='OFFICIAL_ASSISTED' }
+ 'official-assisted-coordinator' { if(-not $state.PSObject.Properties['no_quota_mode']){$state|Add-Member -NotePropertyName no_quota_mode -NotePropertyValue $false}; $state.mode='OFFICIAL_ASSISTED_COORDINATOR'; $state.no_quota_mode=$false }
  'deepseek-head' { $state.mode='DEEPSEEK_HEAD' }
  'local-agent-pending' { $state.mode='LOCAL_AGENT_PENDING' }
  'restore' {if(-not $state.last_backup -or -not(Test-Path -LiteralPath $state.last_backup)){throw 'BACKUP_NOT_FOUND'};Copy-Item -LiteralPath $state.last_backup -Destination $ConfigPath -Force;$state.mode='UNKNOWN'}

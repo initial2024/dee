@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .assist_coordinator import AssistCoordinator, AssistCoordinatorError
 from .local_agent import LocalAgent, LocalAgentError
 
 
@@ -48,9 +49,10 @@ def _confirmation_matches(payload: dict[str, Any], plan_id: str) -> bool:
 class AgentApiController:
     """Route safe JSON requests to a :class:`LocalAgent` instance."""
 
-    def __init__(self, root: Path | None = None, agent: LocalAgent | None = None):
+    def __init__(self, root: Path | None = None, agent: LocalAgent | None = None, coordinator: AssistCoordinator | None = None):
         self.root = (root or Path.cwd()).resolve()
         self.agent = agent or LocalAgent(self.root)
+        self.coordinator = coordinator or AssistCoordinator()
 
     def health(self) -> dict[str, Any]:
         return {
@@ -67,6 +69,7 @@ class AgentApiController:
                 "test",
                 "commit",
                 "records",
+                "assist-coordinate",
             ],
             "bind_host": AGENT_API_HOST,
             "port": AGENT_API_PORT,
@@ -82,6 +85,8 @@ class AgentApiController:
             "lan_exposure": "NO",
             "secrets_logged": "NO",
             "prompt_response_logged_by_default": "NO",
+            "official_assisted_coordinator": "YES",
+            "official_direct_unchanged": "YES",
         }
 
     def records(self) -> dict[str, Any]:
@@ -110,6 +115,8 @@ class AgentApiController:
         return _confirmation_matches(payload, plan_id)
 
     def _dispatch(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path == "/assist/coordinate":
+            return self.coordinator.coordinate(payload)
         if path == "/agent/plan":
             task = payload.get("task")
             if not isinstance(task, str) or not task.strip():
@@ -168,7 +175,7 @@ class AgentApiController:
     def post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         try:
             return 200, self._dispatch(path, payload)
-        except LocalAgentError as exc:
+        except (LocalAgentError, AssistCoordinatorError) as exc:
             code = exc.code
             status = 403 if code == "LOCAL_AGENT_HIGH_RISK_STOP" else 400
             return status, {

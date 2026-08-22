@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from codex_ai_router.agent_api import AgentApiController
+from codex_ai_router.assist_coordinator import AssistCoordinator
 from codex_ai_router.local_agent import LocalAgent
 from codex_ai_router.network import NetworkMode
 from codex_ai_router.server import RouterResponsesServer, RouterService
@@ -26,7 +27,7 @@ class AgentApiTests(unittest.TestCase):
             return 0, "safe metadata"
 
         agent = LocalAgent(root, storage, runner=runner)
-        controller = AgentApiController(root, agent)
+        controller = AgentApiController(root, agent, coordinator=AssistCoordinator(provider_snapshot=lambda: [{"id": "local-light", "type": "LOCAL_MODEL", "enabled": True, "status": "ENABLED"}]))
         self.server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE), port=0, agent_api=controller)
         self.server.start()
         self.base = f"http://127.0.0.1:{self.server.httpd.server_address[1]}"
@@ -55,7 +56,22 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual((status, body["loopback_only"], body["bind_host"], body["port"]), (200, "YES", "127.0.0.1", 18789))
         self.assertEqual((body["service"], body["agent_api"], body["version"]), ("xiaoyu-router-agent-api", True, "1.0"))
         self.assertIn("readonly", body["capabilities"])
+        self.assertIn("assist-coordinate", body["capabilities"])
+        self.assertEqual((body["official_assisted_coordinator"], body["official_direct_unchanged"]), ("YES", "YES"))
         self.assertEqual((body["public_exposure"], body["lan_exposure"], body["codex_agent_used"]), ("NO", "NO", "NO"))
+
+    def test_assist_coordinate_is_loopback_plan_only_and_routes_steps(self):
+        status, body = self.post("/assist/coordinate", {"task": "检查当前项目状态，不修改文件", "mode": "official_assisted"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["local_agent_steps"])
+        self.assertEqual((body["codex_required_steps"], body["codex_endpoint_touched"], body["brain_invoked"]), ([], "NO", "NO"))
+        self.assertEqual(body["mode"], "OFFICIAL_ASSISTED_COORDINATOR")
+
+    def test_assist_coordinate_high_risk_is_stopped(self):
+        status, body = self.post("/assist/coordinate", {"task": "删除所有文件并 git push", "mode": "official_assisted"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("error_code", body)
+        self.assertEqual(body["stop_conditions"], ["LOCAL_AGENT_HIGH_RISK_STOP"])
 
     def test_plan_does_not_invoke_brain_and_records_no_body(self):
         status, body = self.post("/agent/plan", {"task": "检查当前项目状态，不修改文件"})

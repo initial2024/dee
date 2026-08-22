@@ -14,6 +14,7 @@ Assert-True ($text -match 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES') 'desktop_co
 Assert-True ($text -match 'CODEX_MODE_PANEL_VISIBLE=YES' -and $text -match 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES' -and $text -match 'LOCAL_RECORDS_PANEL_VISIBLE=YES') 'desktop_control_codex_mode_allowlist_and_records_panels_visible'
 Assert-True ($text -match 'LOCAL_AGENT_PANEL_VISIBLE=YES' -and $text -match 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES' -and $text -match 'LOCAL_AGENT_CONFIRMATION_GATES=YES' -and $text -match 'LOCAL_AGENT_BRAIN_EXPLICIT=YES') 'desktop_control_local_agent_panel_and_safe_defaults_visible'
 Assert-True ($text -match 'DEEPSEEK_BRIDGE_DIRECT_BRAIN_UI_VISIBLE=YES' -and $text -match 'DEEPSEEK_BRIDGE_DIRECT_ENDPOINT=127\.0\.0\.1:8791') 'desktop_control_direct_deepseek_brain_visible'
+Assert-True ($text -match 'OFFICIAL_ASSISTED_COORDINATOR_VISIBLE=YES' -and $text -match 'ASSIST_COORDINATE_API_VISIBLE=YES' -and $text -match '127\.0\.0\.1:18789/assist/coordinate') 'official_assisted_coordinator_panel_visible'
 Assert-True ($text -match 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES') 'desktop_control_response_compat_diagnostics_visible'
 Assert-True ($text -match 'TOOLS_POLICY_UI_VISIBLE=YES' -and $text -match 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES') 'desktop_control_tools_policy_visible_and_safe_default'
 Assert-True ($text -match 'DEEPSEEK_HEALTH_PROMPT_SENT=NO') 'desktop_control_deepseek_health_never_sends_prompt'
@@ -71,6 +72,7 @@ Assert-True ($source -match '筛选模型/状态' -and $source -match 'Set-Model
 Assert-True ($source -match '供应商操作' -and $source -match '模型操作' -and $source -match '迁移') 'provider_tab_actions_are_grouped'
 Assert-True (($ui -join "`n") -match 'MODEL_PICKER_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)' -and ($ui -join "`n") -match 'BATCH_UI_CONSTRUCTION=(PASS|SKIPPED_NO_PROVIDER)') 'model_and_batch_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS') 'direct_local_ui_selftest_reported'
+Assert-True (($ui -join "`n") -match 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS' -and ($ui -join "`n") -match 'CODEX_ENDPOINT_TOUCHED=NO') 'assist_coordinator_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS') 'local_repair_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS') 'deepseek_local_bridge_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'TOOLS_POLICY_UI_CONSTRUCTION=PASS') 'tools_policy_ui_selftest_reported'
@@ -140,6 +142,8 @@ try {
   Assert-True ($hybridText.mode -eq 'CUSTOM_HYBRID_TEXT_ONLY' -and $hybridText.model -eq 'hybrid-agent' -and $hybridText.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_hybrid_text_only_uses_router'
   $assisted = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action official-assisted -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
   Assert-True ($assisted.mode -eq 'OFFICIAL_ASSISTED' -and $assisted.env_mutation -eq 'NONE') 'official_assisted_preserves_endpoint_environment'
+  $assistedCoordinator = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action official-assisted-coordinator -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($assistedCoordinator.mode -eq 'OFFICIAL_ASSISTED_COORDINATOR' -and $assistedCoordinator.env_mutation -eq 'NONE' -and $assistedCoordinator.endpoint -eq $hybridText.endpoint) 'official_assisted_coordinator_preserves_endpoint_environment'
   $head = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action deepseek-head -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
   Assert-True ($head.mode -eq 'DEEPSEEK_HEAD' -and $head.env_mutation -eq 'NONE') 'deepseek_head_mode_does_not_change_endpoint_or_environment'
   $official = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action official-direct -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json

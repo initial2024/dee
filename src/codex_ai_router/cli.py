@@ -27,6 +27,7 @@ from .tools_policy import VALID_POLICIES, load_policy, policy_path, save_policy
 from .deepseek_modes import load_probe_state, probe_deepseek_modes, select_deepseek_mode
 from .local_agent import BRAIN_PROVIDERS, LocalAgent, LocalAgentError
 from .agent_api import AGENT_API_BASE
+from .assist_coordinator import ASSIST_STARTUP_INSTRUCTION
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -146,6 +147,15 @@ def main() -> None:
     direct_smoke = brain_sub.add_parser("deepseek-direct-smoke", help="invoke only the loopback DeepSeek Web Bridge")
     direct_smoke.add_argument("--task", required=True)
     direct_smoke.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto")
+    assist = sub.add_parser("assist", help="official Codex assisted coordinator; loopback only")
+    assist_sub = assist.add_subparsers(dest="assist_action", required=True)
+    assist_coordinate = assist_sub.add_parser("coordinate", help="partition the current task without invoking a brain")
+    assist_coordinate.add_argument("--task", required=True)
+    assist_coordinate.add_argument("--max-local-steps", type=int, default=5)
+    assist_coordinate.add_argument("--no-brain", action="store_true")
+    assist_coordinate.add_argument("--no-readonly", action="store_true")
+    assist_coordinate.add_argument("--no-patch-draft", action="store_true")
+    assist_sub.add_parser("startup-instruction", help="print the copyable Codex startup instruction")
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -231,6 +241,21 @@ def main() -> None:
                 emit(agent_runner.plan(args.task, brain_provider="deepseek-bridge-direct", risk=args.risk, invoke_brain_now=True))
             except LocalAgentError as exc:
                 emit({"status": "DENIED", "error_code": exc.code, "codex_agent_used": "NO", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO", "auto_push": "NO", "auto_deploy": "NO", "secrets_logged": "NO"})
+    elif args.command == "assist":
+        if args.assist_action == "startup-instruction":
+            emit({"mode": "OFFICIAL_ASSISTED_COORDINATOR", "instruction": ASSIST_STARTUP_INSTRUCTION, "codex_endpoint_touched": "NO", "codex_agent_auto_invoked": "NO"})
+            return
+        emit(agent_api_request("/assist/coordinate", {
+            "task": args.task,
+            "mode": "official_assisted",
+            "max_local_steps": args.max_local_steps,
+            "allow_brain": not args.no_brain,
+            "allow_readonly": not args.no_readonly,
+            "allow_patch_draft": not args.no_patch_draft,
+            "allow_apply": False,
+            "allow_commit": False,
+        }))
+        return
     elif args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
     elif args.command == "models":

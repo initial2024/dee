@@ -548,7 +548,7 @@ if ($RouterAction) {
 
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
-    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_BRAIN_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_ENDPOINT=127.0.0.1:8791'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; Write-Output 'ROUTER_PORT_OWNER_FIELDS=YES'; Write-Output 'ROUTER_IDENTITY_PROBE=YES'; Write-Output 'STALE_ROUTER_CONFIRMATION_GATE=YES'; Write-Output 'UNKNOWN_PROCESS_SAFE_STOP=YES'; Write-Output 'UNKNOWN_SERVICE_POST_BLOCKED=YES'; exit 0
+    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_BRAIN_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_ENDPOINT=127.0.0.1:8791'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_VISIBLE=YES'; Write-Output 'ASSIST_COORDINATE_API_VISIBLE=YES'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_ENDPOINT=127.0.0.1:18789/assist/coordinate'; Write-Output 'CODEX_START_INSTRUCTION_VISIBLE=YES'; Write-Output 'OFFICIAL_DIRECT_UNCHANGED=YES'; Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'; Write-Output 'CODEX_AGENT_AUTO_INVOKED=NO'; Write-Output 'CODEX_AGENTIC_USAGE_BYPASS=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; Write-Output 'ROUTER_PORT_OWNER_FIELDS=YES'; Write-Output 'ROUTER_IDENTITY_PROBE=YES'; Write-Output 'STALE_ROUTER_CONFIRMATION_GATE=YES'; Write-Output 'UNKNOWN_PROCESS_SAFE_STOP=YES'; Write-Output 'UNKNOWN_SERVICE_POST_BLOCKED=YES'; exit 0
 }
 
 $uiFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
@@ -703,6 +703,7 @@ function Get-CodexModeChineseName([string]$Mode) {
         'CUSTOM_DEEPSEEK_TEXT_ONLY' { return 'DeepSeek 文本兼容' }
         'CUSTOM_LOCAL_TEXT_ONLY' { return '本地模型文本兼容' }
         'CUSTOM_HYBRID_TEXT_ONLY' { return '混合助手文本兼容' }
+        'OFFICIAL_ASSISTED_COORDINATOR' { return '官方辅助协调' }
         default { return $Mode }
     }
 }
@@ -728,13 +729,62 @@ function Refresh-CodexModePanel {
     $toolsPolicyStatus.Text = ("当前工具策略：{0}`r`n策略文件：{1}`r`n`r`n严格拒绝：后端不支持工具时直接报错，不会调用模型。`r`n文本兼容：移除工具定义，仅生成分析/计划/指令，不会改文件。`r`n手动计划：返回结构化计划模板，不调用模型。" -f $displayPolicy,$tools.path)
     $codexModeStatus.Text = ("当前模式：{0}`r`nProvider：{1}`r`n模型：{2}`r`n端点摘要：{3}`r`n备份目录：{4}`r`n环境变量修改：{5}`r`n无官方额度模式：{6}`r`n工具策略：{7}`r`n`r`nOFFICIAL_DIRECT：官方直连；CUSTOM_ROUTER：本地 Router；OFFICIAL_ASSISTED：官方主工作流 + 辅助分析；DEEPSEEK_HEAD：建议模式；CUSTOM_DEEPSEEK_HEAD：{8}；CUSTOM_LOCAL_LIGHT：本地模型；CUSTOM_EXTERNAL_API：仅显式 allowlist；CUSTOM_HYBRID_AGENT：已启用 Provider 的统一入口；CUSTOM_DEEPSEEK_TEXT_ONLY / CUSTOM_LOCAL_TEXT_ONLY / CUSTOM_HYBRID_TEXT_ONLY：本地 Router 文本兼容模式。`r`n控制台不接收主要任务输入；任务仍在 Codex 中提交。" -f $state.mode,$state.provider,$state.model,$state.endpoint,$state.backup_directory,$state.env_mutation,$state.no_quota_mode,$displayPolicy,$DeepSeekLocalApiAddress)
 }
-function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only','official-assisted','deepseek-head','local-agent-pending','restore')][string]$Action) {
+function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only','official-assisted','official-assisted-coordinator','deepseek-head','local-agent-pending','restore')][string]$Action) {
     $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CodexModeScript -Action $Action 2>&1 | Out-String
     $record = $null; try { $record = $output | ConvertFrom-Json } catch {}
     $summary = Format-CodexModeSummary -Record $record -Raw $output -Action $Action
     Refresh-CodexModePanel; Refresh-Home
     if ($diagnosticsText -and $debugToggle -and $debugToggle.Checked) { $diagnosticsText.Text = ($script:LastModeDebugJson + "`r`n" + ($script:UiDebugEntries -join "`r`n")) }
     [System.Windows.Forms.MessageBox]::Show((Redact-Text $summary),'Codex 连接模式')
+}
+function Get-AssistStartupInstruction {
+    return "启动官方辅助模式。先调用小羽本地协调器：`r`nPOST http://127.0.0.1:18789/assist/coordinate`r`n把当前任务发送给协调器。`r`n执行协调器返回的 codex_required_steps。`r`n不要执行被小羽标记为 local_agent_steps 的简单辅助任务。`r`n遇到高风险步骤先停止并询问用户。"
+}
+function Format-AssistCoordinateSummary([object]$Record,[string]$Raw) {
+    $script:LastAssistDebugJson = Redact-Text $Raw
+    if (-not $Record -or $Record.error_code) {
+        $code = if ($Record.error_code) { [string]$Record.error_code } else { 'ASSIST_COORDINATE_UNAVAILABLE' }
+        return "官方辅助协调预检失败`r`n错误码：$code`r`n当前 Codex 执行层：官方直连`r`n接管 Codex endpoint：否`r`n详细信息：已折叠到高级信息。"
+    }
+    $localCount = @($Record.local_agent_steps).Count
+    $codexCount = @($Record.codex_required_steps).Count
+    return ("官方辅助协调已启用`r`n当前 Codex 执行层：官方直连`r`n辅助脑：{0}`r`n本地可处理步骤：{1}`r`n需要 Codex 处理步骤：{2}`r`n风险等级：{3}`r`n是否需要官方 Codex：{4}`r`n接管 Codex endpoint：否`r`n自动写入/提交：否`r`n回退原因：{5}" -f $Record.recommended_brain,$localCount,$codexCount,$Record.risk_level,$Record.requires_official_codex,$Record.fallback_reason)
+}
+function Show-OfficialAssistedCoordinator {
+    $script:OfficialAssistMode = 'OFFICIAL_ASSISTED_COORDINATOR'
+    $codexModeStatus.Text = "当前 Codex 执行层：官方直连`r`n当前辅助协调：已启用`r`n当前辅助脑：自动`r`n是否接管 Codex endpoint：否`r`n是否自动执行写入：否`r`n是否绕过 Codex 额度：否`r`n协调器：127.0.0.1:18789/assist/coordinate"
+    [System.Windows.Forms.MessageBox]::Show('已启用官方辅助协调模式。Codex 仍保持官方直连；小羽只生成计划、只读结果和 handoff，不自动执行写入。','官方辅助协调') | Out-Null
+}
+function Show-AssistStartupInstruction {
+    $instruction = Get-AssistStartupInstruction
+    $script:LastAssistDebugJson = $instruction
+    [System.Windows.Forms.MessageBox]::Show($instruction,'Codex 启动指令') | Out-Null
+}
+function Copy-AssistStartupInstruction {
+    try { Set-Clipboard -Value (Get-AssistStartupInstruction); [System.Windows.Forms.MessageBox]::Show('已复制 Codex 启动指令。','Codex 启动指令') | Out-Null } catch { [System.Windows.Forms.MessageBox]::Show('复制失败。','Codex 启动指令') | Out-Null }
+}
+function Invoke-AssistCoordinatePrecheck {
+    $raw = Invoke-RouterCli @('assist','coordinate','--task','检查当前项目状态，不修改文件')
+    $record = $null; try { $record = $raw | ConvertFrom-Json } catch {}
+    $summary = Format-AssistCoordinateSummary -Record $record -Raw $raw
+    [System.Windows.Forms.MessageBox]::Show((Redact-Text $summary),'官方辅助协调预检') | Out-Null
+}
+function Show-AssistStepList([bool]$CodexSteps) {
+    $raw = Invoke-RouterCli @('assist','coordinate','--task','检查当前项目状态，不修改文件')
+    $record = $null; try { $record = $raw | ConvertFrom-Json } catch {}
+    $steps = if($CodexSteps){$record.codex_required_steps}else{$record.local_agent_steps}
+    $title = if($CodexSteps){'需要 Codex 处理步骤'}else{'本地可处理步骤'}
+    $text = if(@($steps).Count -eq 0){'暂无步骤。'}else{(@($steps)|ForEach-Object { '- ' + $_.description }) -join "`r`n"}
+    [System.Windows.Forms.MessageBox]::Show((Redact-Text $text),$title) | Out-Null
+}
+function Select-AssistBrain {
+    $choices = '自动','DeepSeek','本地模型','外部 API','Hybrid'
+    $selected = [System.Windows.Forms.MessageBox]::Show('辅助脑当前由协调器按健康状态自动选择。`r`n请在 Local Agent 面板的 Brain Provider 下拉框中选择显式 Provider。','选择辅助脑')
+    if($selected -eq [System.Windows.Forms.DialogResult]::OK){$script:AssistBrainSelection='auto'}
+}
+function Open-AssistHandoffDirectory {
+    $path = Join-Path $env:USERPROFILE '.codex-ai-router\handoff'
+    if(Test-Path -LiteralPath $path){Start-Process explorer.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('尚无 handoff 目录；协调预检不会自动创建文件。','handoff 目录') | Out-Null}
 }
 function Invoke-CodexTextOnlyMode([ValidateSet('custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only')][string]$Action) {
     $confirm = [System.Windows.Forms.MessageBox]::Show('文本兼容模式会切换到本地 Router，并移除 Codex 工具定义；模型只输出文本计划，不会执行工具、修改文件或部署。是否继续？','TEXT_ONLY 模式',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -958,6 +1008,14 @@ Add-CodexModeButton '本地轻量' { Invoke-CodexModeAction 'custom-local-light'
 Add-CodexModeButton '外部 API' { Invoke-CodexModeAction 'custom-external-api' } 135
 Add-CodexModeButton '混合助手' { Invoke-CodexModeAction 'custom-hybrid-agent' } 135
 Add-CodexModeButton '启用官方辅助模式' { Invoke-CodexModeAction 'official-assisted' } 170
+Add-CodexModeButton '启用官方辅助协调模式' { Show-OfficialAssistedCoordinator } 190
+Add-CodexModeButton '生成 Codex 启动指令' { Show-AssistStartupInstruction } 170
+Add-CodexModeButton '复制 Codex 启动指令' { Copy-AssistStartupInstruction } 170
+Add-CodexModeButton '运行协调预检' { Invoke-AssistCoordinatePrecheck } 145
+Add-CodexModeButton '查看本地可处理步骤' { Show-AssistStepList $false } 180
+Add-CodexModeButton '查看需要 Codex 处理步骤' { Show-AssistStepList $true } 190
+Add-CodexModeButton '选择辅助脑' { Select-AssistBrain } 130
+Add-CodexModeButton '打开 handoff 目录' { Open-AssistHandoffDirectory } 160
 Add-CodexModeButton '启用 DeepSeek 首脑' { Invoke-CodexModeAction 'deepseek-head' } 170
 Add-CodexModeButton '本地 Agent（预留）' { Invoke-CodexModeAction 'local-agent-pending' } 170
 Add-CodexModeButton 'DeepSeek 文本兼容模式' { Invoke-CodexTextOnlyMode 'custom-deepseek-text-only' } 190
@@ -1018,6 +1076,9 @@ if ($SelfTest) {
     Write-Output 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
+    Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
+    Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'
+    Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'
     Write-Output 'TOOLS_POLICY_UI_CONSTRUCTION=PASS'
     Write-Output 'LOCAL_AGENT_UI_CONSTRUCTION=PASS'
     Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=PASS'
