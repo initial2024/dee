@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from codex_ai_router.agent_api import AgentApiController
 from codex_ai_router.assist_coordinator import AssistCoordinator
+from codex_ai_router.deepseek_head_coordinator import DeepSeekHeadCoordinator
 from codex_ai_router.local_agent import LocalAgent
 from codex_ai_router.network import NetworkMode
 from codex_ai_router.server import RouterResponsesServer, RouterService
@@ -28,6 +29,7 @@ class AgentApiTests(unittest.TestCase):
 
         agent = LocalAgent(root, storage, runner=runner)
         controller = AgentApiController(root, agent, coordinator=AssistCoordinator(provider_snapshot=lambda: [{"id": "local-light", "type": "LOCAL_MODEL", "enabled": True, "status": "ENABLED"}]))
+        controller.deepseek_head = DeepSeekHeadCoordinator(root, agent=agent, provider_snapshot=lambda: [{"id": "deepseek-web-bridge", "type": "DEEPSEEK_WEB_BRIDGE", "enabled": True, "status": "ENABLED"}])
         self.server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE), port=0, agent_api=controller)
         self.server.start()
         self.base = f"http://127.0.0.1:{self.server.httpd.server_address[1]}"
@@ -84,6 +86,14 @@ class AgentApiTests(unittest.TestCase):
         self.assertNotIn("task_summary", raw)
         self.assertNotIn("prompt", raw.lower())
         self.assertNotIn("response", raw.lower())
+
+    def test_deepseek_head_coordinate_collects_context_without_invoking_brain(self):
+        status, body = self.post("/deepseek-head/coordinate", {"task": "检查当前项目状态，不修改文件", "brain_provider": "auto"})
+        self.assertEqual(status, 200)
+        self.assertEqual((body["brain_invoked"], body["files_modified"], body["loopback_only"], body["tools_forwarded"]), ("NO", "NO", "YES", "NO"))
+        self.assertEqual(body["selected_brain"], "local-agent-readonly")
+        context_status, context = self.post("/deepseek-head/context", {"context_bundle_id": body["context_bundle_id"]})
+        self.assertEqual((context_status, context["context_bundle"]["collection_mode"]), (200, "read_only"))
 
     def test_readonly_uses_only_allowlisted_read_commands(self):
         status, body = self.post("/agent/readonly", {"task": "只读检查"})

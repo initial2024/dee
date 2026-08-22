@@ -712,7 +712,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"code": "not_found"}})
 
     def do_POST(self) -> None:
-        if self.path.startswith("/agent/") or self.path == "/assist/coordinate":
+        if self.path.startswith("/agent/") or self.path in {"/assist/coordinate", "/deepseek-head/coordinate", "/deepseek-head/context", "/deepseek-head/plan", "/deepseek-head/plan-from-context"}:
             if self.agent_api is None:
                 self._send(404, {"error": {"code": "not_found"}})
                 return

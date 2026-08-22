@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .assist_coordinator import AssistCoordinator, AssistCoordinatorError
+from .deepseek_head_coordinator import DeepSeekHeadCoordinator, DeepSeekHeadCoordinatorError
 from .local_agent import LocalAgent, LocalAgentError
 
 
@@ -49,10 +50,11 @@ def _confirmation_matches(payload: dict[str, Any], plan_id: str) -> bool:
 class AgentApiController:
     """Route safe JSON requests to a :class:`LocalAgent` instance."""
 
-    def __init__(self, root: Path | None = None, agent: LocalAgent | None = None, coordinator: AssistCoordinator | None = None):
+    def __init__(self, root: Path | None = None, agent: LocalAgent | None = None, coordinator: AssistCoordinator | None = None, deepseek_head: DeepSeekHeadCoordinator | None = None):
         self.root = (root or Path.cwd()).resolve()
         self.agent = agent or LocalAgent(self.root)
         self.coordinator = coordinator or AssistCoordinator()
+        self.deepseek_head = deepseek_head or DeepSeekHeadCoordinator(self.root, agent=self.agent)
 
     def health(self) -> dict[str, Any]:
         return {
@@ -70,6 +72,10 @@ class AgentApiController:
                 "commit",
                 "records",
                 "assist-coordinate",
+                "deepseek-head-coordinate",
+                "deepseek-head-context",
+                "deepseek-head-plan",
+                "deepseek-head-plan-from-context",
             ],
             "bind_host": AGENT_API_HOST,
             "port": AGENT_API_PORT,
@@ -117,6 +123,23 @@ class AgentApiController:
     def _dispatch(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == "/assist/coordinate":
             return self.coordinator.coordinate(payload)
+        if path == "/deepseek-head/coordinate":
+            return self.deepseek_head.coordinate(payload)
+        if path == "/deepseek-head/context":
+            context_id = payload.get("context_bundle_id")
+            if not isinstance(context_id, str) or not context_id:
+                raise DeepSeekHeadCoordinatorError("CONTEXT_BUNDLE_ID_REQUIRED")
+            return self.deepseek_head.context(context_id)
+        if path == "/deepseek-head/plan-from-context":
+            context_id = payload.get("context_bundle_id")
+            if not isinstance(context_id, str) or not context_id:
+                raise DeepSeekHeadCoordinatorError("CONTEXT_BUNDLE_ID_REQUIRED")
+            return self.deepseek_head.plan_from_context(context_id, invoke=payload.get("invoke_brain") is True)
+        if path == "/deepseek-head/plan":
+            plan_id = payload.get("plan_id")
+            if not isinstance(plan_id, str) or not plan_id:
+                raise DeepSeekHeadCoordinatorError("DEEPSEEK_PLAN_ID_REQUIRED")
+            return self.deepseek_head.plan(plan_id)
         if path == "/agent/plan":
             task = payload.get("task")
             if not isinstance(task, str) or not task.strip():
@@ -175,7 +198,7 @@ class AgentApiController:
     def post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         try:
             return 200, self._dispatch(path, payload)
-        except (LocalAgentError, AssistCoordinatorError) as exc:
+        except (LocalAgentError, AssistCoordinatorError, DeepSeekHeadCoordinatorError) as exc:
             code = exc.code
             status = 403 if code == "LOCAL_AGENT_HIGH_RISK_STOP" else 400
             return status, {

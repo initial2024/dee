@@ -547,6 +547,9 @@ if ($RouterAction) {
 }
 
 if ($NoShow) {
+    Write-Output 'DEEPSEEK_HEAD_COLLABORATION_PANEL_VISIBLE=YES'; Write-Output 'DEEPSEEK_HEAD_CONTEXT_READONLY=YES'; Write-Output 'DEEPSEEK_HEAD_AUTO_BRAIN_SELECTION=YES'; Write-Output 'DEEPSEEK_HEAD_CONTEXT_REDACTION=YES'
+}
+if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
     Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_BRAIN_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_ENDPOINT=127.0.0.1:8791'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_VISIBLE=YES'; Write-Output 'ASSIST_COORDINATE_API_VISIBLE=YES'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_ENDPOINT=127.0.0.1:18789/assist/coordinate'; Write-Output 'CODEX_START_INSTRUCTION_VISIBLE=YES'; Write-Output 'OFFICIAL_DIRECT_UNCHANGED=YES'; Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'; Write-Output 'CODEX_AGENT_AUTO_INVOKED=NO'; Write-Output 'CODEX_AGENTIC_USAGE_BYPASS=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; Write-Output 'ROUTER_PORT_OWNER_FIELDS=YES'; Write-Output 'ROUTER_IDENTITY_PROBE=YES'; Write-Output 'STALE_ROUTER_CONFIRMATION_GATE=YES'; Write-Output 'UNKNOWN_PROCESS_SAFE_STOP=YES'; Write-Output 'UNKNOWN_SERVICE_POST_BLOCKED=YES'; Write-Output 'CONTROL_PANEL_LAYOUT_POLISH=YES'; Write-Output 'LOCAL_AGENT_GROUPS=YES'; Write-Output 'OFFICIAL_ASSISTED_GROUPS=YES'; Write-Output 'BUTTON_TEXT_VISIBLE=YES'; Write-Output 'WINDOW_RESIZE_SUPPORTED=YES'; Write-Output 'VERTICAL_SCROLL_SUPPORTED=YES'; Write-Output 'DANGEROUS_ACTIONS_STILL_CONFIRM=YES'; Write-Output 'DANGEROUS_ACTION_TOOLTIPS=YES'; Write-Output 'RAW_JSON_COLLAPSED=YES'; exit 0
 }
@@ -634,11 +637,51 @@ $diagnosticsToolbar = New-Object System.Windows.Forms.FlowLayoutPanel; $diagnost
 $debugToggle = New-Object System.Windows.Forms.CheckBox; $debugToggle.Text = '显示高级信息 / 调试信息'; $debugToggle.AutoSize = $true; $debugToggle.Font = $buttonFont; [void]$diagnosticsToolbar.Controls.Add($debugToggle)
 $copyDebugButton = New-Object System.Windows.Forms.Button; $copyDebugButton.Text = '复制诊断 JSON'; $copyDebugButton.Width = 150; $copyDebugButton.Height = 30; $copyDebugButton.Font = $buttonFont; [void]$diagnosticsToolbar.Controls.Add($copyDebugButton)
 $diagnosticsText = New-Object System.Windows.Forms.TextBox; $diagnosticsText.Multiline = $true; $diagnosticsText.ReadOnly = $true; $diagnosticsText.Font = $uiFont; $diagnosticsText.Dock = 'Fill'; $diagnosticsText.Visible = $false; [void]$diagnosticsLayout.Controls.Add($diagnosticsText,0,1); $debugToggle.Add_CheckedChanged({$diagnosticsText.Visible = $debugToggle.Checked}.GetNewClosure())
+## DeepSeek Head collaboration is a separate, scrollable panel so the existing
+## bridge and Local Agent layouts remain stable at small window sizes.
+$deepSeekHeadTab = New-Object System.Windows.Forms.TabPage('DeepSeek 首脑协作'); [void]$tabs.TabPages.Add($deepSeekHeadTab)
+$deepSeekHeadLayout = New-Object System.Windows.Forms.TableLayoutPanel; $deepSeekHeadLayout.Dock = 'Fill'; $deepSeekHeadLayout.AutoScroll = $true; $deepSeekHeadLayout.Padding = New-Object System.Windows.Forms.Padding(12); $deepSeekHeadLayout.ColumnCount = 1; $deepSeekHeadLayout.RowCount = 3; [void]$deepSeekHeadLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,155))); [void]$deepSeekHeadLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,185))); [void]$deepSeekHeadLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $deepSeekHeadTab.Controls.Add($deepSeekHeadLayout)
+$deepSeekHeadStatusGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekHeadStatusGroup.Text = 'DeepSeek 首脑协作状态（只读上下文）'; $deepSeekHeadStatusGroup.Dock = 'Fill'; $deepSeekHeadStatusGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekHeadLayout.Controls.Add($deepSeekHeadStatusGroup,0,0)
+$deepSeekHeadStatus = New-Object System.Windows.Forms.TextBox; $deepSeekHeadStatus.Multiline = $true; $deepSeekHeadStatus.ReadOnly = $true; $deepSeekHeadStatus.ScrollBars = 'Vertical'; $deepSeekHeadStatus.Dock = 'Fill'; $deepSeekHeadStatus.Font = $uiFont; $deepSeekHeadStatusGroup.Controls.Add($deepSeekHeadStatus)
+$deepSeekHeadActionGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekHeadActionGroup.Text = 'DeepSeek Head 协作操作'; $deepSeekHeadActionGroup.Dock = 'Fill'; $deepSeekHeadActionGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekHeadLayout.Controls.Add($deepSeekHeadActionGroup,0,1)
+$deepSeekHeadButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekHeadButtons.Dock = 'Fill'; $deepSeekHeadButtons.AutoScroll = $true; $deepSeekHeadButtons.WrapContents = $true; $deepSeekHeadButtons.Font = $buttonFont; $deepSeekHeadActionGroup.Controls.Add($deepSeekHeadButtons)
+$deepSeekHeadRawGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekHeadRawGroup.Text = 'Context Bundle / 原始 JSON（默认折叠）'; $deepSeekHeadRawGroup.Dock = 'Fill'; $deepSeekHeadRawGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekHeadLayout.Controls.Add($deepSeekHeadRawGroup,0,2)
+$deepSeekHeadRaw = New-Object System.Windows.Forms.TextBox; $deepSeekHeadRaw.Multiline = $true; $deepSeekHeadRaw.ReadOnly = $true; $deepSeekHeadRaw.ScrollBars = 'Vertical'; $deepSeekHeadRaw.Dock = 'Fill'; $deepSeekHeadRaw.Visible = $false; $deepSeekHeadRaw.Font = $uiFont; $deepSeekHeadRawGroup.Controls.Add($deepSeekHeadRaw)
 function Add-ProviderLog([string]$Message) { $line = ('[{0}] {1}' -f (Get-Date).ToString('HH:mm:ss'), (Redact-Text $Message)); $providerLog.AppendText($line + "`r`n") }
 function Add-DeepSeekLog([string]$Action,[object]$Result) {
     $line = ('[{0}] action={1}; exit_code={2}; status={3}' -f (Get-Date).ToString('HH:mm:ss'),$Action,$Result.exit_code,$Result.error_type)
     $deepSeekLog.AppendText((Redact-Text $line) + "`r`n")
 }
+function Format-DeepSeekHeadSummary([object]$Record) {
+    if (-not $Record) { return '尚未收集上下文。默认只读，不会修改文件。' }
+    if ($Record.error_code) { return ("DeepSeek 首脑协作失败`r`n错误码：{0}`r`n回退原因：{1}`r`n已修改文件：否`r`n已发送工具：否" -f $Record.error_code,$Record.fallback_reason) }
+    $health = if ($Record.provider_health) { (@($Record.provider_health.psobject.Properties | ForEach-Object { '{0}={1}' -f $_.Name,$_.Value.status }) -join '；') } else { '未知' }
+    return ("任务难度：{0}`r`n选定辅助脑：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`nContext Bundle：{4}`r`nAgent Plan：{5}`r`nProvider 状态：{6}`r`n默认模式：PLAN_ONLY / READ_ONLY`r`n文件修改：否；测试：否；commit：否`r`nDeepSeek 工具转发：否" -f $Record.task_difficulty,$Record.selected_brain,$Record.why_selected,$Record.fallback_reason,$Record.context_bundle_id,$Record.deepseek_plan_id,$health)
+}
+function Invoke-DeepSeekHeadCoordinate([bool]$InvokeBrain = $false,[string]$Brain = 'auto') {
+    $arguments = @('deepseek-head','coordinate','--task','当前任务由 Codex 提供；只读收集项目上下文并生成 Agent Plan，不修改文件')
+    if ($Brain -and $Brain -ne 'auto') { $arguments += @('--brain',$Brain) } else { $arguments += @('--brain','auto') }
+    if ($InvokeBrain) {
+        $confirm = [System.Windows.Forms.MessageBox]::Show('将把脱敏且限长的只读上下文发送到本机 127.0.0.1:8791 DeepSeek Web Bridge。不会发送密钥、Cookie、Token 或 Authorization。是否继续？','DeepSeek 首脑分析确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $arguments += '--invoke-brain'
+    }
+    $raw = Invoke-RouterCli $arguments
+    try { $record = $raw | ConvertFrom-Json } catch { throw 'DEEPSEEK_HEAD_RESPONSE_INVALID' }
+    $script:DeepSeekHeadLastRecord = $record
+    $deepSeekHeadStatus.Text = Format-DeepSeekHeadSummary $record
+    $deepSeekHeadRaw.Text = Redact-Text $raw
+    $deepSeekHeadRaw.Visible = $false
+    if ($record.context_bundle_id) { $script:DeepSeekHeadContextId = [string]$record.context_bundle_id }
+    if ($record.deepseek_plan_id) { $script:DeepSeekHeadPlanId = [string]$record.deepseek_plan_id }
+    [System.Windows.Forms.MessageBox]::Show((Format-DeepSeekHeadSummary $record),'DeepSeek 首脑协作') | Out-Null
+}
+function Show-DeepSeekHeadContext {
+    if (-not $script:DeepSeekHeadContextId) { [System.Windows.Forms.MessageBox]::Show('请先收集项目上下文。','Context Bundle') | Out-Null; return }
+    $raw = Invoke-RouterCli @('deepseek-head','plan-from-context','--context-id',$script:DeepSeekHeadContextId)
+    $deepSeekHeadRaw.Text = Redact-Text $raw; $deepSeekHeadRaw.Visible = $true
+}
+function Add-DeepSeekHeadButton([string]$Caption,[scriptblock]$Action,[int]$Width=220,[string]$TooltipText='') { Add-UiLayoutButton $deepSeekHeadButtons $Caption $Action $Width $TooltipText }
 function Get-DeepSeekModeStatusText([object]$Probe) {
     if (-not $Probe) { return ("模式策略：自动选择（尚未运行只读探测）`r`n请点击探测 DeepSeek 模式；该操作只读取页面控件，不发送提示词、不点击发送。") }
     $labels = [ordered]@{ normal = '普通'; search = '搜索'; thinking = '思考'; expert = '专家' }
@@ -1025,6 +1068,16 @@ Add-DeepSeekModeButton '固定思考模式' { Set-DeepSeekModePreference 'thinki
 Add-DeepSeekModeButton '固定专家模式' { Set-DeepSeekModePreference 'expert' }
 Add-DeepSeekModeButton '探测 DeepSeek 模式' { Invoke-DeepSeekModeProbe } 165
 Add-DeepSeekModeButton '查看模式选择原因' { Explain-DeepSeekModeSelection } 165
+Add-DeepSeekHeadButton '自动选择辅助脑' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只读分类和健康门控，不发送 DeepSeek prompt。'
+Add-DeepSeekHeadButton '收集项目上下文' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只运行固定只读检查，不修改文件、不运行测试。'
+Add-DeepSeekHeadButton '发送给 DeepSeek 首脑分析' { Invoke-DeepSeekHeadCoordinate $true 'deepseek-bridge-direct' } 230 '需确认；仅发送脱敏、限长只读上下文到本机 127.0.0.1:8791。'
+Add-DeepSeekHeadButton '生成 Agent Plan' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 190
+Add-DeepSeekHeadButton '生成补丁草案（需确认）' { [System.Windows.Forms.MessageBox]::Show('补丁草案只生成建议，不自动应用；应用补丁仍需 Local Agent 双确认。','DeepSeek 首脑协作') | Out-Null } 220 '需要确认，不自动应用。'
+Add-DeepSeekHeadButton '应用补丁（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动修改文件；请在 Local Agent 面板核对 diff 后双确认。','DeepSeek 首脑协作') | Out-Null } 200 '需要确认，不自动执行。'
+Add-DeepSeekHeadButton '运行测试（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动运行测试；请在 Local Agent 面板选择白名单测试并确认。','DeepSeek 首脑协作') | Out-Null } 200 '需要确认，仅白名单测试。'
+Add-DeepSeekHeadButton '提交 commit（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动提交；需在 Local Agent 面板确认，且禁止 push。','DeepSeek 首脑协作') | Out-Null } 210 '需要确认，不 push。'
+Add-DeepSeekHeadButton '查看 Context Bundle' { Show-DeepSeekHeadContext } 190
+Add-DeepSeekHeadButton '复制给 Codex 的指令' { if($script:DeepSeekHeadLastRecord -and $script:DeepSeekHeadLastRecord.agent_plan.codex_instruction){Set-Clipboard -Value (Redact-Text ([string]$script:DeepSeekHeadLastRecord.agent_plan.codex_instruction));[System.Windows.Forms.MessageBox]::Show('已复制脱敏 Codex 指令。','DeepSeek 首脑协作') | Out-Null}else{[System.Windows.Forms.MessageBox]::Show('请先生成 Agent Plan。','DeepSeek 首脑协作') | Out-Null} } 210
 Add-CodexModeButton '切换官方直连' { Invoke-CodexModeAction 'official-direct' }
 Add-CodexModeButton '切换本地 Router' { Invoke-CodexModeAction 'custom-router' }
 Add-CodexModeButton 'DeepSeek 首脑' { Invoke-CodexModeAction 'custom-deepseek-head' } 150
@@ -1101,6 +1154,8 @@ if ($SelfTest) {
     Write-Output 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS'
     Write-Output 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
+    Write-Output 'DEEPSEEK_HEAD_UI_CONSTRUCTION=PASS'
+    Write-Output 'DEEPSEEK_HEAD_CONTEXT_REDACTION=PASS'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'

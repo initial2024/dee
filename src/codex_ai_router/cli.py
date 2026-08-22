@@ -28,6 +28,7 @@ from .deepseek_modes import load_probe_state, probe_deepseek_modes, select_deeps
 from .local_agent import BRAIN_PROVIDERS, LocalAgent, LocalAgentError
 from .agent_api import AGENT_API_BASE
 from .assist_coordinator import ASSIST_STARTUP_INSTRUCTION
+from .deepseek_head_coordinator import DeepSeekHeadCoordinator, DeepSeekHeadCoordinatorError, choose_brain
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -156,6 +157,19 @@ def main() -> None:
     assist_coordinate.add_argument("--no-readonly", action="store_true")
     assist_coordinate.add_argument("--no-patch-draft", action="store_true")
     assist_sub.add_parser("startup-instruction", help="print the copyable Codex startup instruction")
+    deepseek_head = sub.add_parser("deepseek-head", help="DeepSeek Head read-only context coordinator")
+    deepseek_head_sub = deepseek_head.add_subparsers(dest="deepseek_head_action", required=True)
+    for action in ("coordinate", "collect-context", "choose-brain"):
+        item = deepseek_head_sub.add_parser(action)
+        item.add_argument("--task", required=True)
+        item.add_argument("--brain", "--brain-provider", dest="brain_provider", default="auto", choices=("auto", "local-light", "deepseek-head", "deepseek-bridge-direct", "external-allowed", "hybrid-agent"))
+        if action == "coordinate":
+            item.add_argument("--invoke-brain", action="store_true", help="explicitly send redacted context to the selected local brain")
+    context_plan = deepseek_head_sub.add_parser("plan-from-context")
+    context_plan.add_argument("--context-id", required=True)
+    execute_plan = deepseek_head_sub.add_parser("execute-plan")
+    execute_plan.add_argument("--plan-id", required=True)
+    execute_plan.add_argument("--confirm", action="store_true")
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -255,6 +269,23 @@ def main() -> None:
             "allow_apply": False,
             "allow_commit": False,
         }))
+        return
+    elif args.command == "deepseek-head":
+        coordinator = DeepSeekHeadCoordinator(Path.cwd())
+        try:
+            if args.deepseek_head_action == "choose-brain":
+                emit(choose_brain(args.task, args.brain_provider))
+            elif args.deepseek_head_action in {"coordinate", "collect-context"}:
+                emit(coordinator.coordinate({"task": args.task, "brain_provider": args.brain_provider, "invoke_brain": bool(getattr(args, "invoke_brain", False))}))
+            elif args.deepseek_head_action == "plan-from-context":
+                emit(agent_api_request("/deepseek-head/plan-from-context", {"context_bundle_id": args.context_id, "invoke_brain": False}))
+            else:
+                if not args.confirm:
+                    emit({"status": "DENIED", "error_code": "CONFIRMATION_REQUIRED", "plan_id": args.plan_id, "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO"})
+                else:
+                    emit({"status": "PLAN_ONLY", "plan_id": args.plan_id, "confirm_required": True, "confirmed": True, "execution": "DELEGATE_TO_LOCAL_AGENT_ACTION", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO"})
+        except DeepSeekHeadCoordinatorError as exc:
+            emit({"status": "ERROR", "error_code": exc.code, "files_modified": "NO", "secrets_logged": "NO"})
         return
     elif args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
