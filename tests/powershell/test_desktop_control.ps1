@@ -27,7 +27,10 @@ $source = Get-Content -LiteralPath $control -Raw -Encoding UTF8
 Assert-True ($source -match '小羽 Router 控制台' -and $source -match '使用小羽 Router' -and $source -match '使用 OpenAI Luna（低）') 'chinese_title_and_buttons_present'
 Assert-True ($source -match "Microsoft YaHei UI" -and $source -match '\[double\]\$FontScale = 1\.25') 'large_font_and_scale_parameter_present'
 Assert-True ($source -match 'AutoScaleMode.*Dpi') 'dpi_scaling_is_enabled'
-Assert-True ($source -match 'Router：\{0\}`r`n监听地址：\{1\}') 'status_fields_are_line_separated'
+Assert-True ($source -match 'Router：\{0\}`r`n监听状态：\{1\}`r`n监听地址：\{2\}') 'status_fields_are_line_separated'
+Assert-True ($source -match 'Get-RouterListenerInfo' -and $source -match '127\.0\.0\.1:18789' -and $source -match 'ROUTER_PORT_IN_USE_UNKNOWN_PROCESS') 'router_listener_is_loopback_and_unknown_port_is_protected'
+Assert-True ($source -match 'Get-RouterLaunchSpec' -and $source -match 'codex_ai_router\.cli' -and $source -match 'ROUTER_START_TIMEOUT') 'router_one_click_start_has_python_fallback_and_timeout'
+Assert-True ($source -match '检查 18789' -and $source -match '查看 /v1/models' -and $source -match '工具策略') 'router_status_and_models_buttons_are_visible'
 Assert-True ($source -notmatch '(?i)api[_ -]?key\s*=' -and $source -notmatch '(?i)authorization\s*=') 'ui_does_not_embed_secret_values'
 
 $providerFixture = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-provider-grid-' + [guid]::NewGuid().ToString() + '.json')
@@ -68,6 +71,13 @@ Assert-True ($source -match 'llama.cpp direct' -and $source -match 'LM Studio：
 Assert-True ($source -match '选择方式：' -and $source -match '手动选择' -and $source -match '自动选择') 'control_panel_marks_auto_and_manual_model_selection'
 Assert-True ($source -match '允许模型' -and $source -match '拒绝模型' -and $source -match '清除冷却') 'control_panel_model_picker_has_policy_and_cooldown_actions'
 Assert-True ($source -match 'DeepSeek 本地桥接' -and $source -match 'LOCAL_DIRECT' -and $source -match 'http://127.0.0.1:8792/v1') 'deepseek_local_bridge_status_panel_present'
+Assert-True ($source -match 'DeepSeek 网页模式策略（只读探测）' -and $source -match '探测 DeepSeek 模式' -and $source -match 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES') 'deepseek_read_only_mode_probe_ui_present'
+Assert-True ($source -match '自动选择模式' -and $source -match '固定普通模式' -and $source -match '固定搜索模式' -and $source -match '固定思考模式' -and $source -match '固定专家模式') 'deepseek_mode_selector_buttons_present'
+Assert-True ($source -match '最近推荐模式' -and $source -match 'Format-DeepSeekSelectionSummary') 'deepseek_mode_recommendation_is_shown_in_chinese'
+Assert-True ($source -match 'mode-probe' -and $source -match 'promptSent' -and $source -match 'clickSend') 'deepseek_mode_probe_reports_no_prompt_or_send'
+Assert-True ($source -match 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO' -and $source -match '原始 JSON：已折叠') 'codex_mode_switch_shows_chinese_summary_by_default'
+Assert-True ($source -match '复制诊断 JSON' -and $source -match '脱敏诊断 JSON') 'codex_mode_debug_json_requires_explicit_copy'
+Assert-True ($source -match '不适用（官方直连）' -and $source -match 'Get-CodexModeChineseName') 'official_direct_tools_policy_is_not_applicable'
 Assert-True ($source -match 'OFFICIAL_DIRECT' -and $source -match 'CUSTOM_ROUTER' -and $source -match 'OFFICIAL_ASSISTED') 'codex_legacy_modes_documented'
 Assert-True ($source -match 'CUSTOM_DEEPSEEK_HEAD' -and $source -match 'CUSTOM_HYBRID_AGENT') 'deepseek_head_and_hybrid_modes_present'
 Assert-True ($source -match 'CUSTOM_DEEPSEEK_HEAD' -and $source -match 'CUSTOM_LOCAL_LIGHT' -and $source -match 'CUSTOM_EXTERNAL_API' -and $source -match 'CUSTOM_HYBRID_AGENT') 'a4_codex_modes_present'
@@ -133,7 +143,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=84'
+Write-Output ('POWERSHELL_TEST_TOTAL=' + ($passed + $failed))
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }

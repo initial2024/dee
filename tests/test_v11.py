@@ -20,6 +20,7 @@ from codex_ai_router.vision import VisionProxy
 from codex_ai_router.codex_status import ChatGPTCodexQuota, CodexAgentAvailability, CodexHarnessState
 from codex_ai_router.providers.runtime_models import RuntimeModelState, text_candidates
 from codex_ai_router.accounting.usage_ledger import UsageLedger, provider_usage_warning
+from codex_ai_router.call_records import append as append_call_record
 
 
 class FakeLocal:
@@ -130,9 +131,14 @@ class RouterV11Tests(unittest.TestCase):
                 raw = response.read().decode("utf-8")
                 self.assertEqual(response.headers.get_content_type(), "text/event-stream")
                 self.assertEqual(response.headers.get("Cache-Control"), "no-cache")
+            self.assertLess(raw.index("response.created"), raw.index("response.output_item.added"))
+            self.assertLess(raw.index("response.output_item.added"), raw.index("response.content_part.added"))
+            self.assertLess(raw.index("response.content_part.added"), raw.index("response.output_text.delta"))
+            self.assertLess(raw.index("response.output_text.done"), raw.index("response.content_part.done"))
+            self.assertLess(raw.index("response.output_item.done"), raw.index("response.completed"))
             self.assertIn("response.completed", raw)
             self.assertIn("response.output_text.delta", raw)
-            self.assertIn("data: [DONE]", raw)
+            self.assertNotIn("data: [DONE]", raw)
         finally:
             server.stop()
 
@@ -146,10 +152,25 @@ class RouterV11Tests(unittest.TestCase):
                 self.assertEqual(response.headers.get_content_type(), "application/json")
                 self.assertEqual(response.headers.get("X-Xiaoyu-Normalized"), "yes")
                 self.assertEqual(response.headers.get("X-Xiaoyu-Content-Detected"), "yes")
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertIsNone(payload["usage"])
         finally:
             server.stop()
 
-    def test_118c_strict_tools_error_has_chinese_guidance(self):
+    def test_118c_completed_event_does_not_emit_partial_usage_object(self):
+        server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal()), port=0)
+        server.start()
+        try:
+            port = server.httpd.server_address[1]
+            request = Request(f"http://127.0.0.1:{port}/v1/responses", data=json.dumps({"model": "xiaoyu-local", "input": "ok", "stream": True}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=3) as response:
+                raw = response.read().decode("utf-8")
+            completed = next(json.loads(line.removeprefix("data: ")) for line in raw.splitlines() if line.startswith("data: ") and '"type": "response.completed"' in line)
+            self.assertIsNone(completed["response"]["usage"])
+        finally:
+            server.stop()
+
+    def test_118d_strict_tools_error_has_chinese_guidance(self):
         server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal(), tools_policy="strict_reject"), port=0)
         server.start()
         try:
@@ -194,6 +215,10 @@ class RouterV11Tests(unittest.TestCase):
             record = ledger.append({"active_provider": "XiaoyuRouter", "active_model": "xiaoyu-lightboat", "success": True, "error_code": "Bearer fake", "prompt": "must not persist"})
             raw = ledger.path.read_text(encoding="utf-8")
             self.assertNotIn("prompt", record); self.assertNotIn("fake", raw); self.assertNotIn("must not persist", raw)
+
+    def test_122_call_ledger_write_failure_does_not_break_response_path(self):
+        with patch("codex_ai_router.call_records.Path.open", side_effect=PermissionError("locked")):
+            append_call_record({"id": "req", "model": "local-light", "status": "PASS", "content_detected": True})
 
     def test_122_usage_warning_does_not_fake_quota(self):
         self.assertIn("may consume", provider_usage_warning("OpenAI", 5))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import threading
@@ -19,7 +20,8 @@ from .providers.openai_compatible import ResponsesResponseAdapter
 from .providers.base import ProviderError
 from .providers.runtime_models import RuntimeModelState, text_candidates
 from .call_records import append as append_call_record
-from .provider_allowlist import model_catalog, providers as allowlisted_providers, resolve as resolve_allowlisted
+from .provider_allowlist import BRIDGE_API_KEY_ENV, model_catalog, providers as allowlisted_providers, resolve as resolve_allowlisted
+from .deepseek_modes import select_deepseek_mode
 from .response_compat import ResponseCompatibilityError, diagnostic_headers, extract_visible_text, iter_normalized_sse, normalize_chat_completion
 from .tools_policy import MANUAL_PLAN, STRICT_REJECT, TEXT_ONLY_STRIP, TEXT_ONLY_SYSTEM_INSTRUCTION, load_policy, request_has_tools, strip_tool_fields, normalize_policy
 from .vision import VisionProxy
@@ -44,18 +46,55 @@ def _input_text(value: object) -> str:
     if isinstance(value, str):
         return value
     pieces: list[str] = []
+    if isinstance(value, dict):
+        return _input_text(value.get("content", value.get("text", "")))
     if isinstance(value, list):
         for item in value:
-            if not isinstance(item, dict):
-                continue
-            content = item.get("content", [])
-            if isinstance(content, str):
-                pieces.append(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                        pieces.append(part["text"])
+            if isinstance(item, str):
+                pieces.append(item)
+            elif isinstance(item, dict):
+                content = item.get("content", item.get("text", ""))
+                if isinstance(content, str):
+                    pieces.append(content)
+                elif isinstance(content, list):
+                    pieces.append(_input_text(content))
     return "\n".join(pieces)
+
+
+def _compact_codex_envelope(text: str) -> str:
+    """Drop Codex transport context while preserving the trailing user text."""
+    normalized = html.unescape(text).strip()
+    markers = ("</environment_context>", "</app-context>", "</permissions instructions>")
+    marker, cut = max(((item, normalized.rfind(item)) for item in markers), key=lambda pair: pair[1])
+    if cut >= 0:
+        tail = normalized[cut + len(marker):].strip()
+        if tail:
+            return tail
+    return normalized
+
+
+def _last_user_text(value: object) -> str:
+    """Return only the last user message, never system/developer context."""
+    if isinstance(value, str):
+        return _compact_codex_envelope(value)
+    if isinstance(value, dict):
+        return _compact_codex_envelope(_input_text(value))
+    if not isinstance(value, list):
+        return ""
+    user_texts: list[str] = []
+    fallback_texts: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            text = _input_text(item)
+            if not text:
+                continue
+            fallback_texts.append(text)
+            if item.get("role") == "user":
+                user_texts.append(text)
+        elif isinstance(item, str) and item:
+            fallback_texts.append(item)
+    selected = (user_texts or fallback_texts)[-1] if (user_texts or fallback_texts) else ""
+    return _compact_codex_envelope(selected)
 
 
 def _bounded_output_tokens(payload: dict, maximum: int = 16) -> int | None:
@@ -72,6 +111,26 @@ def _bounded_output_tokens(payload: dict, maximum: int = 16) -> int | None:
 def _has_image(value: object) -> bool:
     raw = json.dumps(value, ensure_ascii=False).lower()
     return "input_image" in raw or "image_url" in raw
+
+
+def _allowlisted_headers(provider: dict[str, object], *, stream: bool = False) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if stream:
+        headers["Accept"] = "text/event-stream"
+    provider_type = provider.get("type")
+    if provider_type == "EXTERNAL_API_ALLOWED":
+        key_env = provider.get("api_key_env")
+        if not isinstance(key_env, str) or not os.getenv(key_env):
+            raise RuntimeError("AUTH_MISSING")
+        headers["Authorization"] = "Bearer " + os.environ[key_env]
+    elif provider_type == "DEEPSEEK_WEB_BRIDGE":
+        # The local Worker intentionally requires its own sk-* API key.  Keep
+        # this loopback-only credential out of records, UI, and error details.
+        key = os.getenv(BRIDGE_API_KEY_ENV, "").strip()
+        if not key:
+            raise RuntimeError("AUTH_MISSING")
+        headers["Authorization"] = "Bearer " + key
+    return headers
 
 
 class RouterService:
@@ -333,7 +392,25 @@ class RouterService:
 
     @staticmethod
     def _response(model: str, text: str, usage: dict | None = None) -> dict:
-        return {"id": "resp_xiaoyu_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()), "status": "completed", "model": model, "output": [{"id": "msg_xiaoyu_" + uuid.uuid4().hex, "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text}]}], "output_text": text, "usage": usage or {}}
+        # Codex's Responses SSE parser treats ``usage`` as an optional typed
+        # object.  An empty object is not equivalent to an omitted value: it
+        # fails deserialization because the required token counters are
+        # missing, after which Codex reconnects even though text was shown.
+        response_usage: dict | None = None
+        required_usage = ("input_tokens", "output_tokens", "total_tokens")
+        if isinstance(usage, dict) and all(key in usage for key in required_usage):
+            try:
+                response_usage = {
+                    "input_tokens": int(usage["input_tokens"]),
+                    "output_tokens": int(usage["output_tokens"]),
+                    "total_tokens": int(usage["total_tokens"]),
+                }
+                for key in ("input_tokens_details", "output_tokens_details"):
+                    if isinstance(usage.get(key), dict):
+                        response_usage[key] = usage[key]
+            except (TypeError, ValueError):
+                response_usage = None
+        return {"id": "resp_xiaoyu_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()), "status": "completed", "model": model, "output": [{"id": "msg_xiaoyu_" + uuid.uuid4().hex, "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": text, "annotations": []}]}], "output_text": text, "usage": response_usage}
 
     @staticmethod
     def _allowlisted_models() -> set[str]:
@@ -384,7 +461,9 @@ class RouterService:
             append_call_record({"id": request_id, "mode": "NO_QUOTA_CODEX_MODE", "model": model, "provider": provider.get("id") if provider else None, "provider_type": provider.get("type") if provider else None, "status": "ERROR", "duration_ms": 0, "error_code": error, "content_detected": False, "normalized": False})
             raise RuntimeError(error)
         assert provider is not None
-        prompt = _input_text(request_payload.get("input", request_payload.get("messages", [])))
+        is_deepseek_bridge = provider.get("type") == "DEEPSEEK_WEB_BRIDGE"
+        prompt_source = request_payload.get("input", request_payload.get("messages", []))
+        prompt = _last_user_text(prompt_source) if is_deepseek_bridge else _input_text(prompt_source)
         if not prompt:
             raise RuntimeError("INPUT_REQUIRED")
         if provider.get("type") == "MANUAL_PLAN":
@@ -394,18 +473,26 @@ class RouterService:
         target_model = model
         if model == "hybrid-agent":
             target_model = str((provider.get("models") or ["deepseek-web"])[0])
-        outbound_messages: list[dict[str, str]] = []
-        instructions = request_payload.get("instructions")
-        if isinstance(instructions, str) and instructions.strip():
-            outbound_messages.append({"role": "system", "content": instructions})
-        outbound_messages.append({"role": "user", "content": prompt})
+        selected_mode = None
+        if is_deepseek_bridge and model == "deepseek-web-auto":
+            selection = select_deepseek_mode(prompt, availability=provider.get("mode_availability"))
+            if not selection["mode_available"]:
+                raise RuntimeError("DEEPSEEK_MODE_UNAVAILABLE")
+            target_model = str(selection["selected_model_alias"])
+            selected_mode = selection["selected_mode"]
+        # The browser bridge must receive one compact user message. Passing
+        # Codex instructions/environment context makes the visible web prompt
+        # enormous and can cause downstream clients to reconnect.
+        if is_deepseek_bridge:
+            outbound_messages = [{"role": "user", "content": prompt}]
+        else:
+            outbound_messages = []
+            instructions = request_payload.get("instructions")
+            if isinstance(instructions, str) and instructions.strip():
+                outbound_messages.append({"role": "system", "content": instructions})
+            outbound_messages.append({"role": "user", "content": prompt})
         outbound: dict[str, object] = {"model": target_model, "messages": outbound_messages, "stream": False}
-        headers = {"Content-Type": "application/json"}
-        if provider.get("type") == "EXTERNAL_API_ALLOWED":
-            key_env = provider.get("api_key_env")
-            if not isinstance(key_env, str) or not os.getenv(key_env):
-                raise RuntimeError("AUTH_MISSING")
-            headers["Authorization"] = "Bearer " + os.environ[key_env]
+        headers = _allowlisted_headers(provider)
         request = Request(self._allowlisted_endpoint(provider), data=json.dumps(outbound).encode("utf-8"), headers=headers, method="POST")
         status = "ERROR"; error_code: str | None = None; content_detected = False
         try:
@@ -415,7 +502,9 @@ class RouterService:
             normalized = normalize_chat_completion(raw, model=model)
             content_detected = bool(normalized["choices"][0]["message"].get("content"))
             status = "PASS"
-            append_call_record({"id": request_id, "mode": "NO_QUOTA_CODEX_MODE", "model": model, "provider": provider.get("id"), "provider_type": provider.get("type"), "status": status, "duration_ms": int((time.monotonic() - started) * 1000), "error_code": None, "content_detected": content_detected, "normalized": True})
+            record = {"id": request_id, "mode": "NO_QUOTA_CODEX_MODE", "model": model, "provider": provider.get("id"), "provider_type": provider.get("type"), "status": status, "duration_ms": int((time.monotonic() - started) * 1000), "error_code": None, "content_detected": content_detected, "normalized": True}
+            if selected_mode: record["deepseek_selected_mode"] = selected_mode
+            append_call_record(record)
             return self._response(model, normalized["choices"][0]["message"]["content"], normalized.get("usage"))
         except HTTPError as exc:
             error_code = "UPSTREAM_HTTP_" + str(exc.code)
@@ -464,16 +553,17 @@ class RouterService:
             response = self._allowlisted_response({**request_payload, "input": request_payload.get("messages", request_payload.get("input"))}, model)
             yield from iter_normalized_sse(["data: " + json.dumps(response, ensure_ascii=False)], model=model)
             return
-        prompt = _input_text(request_payload.get("messages", request_payload.get("input")))
+        prompt_source = request_payload.get("messages", request_payload.get("input"))
+        prompt = _last_user_text(prompt_source) if provider.get("type") == "DEEPSEEK_WEB_BRIDGE" else _input_text(prompt_source)
         if not prompt:
             raise RuntimeError("INPUT_REQUIRED")
         target_model = model if model != "hybrid-agent" else str((provider.get("models") or ["deepseek-web"])[0])
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-        if provider.get("type") == "EXTERNAL_API_ALLOWED":
-            key_env = provider.get("api_key_env")
-            if not isinstance(key_env, str) or not os.getenv(key_env):
-                raise RuntimeError("AUTH_MISSING")
-            headers["Authorization"] = "Bearer " + os.environ[key_env]
+        if provider.get("type") == "DEEPSEEK_WEB_BRIDGE" and model == "deepseek-web-auto":
+            selection = select_deepseek_mode(prompt, availability=provider.get("mode_availability"))
+            if not selection["mode_available"]:
+                raise RuntimeError("DEEPSEEK_MODE_UNAVAILABLE")
+            target_model = str(selection["selected_model_alias"])
+        headers = _allowlisted_headers(provider, stream=True)
         request = Request(self._allowlisted_endpoint(provider), data=json.dumps({"model": target_model, "messages": [{"role": "user", "content": prompt}], "stream": True}).encode("utf-8"), headers=headers, method="POST")
         try:
             with urlopen(request, timeout=30) as upstream:
@@ -537,14 +627,42 @@ class _Handler(BaseHTTPRequestHandler):
         model = body.get("model")
         created = body.get("created_at")
         text = body.get("output_text") or ""
-        events = [
-            "event: response.created\ndata: " + json.dumps({"type": "response.created", "response": {"id": response_id, "object": "response", "model": model, "created_at": created}}, ensure_ascii=False) + "\n\n",
-            "event: response.in_progress\ndata: " + json.dumps({"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}}, ensure_ascii=False) + "\n\n",
-        ]
+        output = body.get("output") if isinstance(body.get("output"), list) else []
+        output_item = output[0] if output and isinstance(output[0], dict) else {
+            "id": response_id + "_msg" if response_id else "msg_xiaoyu",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [],
+        }
+        item_id = output_item.get("id") or (response_id + "_msg" if response_id else "msg_xiaoyu")
+        content = output_item.get("content") if isinstance(output_item.get("content"), list) else []
+        output_part = content[0] if content and isinstance(content[0], dict) else {"type": "output_text", "text": text, "annotations": []}
+        empty_part = {**output_part, "text": ""}
+        sequence = 0
+        events: list[str] = []
+
+        def emit(event_type: str, payload: dict) -> None:
+            nonlocal sequence
+            sequence += 1
+            event = {"type": event_type, "sequence_number": sequence, **payload}
+            events.append("event: " + event_type + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n")
+
+        created_response = {**body, "status": "in_progress", "output": [], "output_text": ""}
+        emit("response.created", {"response": created_response})
+        emit("response.in_progress", {"response": created_response})
+        emit("response.output_item.added", {"output_index": 0, "item": {**output_item, "content": []}})
+        emit("response.content_part.added", {"item_id": item_id, "output_index": 0, "content_index": 0, "part": empty_part})
         if text:
-            events.append("event: response.output_text.delta\ndata: " + json.dumps({"type": "response.output_text.delta", "item_id": response_id, "delta": text}, ensure_ascii=False) + "\n\n")
-        events.append("event: response.completed\ndata: " + json.dumps({"type": "response.completed", "response": body}, ensure_ascii=False) + "\n\n")
-        events.append("data: [DONE]\n\n")
+            emit("response.output_text.delta", {"item_id": item_id, "output_index": 0, "content_index": 0, "delta": text})
+        emit("response.output_text.done", {"item_id": item_id, "output_index": 0, "content_index": 0, "text": text})
+        emit("response.content_part.done", {"item_id": item_id, "output_index": 0, "content_index": 0, "part": output_part})
+        emit("response.output_item.done", {"output_index": 0, "item": output_item})
+        emit("response.completed", {"response": body})
+        # Responses API streams terminate with response.completed and the
+        # HTTP stream ending. ``data: [DONE]`` is a Chat Completions sentinel;
+        # sending it here can make Codex treat an otherwise complete response
+        # as malformed and retry the same request.
         encoded = "".join(events).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")

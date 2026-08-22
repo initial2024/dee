@@ -22,6 +22,7 @@ from .codex_integration import install_xiaoyu_router_provider, same_thread_provi
 from .delegation import explain_delegation
 from .groq_diagnostics import diagnose as diagnose_groq, live_smoke as live_smoke_groq
 from .tools_policy import VALID_POLICIES, load_policy, policy_path, save_policy
+from .deepseek_modes import load_probe_state, probe_deepseek_modes, select_deepseek_mode
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -85,6 +86,10 @@ def main() -> None:
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
     config = sub.add_parser("config"); config.add_argument("action", choices=("show",))
     tools_policy = sub.add_parser("tools-policy"); tools_policy.add_argument("action", choices=("show", "set")); tools_policy.add_argument("policy", nargs="?", choices=VALID_POLICIES)
+    deepseek = sub.add_parser("deepseek")
+    deepseek_sub = deepseek.add_subparsers(dest="deepseek_action", required=True)
+    deepseek_sub.add_parser("mode-probe")
+    explain_mode = deepseek_sub.add_parser("explain-mode"); explain_mode.add_argument("task"); explain_mode.add_argument("--preference", choices=("auto", "normal", "search", "thinking", "expert"), default="auto"); explain_mode.add_argument("--model-alias"); explain_mode.add_argument("--codex-mode", default="CUSTOM_DEEPSEEK_TEXT_ONLY"); explain_mode.add_argument("--tools-policy", default="strict_reject"); explain_mode.add_argument("--no-search", action="store_true"); explain_mode.add_argument("--no-thinking", action="store_true"); explain_mode.add_argument("--no-expert", action="store_true")
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -112,6 +117,12 @@ def main() -> None:
         else:
             if not args.policy: raise SystemExit("POLICY_REQUIRED")
             emit(save_policy(args.policy))
+    elif args.command == "deepseek":
+        if args.deepseek_action == "mode-probe":
+            emit(probe_deepseek_modes())
+        else:
+            state = load_probe_state()
+            emit(select_deepseek_mode(args.task, codex_mode=args.codex_mode, tools_policy=args.tools_policy, user_preference=args.preference, explicit_model_alias=args.model_alias, availability=state.get("modes"), search_allowed=not args.no_search, thinking_allowed=not args.no_thinking, expert_allowed=not args.no_expert))
     elif args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
     elif args.command == "models":

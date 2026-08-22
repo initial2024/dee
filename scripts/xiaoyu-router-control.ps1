@@ -4,7 +4,9 @@ param(
     [switch]$SelfTest,
     [ValidateRange(0.8, 2.0)]
     [double]$FontScale = 1.25,
-    [string]$ProviderConfigPath = ''
+    [string]$ProviderConfigPath = '',
+    [ValidateSet('', 'start', 'stop', 'status')]
+    [string]$RouterAction = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,10 +21,15 @@ $UsageLedger = Join-Path $env:USERPROFILE '.codex-ai-router\usage-ledger.jsonl'
 $CodexConfig = Join-Path $env:USERPROFILE '.codex\config.toml'
 $DeepSeekWorkerRoot = 'C:\Users\bad39\Documents\private-ai-chat-worker'
 $DeepSeekBridgeScripts = Join-Path $DeepSeekWorkerRoot 'scripts\local-bridge'
+$RouterPidFile = Join-Path ([IO.Path]::GetTempPath()) 'xiaoyu-router-18789.pid'
 $DeepSeekRuntimeDir = Join-Path $DeepSeekWorkerRoot '.runtime\local-bridge'
 $DeepSeekLocalApiAddress = 'http://127.0.0.1:8792/v1'
 $CodexModeScript = Join-Path $PSScriptRoot 'codex-mode-manager.ps1'
 $script:DeepSeekLastHealth = '未运行'
+$script:DeepSeekModeProbe = $null
+$script:DeepSeekModePreference = 'auto'
+$script:DeepSeekLastSelection = $null
+$script:LastModeDebugJson = ''
 $script:UiDebugEntries = [System.Collections.Generic.List[string]]::new()
 
 function Read-JsonFile([string]$Path, [object]$Fallback) {
@@ -45,6 +52,11 @@ function Get-UiErrorExplanation([string]$Code) {
         'LIVE_CONFIRMATION_REQUIRED' { return '真实外部 API 测试需要用户手动确认。' }
         'AUTH_MISSING' { return '未检测到可用鉴权配置。' }
         'TOOLS_NOT_SUPPORTED_BY_BACKEND' { return '当前后端不支持工具调用；可切换官方直连，或手动启用文本兼容模式。' }
+        'DEEPSEEK_MODE_UNAVAILABLE' { return '请求的 DeepSeek 网页模式未通过界面探测，未假装切换。' }
+        'UI_PROBE_FAILED' { return 'DeepSeek 页面控件探测失败，未把该模式标记为可用。' }
+        'UI_CHANGED' { return 'DeepSeek 页面控件已变化，已停止模式判断，未发送提示词。' }
+        'LOGIN_REQUIRED' { return 'DeepSeek 网页需要登录后才能继续。' }
+        'RATE_LIMITED' { return 'DeepSeek 当前触发限流，请停止重试并等待冷却。' }
         default { return '请查看高级信息，确认本地配置和服务状态后重试。' }
     }
 }
@@ -57,7 +69,7 @@ function Invoke-SafeUiAction([string]$Name,[scriptblock]$Action) {
     try { return (& $Action) }
     catch {
         $detail = Redact-Text ([string]$_.Exception.Message)
-        $code = if ($detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING)') { $Matches[1] } else { 'UI_ACTION_FAILED' }
+        $code = if ($detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED)') { $Matches[1] } else { 'UI_ACTION_FAILED' }
         Add-UiDebugInfo -Name $Name -Code $code -Detail $detail
         $summary = "操作失败`r`n错误码：$code`r`n原因：$(Get-UiErrorExplanation $code)`r`n建议：请检查高级信息 / 调试信息后重试。"
         if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($summary,'小羽 Router 控制台',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
@@ -84,11 +96,115 @@ function Get-CodexStatus {
     if (Test-Path -LiteralPath $CodexConfig) { $lines = Get-Content -LiteralPath $CodexConfig -Encoding UTF8; foreach ($line in $lines) { if ($line -match '^\s*\[') { break }; if ($line -match '^\s*model_provider\s*=\s*"([^"]*)"') { $provider = $Matches[1] }; if ($line -match '^\s*model\s*=\s*"([^"]*)"') { $model = $Matches[1] }; if ($line -match '^\s*(?:model_reasoning_effort|reasoning_effort)\s*=\s*"([^"]*)"') { $reasoning = $Matches[1] } }; $xiaoyu = ([string]::Join("`n", $lines) -match '\[model_providers\.XiaoyuRouter\]') }
     return [pscustomobject]@{ provider = $provider; model = $model; reasoning = $reasoning; xiaoyu = $xiaoyu }
 }
-function Get-RouterStatus {
-    try { $health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/health' -TimeoutSec 2; $models = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/v1/models' -TimeoutSec 2 | ConvertFrom-Json; return [pscustomobject]@{ running = ($health.StatusCode -eq 200); address = 'http://127.0.0.1:18789/v1'; mode = 'AUTO'; models = $models } } catch { return [pscustomobject]@{ running = $false; address = 'http://127.0.0.1:18789/v1'; mode = 'AUTO'; models = $null } }
+function Get-RouterListenerInfo {
+    $entries = @(Get-NetTCPConnection -LocalPort 18789 -State Listen -ErrorAction SilentlyContinue)
+    if ($entries.Count -eq 0) {
+        $entries = @()
+        foreach ($line in @(netstat -ano -p tcp 2>$null)) {
+            if ($line -match '^\s*TCP\s+(?<local>\S+):18789\s+\S+\s+LISTENING\s+(?<pid>\d+)\s*$') {
+                $entries += [pscustomobject]@{ LocalAddress = ([string]$Matches.local).Trim('[',']'); OwningProcess = [int]$Matches.pid }
+            }
+        }
+    }
+    if ($entries.Count -eq 0) { return [pscustomobject]@{ listening = $false; loopback = $false; address = ''; port = 18789; pid = $null; process = ''; command_line = ''; owned = $false } }
+    $entry = $entries | Select-Object -First 1
+    $addresses = @($entries | ForEach-Object { [string]$_.LocalAddress } | Sort-Object -Unique)
+    $listenerPid = [int]$entry.OwningProcess; $processName = ''; $commandLine = ''
+    try { $processName = (Get-Process -Id $listenerPid -ErrorAction Stop).ProcessName } catch {}
+    try { $processLine = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $listenerPid) -ErrorAction Stop; if ($processLine) { $commandLine = [string]$processLine.CommandLine } } catch {}
+    $pidFile = $RouterPidFile; $managedPid = $null
+    if (Test-Path -LiteralPath $pidFile) { try { $managedPid = [int](Get-Content -LiteralPath $pidFile -Raw -Encoding UTF8).Trim() } catch {} }
+    $owned = ($managedPid -eq $listenerPid) -or ($processName -match '(?i)^xiaoyu-router$') -or ($commandLine -match '(?i)codex_ai_router[\\/]cli\.py.*\bserve\b')
+    return [pscustomobject]@{ listening = $true; loopback = (@($addresses | Where-Object { $_ -notin @('127.0.0.1','::1','localhost') }).Count -eq 0); address = ($addresses -join ', '); port = 18789; pid = $listenerPid; process = $processName; command_line = $commandLine; owned = $owned }
 }
-function Start-Router { if ((Get-RouterStatus).running) { return }; $command = Get-Command xiaoyu-router -CommandType Application | Select-Object -First 1; if (-not $command) { throw 'xiaoyu-router command was not found.' }; Start-Process -FilePath $command.Path -ArgumentList 'serve --port 18789' -WindowStyle Hidden }
-function Stop-Router { $listener = Get-NetTCPConnection -LocalPort 18789 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($listener) { Stop-Process -Id $listener.OwningProcess -Force } }
+function Get-RouterToolsPolicyName {
+    $path = Join-Path $env:USERPROFILE '.codex-ai-router\tools-policy.json'
+    try { $value = Read-JsonFile $path ([pscustomobject]@{ codex_tools_policy = 'strict_reject' }); if ($value.codex_tools_policy) { return [string]$value.codex_tools_policy } } catch {}
+    return 'strict_reject'
+}
+function Get-RouterStatus {
+    $listener = Get-RouterListenerInfo; $healthOk = $false; $models = $null; $healthStatus = '未响应'; $modelsStatus = '未检查'
+    if ($listener.listening -and $listener.loopback) {
+        try { $health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/health' -TimeoutSec 2; $healthOk = ($health.StatusCode -eq 200); $healthStatus = if ($healthOk) { 'PASS' } else { [string]$health.StatusCode } } catch { $healthStatus = 'HTTP_ERROR' }
+        try { $modelsResponse = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/v1/models' -TimeoutSec 2; $models = $modelsResponse.Content | ConvertFrom-Json; $modelsStatus = if ($modelsResponse.StatusCode -eq 200) { 'PASS' } else { [string]$modelsResponse.StatusCode } } catch { $modelsStatus = 'HTTP_ERROR' }
+    } elseif ($listener.listening) { $healthStatus = '非回环绑定'; $modelsStatus = '未检查' }
+    $codex = Get-CodexStatus
+    return [pscustomobject]@{ running = ($listener.listening -and $listener.loopback -and $healthOk); address = 'http://127.0.0.1:18789/v1'; mode = 'AUTO'; models = $models; listener_status = if($listener.listening){'LISTENING'}else{'NOT_LISTENING'}; listener_address = $listener.address; listener_port = 18789; listener_pid = $listener.pid; listener_process = $listener.process; listener_owned = $listener.owned; health_status = $healthStatus; models_status = $modelsStatus; current_codex_mode = $codex.provider; current_codex_model = $codex.model; tools_policy = Get-RouterToolsPolicyName }
+}
+function Get-RouterLaunchSpec {
+    $candidates = @()
+    if ($env:XIAOYU_ROUTER_PYTHON) { $candidates += $env:XIAOYU_ROUTER_PYTHON }
+    $candidates += @((Join-Path $ProjectRoot '.venv\Scripts\python.exe'),(Join-Path $ProjectRoot 'venv\Scripts\python.exe'))
+    foreach ($root in @((Join-Path $env:LOCALAPPDATA 'Programs\Python'),(Join-Path $env:USERPROFILE 'miniconda3'),(Join-Path $env:USERPROFILE 'anaconda3'),'C:\ProgramData\Anaconda3','C:\EasyDiffusion\installer_files\env')) {
+        if (Test-Path -LiteralPath $root) { $candidates += @(Get-ChildItem -LiteralPath $root -Filter 'python.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName) }
+    }
+    foreach ($candidate in @($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        try {
+            $probeOutput = & $candidate -c 'import tomllib' 2>$null; $probeExit = $LASTEXITCODE
+            if ($probeExit -ne 0) { $probeOutput = & $candidate -c 'import tomli' 2>$null; $probeExit = $LASTEXITCODE }
+            if ($probeExit -eq 0) { return [pscustomobject]@{ path = $candidate; kind = 'PYTHON_MODULE' } }
+        } catch {}
+    }
+    $knownPython = 'C:\EasyDiffusion\installer_files\env\python.exe'
+    if (Test-Path -LiteralPath $knownPython) { return [pscustomobject]@{ path = $knownPython; kind = 'PYTHON_MODULE' } }
+    throw 'ROUTER_RUNTIME_NOT_FOUND'
+}
+function Start-Router {
+    $existing = Get-RouterListenerInfo
+    if ($existing.listening) {
+        if (-not $existing.loopback) { throw 'ROUTER_NON_LOOPBACK_BINDING' }
+        if (-not $existing.owned) { throw 'ROUTER_PORT_IN_USE_UNKNOWN_PROCESS' }
+        if ((Get-RouterStatus).running) { return [pscustomobject]@{ status = 'ALREADY_RUNNING'; pid = $existing.pid; address = '127.0.0.1:18789' } }
+        throw 'ROUTER_LISTENER_UNHEALTHY'
+    }
+    $runtimeDir = Join-Path $ProjectRoot '.runtime\router'; if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+    $stdout = Join-Path $runtimeDir 'router.stdout.log'; $stderr = Join-Path $runtimeDir 'router.stderr.log'; $pidFile = $RouterPidFile
+    $spec = Get-RouterLaunchSpec; $runner = Join-Path $runtimeDir 'run-router.py'
+    if ($spec.kind -eq 'PYTHON_MODULE') {
+        $runnerSource = "import sys`nfrom pathlib import Path`nsys.path.insert(0, str(Path(r'$ProjectRoot\src')))`nfrom codex_ai_router.cli import main`nif __name__ == '__main__':`n    main()`n"
+        # The generated wrapper is immutable runtime metadata. Some Windows
+        # security layers keep an existing runtime script read-only/locked;
+        # avoid rewriting an identical wrapper on every restart.
+        $needsRunnerWrite = -not (Test-Path -LiteralPath $runner)
+        if (-not $needsRunnerWrite) {
+            try { $needsRunnerWrite = ([IO.File]::ReadAllText($runner, [Text.Encoding]::UTF8) -ne $runnerSource) } catch { throw 'ROUTER_RUNNER_READ_FAILED' }
+        }
+        if ($needsRunnerWrite) { [IO.File]::WriteAllText($runner, $runnerSource, (New-Object Text.UTF8Encoding($false))) }
+        $arguments = @($runner,'serve','--host','127.0.0.1','--port','18789')
+    } else { $arguments = @('serve','--host','127.0.0.1','--port','18789') }
+    # The local Worker fixture requires a loopback-only test key. Inject it
+    # only into the child process environment; never write or display it.
+    $previousBridgeKey = [string]$env:XIAOYU_ROUTER_BRIDGE_API_KEY
+    $injectedBridgeKey = [string]::IsNullOrWhiteSpace($previousBridgeKey)
+    try {
+        if ($injectedBridgeKey) { Set-Item -Path Env:XIAOYU_ROUTER_BRIDGE_API_KEY -Value (Get-DeepSeekFixtureKey) }
+        $process = Start-Process -FilePath $spec.path -ArgumentList $arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    } finally {
+        if ($injectedBridgeKey) { Remove-Item Env:XIAOYU_ROUTER_BRIDGE_API_KEY -ErrorAction SilentlyContinue } else { Set-Item -Path Env:XIAOYU_ROUTER_BRIDGE_API_KEY -Value $previousBridgeKey }
+    }
+    [IO.File]::WriteAllText($pidFile, [string]$process.Id, (New-Object Text.UTF8Encoding($false)))
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        Start-Sleep -Milliseconds 250; $status = Get-RouterStatus
+        if ($status.running -and $status.listener_owned) { return [pscustomobject]@{ status = 'STARTED'; pid = $process.Id; address = '127.0.0.1:18789'; launcher = $spec.kind } }
+        try { if ($process.HasExited) { break } } catch { break }
+    }
+    $detail = ''; if (Test-Path -LiteralPath $stderr) { $detail = Redact-Text (Get-Content -LiteralPath $stderr -Raw -Encoding UTF8) }
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    if ($detail -match '(?i)tomli|modulenotfound|traceback') { throw 'ROUTER_START_DEPENDENCY_ERROR' }
+    throw 'ROUTER_START_TIMEOUT'
+}
+function Stop-Router {
+    $listener = Get-RouterListenerInfo
+    if (-not $listener.listening) { return [pscustomobject]@{ status = 'ALREADY_STOPPED' } }
+    if (-not $listener.loopback) { throw 'ROUTER_NON_LOOPBACK_BINDING' }
+    if (-not $listener.owned) { throw 'ROUTER_PORT_IN_USE_UNKNOWN_PROCESS' }
+    Stop-Process -Id $listener.pid -Force -ErrorAction Stop
+    for ($attempt = 0; $attempt -lt 20; $attempt++) { Start-Sleep -Milliseconds 250; if (-not (Get-RouterListenerInfo).listening) { break } }
+    Remove-Item -LiteralPath $RouterPidFile -Force -ErrorAction SilentlyContinue
+    if ((Get-RouterListenerInfo).listening) { throw 'ROUTER_STOP_TIMEOUT' }
+    return [pscustomobject]@{ status = 'STOPPED' }
+}
 function Get-DeepSeekPortState([int]$Port) {
     $entries = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
     if ($entries.Count -eq 0) { return '未监听' }
@@ -157,7 +273,19 @@ function Invoke-RouterDirectSmoke {
     }
 }
 function Update-ProviderEnabled([string]$Id) { $data = Get-ProviderData; $provider = $data.providers.($Id); if (-not $provider) { throw 'Provider was not found.' }; $provider.enabled = ($provider.enabled -eq $false); Write-JsonAtomic $ProviderConfig $data }
-function Invoke-RouterCli([string[]]$Arguments) { return (Redact-Text (& xiaoyu-router @Arguments 2>&1 | Out-String)) }
+function Invoke-RouterCli([string[]]$Arguments) {
+    $spec = Get-RouterLaunchSpec
+    if ($spec.kind -eq 'PYTHON_MODULE') {
+        $runtimeDir = Join-Path $ProjectRoot '.runtime\router'; if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+        $runner = Join-Path $runtimeDir 'run-router-cli.py'
+        if (-not (Test-Path -LiteralPath $runner)) {
+            $runnerSource = "import sys`nfrom pathlib import Path`nsys.path.insert(0, str(Path(r'$ProjectRoot\src')))`nfrom codex_ai_router.cli import main`nif __name__ == '__main__':`n    main()`n"
+            [IO.File]::WriteAllText($runner, $runnerSource, (New-Object Text.UTF8Encoding($false)))
+        }
+        $cliArgs = @($runner) + @($Arguments); return (Redact-Text (& $spec.path @cliArgs 2>&1 | Out-String))
+    }
+    return (Redact-Text (& $spec.path @Arguments 2>&1 | Out-String))
+}
 function Get-ToolsPolicyRecord {
     try { return (Invoke-RouterCli @('tools-policy','show') | ConvertFrom-Json) }
     catch { return [pscustomobject]@{ codex_tools_policy = 'strict_reject'; default = 'strict_reject'; path = (Join-Path $env:USERPROFILE '.codex-ai-router\tools-policy.json') } }
@@ -177,9 +305,20 @@ function Get-UsageSummary {
     return $summary
 }
 
+if ($RouterAction) {
+    try {
+        $result = switch ($RouterAction) { 'start' { Start-Router }; 'stop' { Stop-Router }; 'status' { Get-RouterStatus } }
+        $result | ConvertTo-Json -Depth 8 -Compress
+        exit 0
+    } catch {
+        [pscustomobject]@{ status = 'ERROR'; error_code = [string]$_.Exception.Message } | ConvertTo-Json -Compress
+        exit 1
+    }
+}
+
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
-    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
+    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
 }
 
 $uiFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
@@ -209,12 +348,15 @@ $providerStatus = New-Object System.Windows.Forms.Label; $providerStatus.Dock = 
 $grid = New-Object System.Windows.Forms.DataGridView; $grid.Dock = 'Fill'; $grid.ReadOnly = $true; $grid.Font = $uiFont; $grid.ColumnHeadersDefaultCellStyle.Font = $buttonFont; $grid.AutoGenerateColumns = $true; $grid.AutoSizeColumnsMode = 'Fill'; $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false; $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $providerLayout.Controls.Add($grid,0,2)
 $providerLogGroup = New-Object System.Windows.Forms.GroupBox; $providerLogGroup.Text = '最近操作日志（已脱敏）'; $providerLogGroup.Dock = 'Fill'; $providerLogGroup.Padding = New-Object System.Windows.Forms.Padding(8); $providerLayout.Controls.Add($providerLogGroup,0,3)
 $providerLog = New-Object System.Windows.Forms.TextBox; $providerLog.Multiline = $true; $providerLog.ReadOnly = $true; $providerLog.ScrollBars = 'Vertical'; $providerLog.Font = $uiFont; $providerLog.Dock = 'Fill'; $providerLogGroup.Controls.Add($providerLog)
-$deepSeekLayout = New-Object System.Windows.Forms.TableLayoutPanel; $deepSeekLayout.Dock = 'Fill'; $deepSeekLayout.Padding = New-Object System.Windows.Forms.Padding(12); $deepSeekLayout.RowCount = 3; $deepSeekLayout.ColumnCount = 1; [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,58))); [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,132))); [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,42))); $deepSeekTab.Controls.Add($deepSeekLayout)
+$deepSeekLayout = New-Object System.Windows.Forms.TableLayoutPanel; $deepSeekLayout.Dock = 'Fill'; $deepSeekLayout.Padding = New-Object System.Windows.Forms.Padding(12); $deepSeekLayout.RowCount = 4; $deepSeekLayout.ColumnCount = 1; [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,45))); [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,145))); [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,112))); [void]$deepSeekLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,35))); $deepSeekTab.Controls.Add($deepSeekLayout)
 $deepSeekStatusGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekStatusGroup.Text = 'DeepSeek 本地桥接状态（LOCAL_DIRECT）'; $deepSeekStatusGroup.Dock = 'Fill'; $deepSeekStatusGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekStatusGroup,0,0)
 $deepSeekStatus = New-Object System.Windows.Forms.TextBox; $deepSeekStatus.Multiline = $true; $deepSeekStatus.ReadOnly = $true; $deepSeekStatus.ScrollBars = 'Vertical'; $deepSeekStatus.Font = $uiFont; $deepSeekStatus.Dock = 'Fill'; $deepSeekStatusGroup.Controls.Add($deepSeekStatus)
-$deepSeekActionsGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekActionsGroup.Text = '本地操作'; $deepSeekActionsGroup.Dock = 'Fill'; $deepSeekActionsGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekActionsGroup,0,1)
+$deepSeekModeGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekModeGroup.Text = 'DeepSeek 网页模式策略（只读探测）'; $deepSeekModeGroup.Dock = 'Fill'; $deepSeekModeGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekModeGroup,0,1)
+$deepSeekModeStatus = New-Object System.Windows.Forms.TextBox; $deepSeekModeStatus.Multiline = $true; $deepSeekModeStatus.ReadOnly = $true; $deepSeekModeStatus.Dock = 'Fill'; $deepSeekModeStatus.Font = $uiFont; $deepSeekModeGroup.Controls.Add($deepSeekModeStatus)
+$deepSeekModeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekModeButtons.Dock = 'Bottom'; $deepSeekModeButtons.Height = 38; $deepSeekModeButtons.Font = $buttonFont; $deepSeekModeGroup.Controls.Add($deepSeekModeButtons)
+$deepSeekActionsGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekActionsGroup.Text = '本地操作'; $deepSeekActionsGroup.Dock = 'Fill'; $deepSeekActionsGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekActionsGroup,0,2)
 $deepSeekButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekButtons.Dock = 'Fill'; $deepSeekButtons.AutoScroll = $true; $deepSeekButtons.Font = $buttonFont; $deepSeekActionsGroup.Controls.Add($deepSeekButtons)
-$deepSeekLogGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekLogGroup.Text = '最近本地操作日志（已脱敏）'; $deepSeekLogGroup.Dock = 'Fill'; $deepSeekLogGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekLogGroup,0,2)
+$deepSeekLogGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekLogGroup.Text = '最近本地操作日志（已脱敏）'; $deepSeekLogGroup.Dock = 'Fill'; $deepSeekLogGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekLogGroup,0,3)
 $deepSeekLog = New-Object System.Windows.Forms.TextBox; $deepSeekLog.Multiline = $true; $deepSeekLog.ReadOnly = $true; $deepSeekLog.ScrollBars = 'Vertical'; $deepSeekLog.Font = $uiFont; $deepSeekLog.Dock = 'Fill'; $deepSeekLogGroup.Controls.Add($deepSeekLog)
 $assistantLayout = New-Object System.Windows.Forms.TableLayoutPanel; $assistantLayout.Dock = 'Fill'; $assistantLayout.Padding = New-Object System.Windows.Forms.Padding(12); $assistantLayout.RowCount = 4; $assistantLayout.ColumnCount = 1; [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,145))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,45))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,55))); $assistantTab.Controls.Add($assistantLayout)
 $codexModeGroup = New-Object System.Windows.Forms.GroupBox; $codexModeGroup.Text = 'Codex 连接模式'; $codexModeGroup.Dock = 'Fill'; $codexModeGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($codexModeGroup,0,0)
@@ -230,18 +372,71 @@ $recordGroup = New-Object System.Windows.Forms.GroupBox; $recordGroup.Text = '�
 $recordStatus = New-Object System.Windows.Forms.TextBox; $recordStatus.Multiline = $true; $recordStatus.ReadOnly = $true; $recordStatus.ScrollBars = 'Vertical'; $recordStatus.Dock = 'Fill'; $recordStatus.Font = $uiFont; $recordGroup.Controls.Add($recordStatus)
 $usageText = New-Object System.Windows.Forms.TextBox; $usageText.Multiline = $true; $usageText.ReadOnly = $true; $usageText.Font = $uiFont; $usageText.Dock = 'Fill'; $usageTab.Controls.Add($usageText)
 $usageButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $usageButtons.Dock = 'Top'; $usageButtons.Height = 42; $usageTab.Controls.Add($usageButtons)
-$diagnosticsLayout = New-Object System.Windows.Forms.TableLayoutPanel; $diagnosticsLayout.Dock = 'Fill'; $diagnosticsLayout.RowCount = 2; $diagnosticsLayout.ColumnCount = 1; [void]$diagnosticsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,38))); [void]$diagnosticsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $diagnosticsTab.Controls.Add($diagnosticsLayout)
-$debugToggle = New-Object System.Windows.Forms.CheckBox; $debugToggle.Text = '显示高级信息 / 调试信息'; $debugToggle.AutoSize = $true; $debugToggle.Font = $buttonFont; [void]$diagnosticsLayout.Controls.Add($debugToggle,0,0)
+$diagnosticsLayout = New-Object System.Windows.Forms.TableLayoutPanel; $diagnosticsLayout.Dock = 'Fill'; $diagnosticsLayout.RowCount = 2; $diagnosticsLayout.ColumnCount = 1; [void]$diagnosticsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,42))); [void]$diagnosticsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $diagnosticsTab.Controls.Add($diagnosticsLayout)
+$diagnosticsToolbar = New-Object System.Windows.Forms.FlowLayoutPanel; $diagnosticsToolbar.Dock = 'Fill'; $diagnosticsToolbar.Font = $buttonFont; [void]$diagnosticsLayout.Controls.Add($diagnosticsToolbar,0,0)
+$debugToggle = New-Object System.Windows.Forms.CheckBox; $debugToggle.Text = '显示高级信息 / 调试信息'; $debugToggle.AutoSize = $true; $debugToggle.Font = $buttonFont; [void]$diagnosticsToolbar.Controls.Add($debugToggle)
+$copyDebugButton = New-Object System.Windows.Forms.Button; $copyDebugButton.Text = '复制诊断 JSON'; $copyDebugButton.Width = 150; $copyDebugButton.Height = 30; $copyDebugButton.Font = $buttonFont; [void]$diagnosticsToolbar.Controls.Add($copyDebugButton)
 $diagnosticsText = New-Object System.Windows.Forms.TextBox; $diagnosticsText.Multiline = $true; $diagnosticsText.ReadOnly = $true; $diagnosticsText.Font = $uiFont; $diagnosticsText.Dock = 'Fill'; $diagnosticsText.Visible = $false; [void]$diagnosticsLayout.Controls.Add($diagnosticsText,0,1); $debugToggle.Add_CheckedChanged({$diagnosticsText.Visible = $debugToggle.Checked}.GetNewClosure())
 function Add-ProviderLog([string]$Message) { $line = ('[{0}] {1}' -f (Get-Date).ToString('HH:mm:ss'), (Redact-Text $Message)); $providerLog.AppendText($line + "`r`n") }
 function Add-DeepSeekLog([string]$Action,[object]$Result) {
     $line = ('[{0}] action={1}; exit_code={2}; status={3}' -f (Get-Date).ToString('HH:mm:ss'),$Action,$Result.exit_code,$Result.error_type)
     $deepSeekLog.AppendText((Redact-Text $line) + "`r`n")
 }
+function Get-DeepSeekModeStatusText([object]$Probe) {
+    if (-not $Probe) { return ("模式策略：自动选择（尚未运行只读探测）`r`n请点击探测 DeepSeek 模式；该操作只读取页面控件，不发送提示词、不点击发送。") }
+    $labels = [ordered]@{ normal = '普通'; search = '搜索'; thinking = '思考'; expert = '专家' }
+    $lines = @("模式策略：$script:DeepSeekModePreference",("探测：{0}；promptSent={1}；clickSend={2}" -f $Probe.status,$Probe.promptSent,$Probe.clickSend))
+    foreach ($mode in $labels.Keys) {
+        $item = $Probe.modes.$mode
+        $state = if ($item.status -eq 'AVAILABLE' -and $item.controllable) { '可用' } elseif ($item.status) { [string]$item.status } else { 'UNKNOWN' }
+        $lines += ("{0}模式：{1}（控件发现：{2}；可控：{3}）" -f $labels[$mode],$state,$item.controlDetected,$item.controllable)
+    }
+    if ($Probe.error_code) { $lines += ("错误码：{0}；说明：{1}" -f $Probe.error_code,(Get-UiErrorExplanation ([string]$Probe.error_code))) }
+    if ($script:DeepSeekLastSelection) { $lines += ("最近推荐模式：{0}（{1}）" -f $script:DeepSeekLastSelection.selected_mode,$script:DeepSeekLastSelection.selected_model_alias) }
+    $lines += '自动选择顺序：搜索 → 思考 → 专家 → 普通；手动固定或显式模型别名优先。'
+    return ($lines -join "`r`n")
+}
+function Refresh-DeepSeekModePanel {
+    if ($deepSeekModeStatus) { $deepSeekModeStatus.Text = Get-DeepSeekModeStatusText $script:DeepSeekModeProbe }
+}
+function Invoke-DeepSeekModeProbe {
+    $raw = Invoke-RouterCli @('deepseek','mode-probe')
+    try {
+        $script:DeepSeekModeProbe = $raw | ConvertFrom-Json
+        Refresh-DeepSeekModePanel
+        Add-DeepSeekLog 'mode-probe' ([pscustomobject]@{ exit_code = 0; error_type = if($script:DeepSeekModeProbe.status -eq 'PASS'){'PASS'}else{[string]$script:DeepSeekModeProbe.error_code} })
+        [System.Windows.Forms.MessageBox]::Show((Get-DeepSeekModeStatusText $script:DeepSeekModeProbe),'DeepSeek 模式探测') | Out-Null
+    } catch {
+        $script:DeepSeekModeProbe = [pscustomobject]@{ status = 'UI_PROBE_FAILED'; error_code = 'UI_PROBE_RESPONSE_INVALID'; promptSent = $false; clickSend = $false; modes = @{} }
+        Refresh-DeepSeekModePanel
+        Add-DeepSeekLog 'mode-probe' ([pscustomobject]@{ exit_code = 1; error_type = 'UI_PROBE_RESPONSE_INVALID' })
+        throw 'UI_PROBE_RESPONSE_INVALID'
+    }
+}
+function Set-DeepSeekModePreference([ValidateSet('auto','normal','search','thinking','expert')][string]$Preference) {
+    $script:DeepSeekModePreference = $Preference
+    Refresh-DeepSeekModePanel
+    [System.Windows.Forms.MessageBox]::Show(("已设置 DeepSeek 模式策略：{0}`r`n这只影响本地选择说明，不会发送请求，也不会修改 Codex 配置。" -f $Preference),'DeepSeek 模式策略') | Out-Null
+}
+function Format-DeepSeekSelectionSummary([object]$Record) {
+    $labels = @{ normal = '普通'; search = '搜索'; thinking = '思考'; expert = '专家'; auto = '自动' }
+    $mode = if ($labels.ContainsKey([string]$Record.selected_mode)) { $labels[[string]$Record.selected_mode] } else { [string]$Record.selected_mode }
+    $fallback = if ($Record.fallback_reason) { [string]$Record.fallback_reason } else { '无' }
+    return ("推荐模式：{0}`r`n模型别名：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`n模式可用：{4}" -f $mode,$Record.selected_model_alias,$Record.why_selected,$fallback,$Record.mode_available)
+}
+function Explain-DeepSeekModeSelection {
+    $raw = Invoke-RouterCli @('deepseek','explain-mode','当前 Codex 请求未提供任务文本')
+    try {
+        $script:DeepSeekLastSelection = $raw | ConvertFrom-Json
+        Refresh-DeepSeekModePanel
+        [System.Windows.Forms.MessageBox]::Show((Format-DeepSeekSelectionSummary $script:DeepSeekLastSelection),'DeepSeek 模式选择原因') | Out-Null
+    } catch { throw 'DEEPSEEK_EXPLAIN_RESPONSE_INVALID' }
+}
 function Refresh-DeepSeekPanel {
     # 高级调试说明：健康检查只读取本地服务与页面状态，不发送 prompt、不调用聊天接口、不点击发送按钮。
     $snapshot = Get-DeepSeekBridgeSnapshot
     $deepSeekStatus.Text = ("模式：本地直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`n端口 8791：{7}`r`n端口 8792：{8}`r`n端口 8793：{9}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。手动测试需两次确认，可能发送一次真实测试对话。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$snapshot.bridge_port,$snapshot.worker_port,$snapshot.fixture_port)
+    Refresh-DeepSeekModePanel
 }
 function Invoke-DeepSeekPanelAction([string]$Action) {
     # 高级调试原文：不会显示或保存 prompt、response、key、Cookie 或 Token。
@@ -261,17 +456,46 @@ function Get-CodexModeState {
     try { return (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CodexModeScript -Action status 2>$null | Out-String | ConvertFrom-Json) }
     catch { return [pscustomobject]@{ mode='UNKNOWN'; provider='UNKNOWN'; model='UNKNOWN'; endpoint='UNKNOWN'; backup_directory=(Join-Path $env:USERPROFILE '.codex-ai-router\codex-mode'); env_mutation='NONE' } }
 }
+function Get-CodexModeChineseName([string]$Mode) {
+    switch ($Mode) {
+        'OFFICIAL_DIRECT' { return '官方直连' }
+        'CUSTOM_ROUTER' { return '自定义 Router' }
+        'CUSTOM_DEEPSEEK_HEAD' { return 'DeepSeek 首脑' }
+        'CUSTOM_DEEPSEEK_TEXT_ONLY' { return 'DeepSeek 文本兼容' }
+        'CUSTOM_LOCAL_TEXT_ONLY' { return '本地模型文本兼容' }
+        'CUSTOM_HYBRID_TEXT_ONLY' { return '混合助手文本兼容' }
+        default { return $Mode }
+    }
+}
+function Format-CodexModeSummary([object]$Record,[string]$Raw,[string]$Action) {
+    $script:LastModeDebugJson = Redact-Text $Raw
+    if (-not $Record -or $Record.status -eq 'ERROR' -or $Record.error_code) {
+        $code = if ($Record.error_code) { [string]$Record.error_code } else { 'MODE_SWITCH_FAILED' }
+        return "模式切换失败`r`n错误码：$code`r`n原因：$(Get-UiErrorExplanation $code)`r`n详细 JSON：已放入高级信息/调试信息。"
+    }
+    $mode = [string]$Record.mode
+    $policy = if ($mode -eq 'OFFICIAL_DIRECT') { '不适用（官方直连）' } else { [string](Get-ToolsPolicyRecord).codex_tools_policy }
+    return ("模式切换成功`r`n当前模式：{0}`r`nProvider：{1}`r`n模型：{2}`r`nwire_api：{3}`r`n工具策略：{4}`r`n配置备份：已完成`r`n需要操作：请重新打开 Codex 线程`r`n`r`n原始 JSON：已折叠到高级信息/调试信息。" -f (Get-CodexModeChineseName $mode),$Record.provider,$Record.model,($(if($mode -eq 'OFFICIAL_DIRECT'){'官方托管 / 不适用'}else{'responses'})),$policy)
+}
+$copyDebugButton.Add_Click({
+    $payload = if ([string]::IsNullOrWhiteSpace($script:LastModeDebugJson)) { '{"status":"NO_DIAGNOSTIC_JSON"}' } else { Redact-Text $script:LastModeDebugJson }
+    try { Set-Clipboard -Value $payload; [System.Windows.Forms.MessageBox]::Show('已复制脱敏诊断 JSON；不会包含 API Key、Authorization、Cookie 或 Token。','复制诊断 JSON') | Out-Null } catch { [System.Windows.Forms.MessageBox]::Show('复制失败；请先执行一次模式切换或打开高级信息。','复制诊断 JSON') | Out-Null }
+}.GetNewClosure())
 function Refresh-CodexModePanel {
     $state = Get-CodexModeState
     $tools = Get-ToolsPolicyRecord
     $policy = [string]$tools.codex_tools_policy
-    $toolsPolicyStatus.Text = ("当前工具策略：{0}`r`n策略文件：{1}`r`n`r`n严格拒绝：后端不支持工具时直接报错，不会调用模型。`r`n文本兼容：移除工具定义，仅生成分析/计划/指令，不会改文件。`r`n手动计划：返回结构化计划模板，不调用模型。" -f $policy,$tools.path)
-    $codexModeStatus.Text = ("当前模式：{0}`r`nProvider：{1}`r`n模型：{2}`r`n端点摘要：{3}`r`n备份目录：{4}`r`n环境变量修改：{5}`r`n无官方额度模式：{6}`r`n工具策略：{7}`r`n`r`nOFFICIAL_DIRECT：官方直连；CUSTOM_ROUTER：本地 Router；OFFICIAL_ASSISTED：官方主工作流 + 辅助分析；DEEPSEEK_HEAD：建议模式；CUSTOM_DEEPSEEK_HEAD：{8}；CUSTOM_LOCAL_LIGHT：本地模型；CUSTOM_EXTERNAL_API：仅显式 allowlist；CUSTOM_HYBRID_AGENT：已启用 Provider 的统一入口；CUSTOM_DEEPSEEK_TEXT_ONLY / CUSTOM_LOCAL_TEXT_ONLY / CUSTOM_HYBRID_TEXT_ONLY：本地 Router 文本兼容模式。`r`n控制台不接收主要任务输入；任务仍在 Codex 中提交。" -f $state.mode,$state.provider,$state.model,$state.endpoint,$state.backup_directory,$state.env_mutation,$state.no_quota_mode,$policy,$DeepSeekLocalApiAddress)
+    $displayPolicy = if ([string]$state.mode -eq 'OFFICIAL_DIRECT') { '不适用（官方直连）' } else { $policy }
+    $toolsPolicyStatus.Text = ("当前工具策略：{0}`r`n策略文件：{1}`r`n`r`n严格拒绝：后端不支持工具时直接报错，不会调用模型。`r`n文本兼容：移除工具定义，仅生成分析/计划/指令，不会改文件。`r`n手动计划：返回结构化计划模板，不调用模型。" -f $displayPolicy,$tools.path)
+    $codexModeStatus.Text = ("当前模式：{0}`r`nProvider：{1}`r`n模型：{2}`r`n端点摘要：{3}`r`n备份目录：{4}`r`n环境变量修改：{5}`r`n无官方额度模式：{6}`r`n工具策略：{7}`r`n`r`nOFFICIAL_DIRECT：官方直连；CUSTOM_ROUTER：本地 Router；OFFICIAL_ASSISTED：官方主工作流 + 辅助分析；DEEPSEEK_HEAD：建议模式；CUSTOM_DEEPSEEK_HEAD：{8}；CUSTOM_LOCAL_LIGHT：本地模型；CUSTOM_EXTERNAL_API：仅显式 allowlist；CUSTOM_HYBRID_AGENT：已启用 Provider 的统一入口；CUSTOM_DEEPSEEK_TEXT_ONLY / CUSTOM_LOCAL_TEXT_ONLY / CUSTOM_HYBRID_TEXT_ONLY：本地 Router 文本兼容模式。`r`n控制台不接收主要任务输入；任务仍在 Codex 中提交。" -f $state.mode,$state.provider,$state.model,$state.endpoint,$state.backup_directory,$state.env_mutation,$state.no_quota_mode,$displayPolicy,$DeepSeekLocalApiAddress)
 }
 function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only','official-assisted','deepseek-head','local-agent-pending','restore')][string]$Action) {
     $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CodexModeScript -Action $Action 2>&1 | Out-String
+    $record = $null; try { $record = $output | ConvertFrom-Json } catch {}
+    $summary = Format-CodexModeSummary -Record $record -Raw $output -Action $Action
     Refresh-CodexModePanel; Refresh-Home
-    [System.Windows.Forms.MessageBox]::Show((Redact-Text $output),'Codex 连接模式')
+    if ($diagnosticsText -and $debugToggle -and $debugToggle.Checked) { $diagnosticsText.Text = ($script:LastModeDebugJson + "`r`n" + ($script:UiDebugEntries -join "`r`n")) }
+    [System.Windows.Forms.MessageBox]::Show((Redact-Text $summary),'Codex 连接模式')
 }
 function Invoke-CodexTextOnlyMode([ValidateSet('custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only')][string]$Action) {
     $confirm = [System.Windows.Forms.MessageBox]::Show('文本兼容模式会切换到本地 Router，并移除 Codex 工具定义；模型只输出文本计划，不会执行工具、修改文件或部署。是否继续？','TEXT_ONLY 模式',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -428,17 +652,19 @@ function Refresh-Usage {
     if ($codex.provider -eq 'XiaoyuRouter') { $warning = '当前推理优先通过 XiaoyuRouter；这不是官方额度结论。' } elseif ($summary.openai -ge 5) { $warning = '当前可能快速消耗 Codex 额度；可按需切换到 XiaoyuRouter。' } else { $warning = '当前 Provider 可能消耗官方 Codex 推理额度。' }
     $usageText.Text = ("官方剩余额度：请在官方用量面板查看。本控制台不会伪造额度。`r`n`r`n本地统计，不是官方额度：`r`n今日任务：{0}`r`n本周任务：{1}`r`nOpenAI Provider：{2}`r`nXiaoyuRouter：{3}`r`nLightboat：{4}`r`nLocal：{5}`r`n失败/超时：{6}`r`n`r`n{7}`r`n`r`nOpenAI 轻量测试档：gpt-5.6-luna，低推理；仅用于小型 smoke，不应用于复杂或高风险任务。`r`n`r`n建议：短小低风险任务使用 XiaoyuRouter/Local；中等编码使用 XiaoyuRouter API；复杂或高风险任务使用更强 OpenAI Codex 或 Strong API + review。" -f $summary.today,$summary.week,$summary.openai,$summary.xiaoyu,$summary.lightboat,$summary.local,$summary.failed,$warning)
 }
-function Refresh-Home { $router = Get-RouterStatus; $codex = Get-CodexStatus; $statusBox.Text = ("Router：{0}`r`n监听地址：{1}`r`n仅本机：是`r`n网络模式：{2}`r`nCodex Provider：{3}`r`nCodex 模型：{4}`r`nCodex 推理强度：{5}`r`nXiaoyuRouter 已安装：{6}`r`n`r`n官方委托提示：Luna+low 适合轻量调度；Terra+medium 适合中等实现；高风险建议 Sol/最强模型 + high/xhigh。委托不会自动热切当前 Codex 模型。" -f $(if ($router.running) { '运行中' } else { '已停止' }),$router.address,$router.mode,$codex.provider,$codex.model,$codex.reasoning,$(if($codex.xiaoyu){'是'}else{'否'})); $diagnosticsText.Text = Redact-Text ((Get-ProviderRows | Format-Table -AutoSize | Out-String) + "`r`n" + $statusBox.Text); Refresh-Providers; Refresh-Usage; Refresh-DirectLocalCard }
+function Refresh-Home { $router = Get-RouterStatus; $codex = Get-CodexStatus; $statusBox.Text = ("Router：{0}`r`n监听状态：{1}`r`n监听地址：{2}`r`n监听端口：{3}`r`n进程：{4}（PID {5}）`r`n仅本机：{6}`r`n健康检查：{7}`r`n/v1/models：{8}`r`n当前 Codex Provider：{9}`r`n当前 Codex 模型：{10}`r`n工具策略：{11}`r`n网络模式：{12}`r`nXiaoyuRouter 已安装：{13}`r`n`r`n官方委托提示：Luna+low 适合轻量调度；Terra+medium 适合中等实现；高风险建议 Sol/最强模型 + high/xhigh。委托不会自动热切当前 Codex 模型。" -f $(if ($router.running) { '运行中' } else { '已停止' }),$router.listener_status,$router.listener_address,$router.listener_port,$router.listener_process,$router.listener_pid,$(if($router.listener_status -eq 'LISTENING' -and $router.listener_address -in @('127.0.0.1','::1','localhost')){'是'}else{'否'}),$router.health_status,$router.models_status,$codex.provider,$codex.model,$router.tools_policy,$router.mode,$(if($codex.xiaoyu){'是'}else{'否'})); $diagnosticsText.Text = Redact-Text ((Get-ProviderRows | Format-Table -AutoSize | Out-String) + "`r`n" + $statusBox.Text); Refresh-Providers; Refresh-Usage; Refresh-DirectLocalCard }
 function Add-HomeButton([string]$Caption,[scriptblock]$Action,[ValidateSet('Router','Switch')][string]$Area = 'Router') { $button = New-Object System.Windows.Forms.Button; $button.Text = $Caption; $button.Width = 170; $button.Height = 42; $button.Font = $buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(5); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); if($Area -eq 'Router'){[void]$homeButtons.Controls.Add($button)}else{[void]$switchButtons.Controls.Add($button)} }
 function Add-DirectLocalButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$directLocalButtons.Controls.Add($button) }
 function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=36; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(5); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekButtons.Controls.Add($button) }
+function Add-DeepSeekModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=30; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(3); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekModeButtons.Controls.Add($button) }
 function Add-CodexModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$codexModeButtons.Controls.Add($button) }
 function Add-ToolsPolicyButton([string]$Caption,[scriptblock]$Action,[int]$Width=180) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$toolsPolicyButtons.Controls.Add($button) }
 function Add-ProviderButton([string]$Caption,[scriptblock]$Action) { $button = New-Object System.Windows.Forms.Button; $button.Text = $Caption; $button.Width = 135; $button.Height = 36; $button.Font = $buttonFont; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); $target = if($Caption -in @('刷新模型','运行探测','选择模型','批量管理','解释选择','Groq 诊断')){$providerModelButtons}elseif($Caption -eq '转换为 Groq SDK'){$providerMigrationButtons}else{$providerButtons}; [void]$target.Controls.Add($button) }
 Add-HomeButton '启动 Router' { Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
 Add-HomeButton '停止 Router' { Stop-Router; Refresh-Home }
 Add-HomeButton '重启 Router' { Stop-Router; Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
-Add-HomeButton '查看模型' { [System.Windows.Forms.MessageBox]::Show(((Get-RouterStatus).models | ConvertTo-Json -Depth 5),'Router 模型') }
+Add-HomeButton '检查 18789' { $router = Get-RouterStatus; [System.Windows.Forms.MessageBox]::Show(("监听：{0}`r`n地址：{1}`r`n健康：{2}`r`n/v1/models：{3}`r`n工具策略：{4}" -f $router.listener_status,$router.listener_address,$router.health_status,$router.models_status,$router.tools_policy),'Router 本地状态') ; Refresh-Home }
+Add-HomeButton '查看 /v1/models' { [System.Windows.Forms.MessageBox]::Show(((Get-RouterStatus).models | ConvertTo-Json -Depth 5),'Router 模型') }
 Add-HomeButton 'Router 直连测试' { $smoke = Invoke-RouterDirectSmoke; Add-UsageRecord @{ active_provider = (Get-CodexStatus).provider; active_model = (Get-CodexStatus).model; router_virtual_model = 'xiaoyu-lightboat'; task_mode = 'safe_smoke'; duration_seconds = $smoke.seconds; success = $smoke.success; error_code = $smoke.error_code; estimated_route = 'lightboat'; remote_provider_used = 'YES'; local_provider_used = 'NO' }; [System.Windows.Forms.MessageBox]::Show(("状态：{0}`r`n耗时秒数：{1}`r`n响应内容不会被记录。" -f $smoke.status,$smoke.seconds),'Router 直连测试'); Refresh-Usage }
 Add-HomeButton '生成交接文档' { $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'make-codex-handoff.ps1') 2>&1; [System.Windows.Forms.MessageBox]::Show((Redact-Text ($out | Out-String)),'交接文档') } 'Switch'
 Add-HomeButton '使用小羽 Router' { $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'switch-codex-with-handoff.ps1') -ToXiaoyu 2>&1; Add-UsageRecord @{ active_provider='XiaoyuRouter'; active_model='xiaoyu-auto'; router_virtual_model='xiaoyu-auto'; task_mode='switch'; success=($LASTEXITCODE -eq 0); estimated_route='router_auto'; remote_provider_used='NO'; local_provider_used='NO' }; [System.Windows.Forms.MessageBox]::Show((Redact-Text ($out | Out-String)),'小羽 Router 切换'); Refresh-Home } 'Switch'
@@ -473,6 +699,13 @@ Add-DeepSeekButton '复制本地测试 Key' { try { Set-Clipboard -Value (Get-De
 Add-DeepSeekButton '手动 Smoke（双确认）' { Invoke-DeepSeekManualSmoke } 190
 Add-DeepSeekButton '停止服务' { Invoke-DeepSeekPanelAction 'stop' }
 Add-DeepSeekButton '打开日志目录' { if(Test-Path -LiteralPath $DeepSeekRuntimeDir){Start-Process explorer.exe -ArgumentList ('"' + $DeepSeekRuntimeDir + '"');$result=[pscustomobject]@{exit_code=0;error_type='OPENED'}}else{$result=[pscustomobject]@{exit_code=1;error_type='LOG_DIRECTORY_NOT_FOUND'}};Add-DeepSeekLog 'open-log-directory' $result;[System.Windows.Forms.MessageBox]::Show(('日志目录：{0}`r`n状态：{1}' -f $DeepSeekRuntimeDir,$result.error_type),'DeepSeek 本地桥接') }
+Add-DeepSeekModeButton '自动选择模式' { Set-DeepSeekModePreference 'auto' }
+Add-DeepSeekModeButton '固定普通模式' { Set-DeepSeekModePreference 'normal' }
+Add-DeepSeekModeButton '固定搜索模式' { Set-DeepSeekModePreference 'search' }
+Add-DeepSeekModeButton '固定思考模式' { Set-DeepSeekModePreference 'thinking' }
+Add-DeepSeekModeButton '固定专家模式' { Set-DeepSeekModePreference 'expert' }
+Add-DeepSeekModeButton '探测 DeepSeek 模式' { Invoke-DeepSeekModeProbe } 165
+Add-DeepSeekModeButton '查看模式选择原因' { Explain-DeepSeekModeSelection } 165
 Add-CodexModeButton '切换官方直连' { Invoke-CodexModeAction 'official-direct' }
 Add-CodexModeButton '切换本地 Router' { Invoke-CodexModeAction 'custom-router' }
 Add-CodexModeButton 'DeepSeek 首脑' { Invoke-CodexModeAction 'custom-deepseek-head' } 150

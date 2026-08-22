@@ -8,14 +8,23 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .deepseek_modes import MODE_ALIASES, MODE_ORDER, load_probe_state
+
 
 DEEPSEEK_BASE = "http://127.0.0.1:8792/v1"
 DEEPSEEK_HEALTH = "http://127.0.0.1:8791/health"
 LOCAL_BASE = "http://127.0.0.1:1234/v1"
+BRIDGE_API_KEY_ENV = "XIAOYU_ROUTER_BRIDGE_API_KEY"
+DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", "deepseek-web-search", "deepseek-web-thinking", "deepseek-web-expert", "deepseek-web-auto"}
 
 
 def _loopback(value: str) -> bool:
     return value.startswith("http://127.0.0.1:") or value.startswith("http://localhost:")
+
+
+def bridge_api_key_present() -> bool:
+    """Return only presence metadata; never expose the local key value."""
+    return bool(os.getenv(BRIDGE_API_KEY_ENV, "").strip())
 
 
 def _configured() -> dict[str, Any]:
@@ -27,7 +36,7 @@ def _configured() -> dict[str, Any]:
         return {}
 
 
-def _health(url: str, timeout: float = 0.2) -> tuple[str, dict[str, Any]]:
+def _health(url: str, timeout: float = 1.0) -> tuple[str, dict[str, Any]]:
     if not _loopback(url):
         return "ERROR", {}
     try:
@@ -38,12 +47,43 @@ def _health(url: str, timeout: float = 0.2) -> tuple[str, dict[str, Any]]:
         return "OFFLINE", {}
 
 
+def _deepseek_ready_models() -> list[str]:
+    state = load_probe_state()
+    modes = state.get("modes") if isinstance(state.get("modes"), dict) else {}
+    ready: list[str] = []
+    for mode in MODE_ORDER:
+        item = modes.get(mode)
+        if not isinstance(item, dict) or item.get("status") != "AVAILABLE":
+            continue
+        ready.append(MODE_ALIASES[mode])
+        if mode == "normal":
+            ready.append("deepseek-web-fast")
+        if mode == "expert":
+            ready.append("deepseek-head")
+    if ready:
+        ready.append(MODE_ALIASES["auto"])
+    return list(dict.fromkeys(ready))
+
+
 def providers() -> list[dict[str, Any]]:
     """Return provider metadata without exposing key values."""
     bridge_state, _ = _health(DEEPSEEK_HEALTH)
+    bridge_key_present = bridge_api_key_present()
+    if bridge_state == "ENABLED" and not bridge_key_present:
+        bridge_state = "AUTH_MISSING"
+    probe_state = load_probe_state()
+    probe_status = str(probe_state.get("status") or "")
+    if bridge_state == "OFFLINE" and probe_status in {"LOGIN_REQUIRED", "CAPTCHA_REQUIRED", "ACCOUNT_RISK", "RATE_LIMITED", "UI_PROBE_FAILED"}:
+        bridge_state = probe_status
+    deepseek_models = _deepseek_ready_models() if bridge_state == "ENABLED" else []
+    if bridge_state == "ENABLED" and not deepseek_models:
+        probe_status = str(probe_state.get("status") or "UI_PROBE_FAILED")
+        bridge_state = probe_status if probe_status != "PASS" else "UI_PROBE_FAILED"
     records: list[dict[str, Any]] = [{
         "id": "deepseek-web-bridge", "type": "DEEPSEEK_WEB_BRIDGE", "endpoint": DEEPSEEK_BASE,
-        "models": ["deepseek-head", "deepseek-web", "deepseek-web-search"], "enabled": True, "status": bridge_state,
+        "models": deepseek_models, "known_models": sorted(DEEPSEEK_KNOWN_ALIASES), "enabled": True, "status": bridge_state,
+        "api_key_env": BRIDGE_API_KEY_ENV, "api_key_present": bridge_key_present,
+        "mode_probe": probe_state.get("status", "UNKNOWN"), "mode_availability": probe_state.get("modes", {}),
     }]
     local_state, _ = _health(os.getenv("XIAOYU_LOCAL_MODEL_HEALTH", LOCAL_BASE + "/models"))
     records.append({"id": "local-model", "type": "LOCAL_MODEL", "endpoint": os.getenv("XIAOYU_LOCAL_MODEL_BASE", LOCAL_BASE), "models": ["local-light"], "enabled": True, "status": local_state})
@@ -87,6 +127,8 @@ def resolve(model: str) -> tuple[dict[str, Any] | None, str | None]:
             if provider["status"] in {"OFFLINE", "ERROR"}:
                 return provider, "BRIDGE_OFFLINE" if provider["type"] == "DEEPSEEK_WEB_BRIDGE" else "LOCAL_MODEL_OFFLINE"
             return provider, None
+        if provider.get("type") == "DEEPSEEK_WEB_BRIDGE" and model in provider.get("known_models", []):
+            return provider, "DEEPSEEK_MODE_UNAVAILABLE"
     if model == "hybrid-agent":
         for provider in providers():
             if provider["enabled"] and provider["status"] == "ENABLED" and provider["type"] in {"DEEPSEEK_WEB_BRIDGE", "LOCAL_MODEL", "EXTERNAL_API_ALLOWED"}:

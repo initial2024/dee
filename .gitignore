@@ -7,3 +7,4 @@ build/
 .ai-worktrees/
 reports/*.runtime.json
 .codex-ai-router/
+.runtime/

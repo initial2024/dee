@@ -90,12 +90,12 @@ class ToolsPolicyTests(unittest.TestCase):
     def test_deepseek_and_hybrid_text_only_are_visible_without_tool_forwarding(self):
         provider = {"id": "bridge", "type": "DEEPSEEK_WEB_BRIDGE", "endpoint": "http://127.0.0.1:8792/v1", "models": ["deepseek-web"], "enabled": True, "status": "ENABLED"}
         for model in ("deepseek-web", "hybrid-agent"):
-            with patch("codex_ai_router.server.allowlisted_providers", return_value=[provider]), patch("codex_ai_router.server.resolve_allowlisted", return_value=(provider, None)), patch("codex_ai_router.server.urlopen", return_value=FakeUpstream({"choices": [{"message": {"content": "DEEPSEEK_TEXT_ONLY_VISIBLE"}}]})) as open_:
+            with patch.dict(os.environ, {"XIAOYU_ROUTER_BRIDGE_API_KEY": "fixture-key"}, clear=False), patch("codex_ai_router.server.allowlisted_providers", return_value=[provider]), patch("codex_ai_router.server.resolve_allowlisted", return_value=(provider, None)), patch("codex_ai_router.server.urlopen", return_value=FakeUpstream({"choices": [{"message": {"content": "DEEPSEEK_TEXT_ONLY_VISIBLE"}}]})) as open_:
                 result = RouterService(tools_policy=TEXT_ONLY_STRIP).respond({"model": model, "input": "只回复 TEXT_ONLY_OK", "tools": [{"type": "function"}], "tool_choice": "auto"})
             self.assertEqual(result["output_text"], "DEEPSEEK_TEXT_ONLY_VISIBLE")
             outbound = json.loads(open_.call_args.args[0].data.decode("utf-8"))
             self.assertNotIn("tools", outbound)
-            self.assertIn("不能声称已经读取、修改、运行、提交或部署", outbound["messages"][0]["content"])
+            self.assertEqual(outbound["messages"], [{"role": "user", "content": "只回复 TEXT_ONLY_OK"}])
 
     def test_policy_round_trip_is_secret_free(self):
         with tempfile.TemporaryDirectory() as temp:
