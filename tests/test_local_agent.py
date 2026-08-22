@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from codex_ai_router.brain_providers import BrainProviderError, invoke_brain
 from codex_ai_router.local_agent import LocalAgent, LocalAgentError, classify_risk, make_plan
+from codex_ai_router.providers.base import ProviderError
 
 
 class LocalAgentTests(unittest.TestCase):
@@ -68,6 +69,49 @@ class LocalAgentTests(unittest.TestCase):
                 return "EXTERNAL_PLAN_OK"
 
         self.assertEqual(invoke_brain("external-allowed", "分析一个小任务", external_factory=lambda: FakeExternal()), "EXTERNAL_PLAN_OK")
+
+    def test_brain_error_mapping_preserves_original_code(self):
+        class FailingLocal:
+            def __init__(self, code):
+                self.code = code
+
+            def auto_ask(self, _prompt, **_kwargs):
+                raise ProviderError(self.code)
+
+        with self.assertRaises(BrainProviderError) as context:
+            invoke_brain("local-light", "分析一个小任务", local_backend=FailingLocal("LOCAL_DIRECT_BACKEND_NOT_CONFIGURED"))
+        self.assertEqual((context.exception.code, context.exception.metadata["original_error_code"]), ("LOCAL_BACKEND_NOT_CONFIGURED", "LOCAL_DIRECT_BACKEND_NOT_CONFIGURED"))
+
+        with self.assertRaisesRegex(BrainProviderError, "LOCAL_MODEL_OFFLINE"):
+            invoke_brain("local-light", "分析一个小任务", local_backend=FailingLocal("LLAMA_SERVER_NOT_FOUND"))
+        with self.assertRaisesRegex(BrainProviderError, "LOCAL_MODEL_TIMEOUT"):
+            invoke_brain("local-light", "分析一个小任务", local_backend=FailingLocal("COMPLETION_TIMEOUT"))
+
+        class EmptyLocal:
+            def auto_ask(self, _prompt, **_kwargs):
+                return ""
+
+        with self.assertRaisesRegex(BrainProviderError, "LOCAL_EMPTY_RESPONSE"):
+            invoke_brain("local-light", "分析一个小任务", local_backend=EmptyLocal())
+
+        with self.assertRaisesRegex(BrainProviderError, "DEEPSEEK_BRIDGE_OFFLINE"):
+            invoke_brain("deepseek-head", "分析一个小任务", deepseek_runner=lambda _prompt, task_type: {"status": "BRIDGE_OFFLINE", "error_code": "BRIDGE_OFFLINE"})
+        with self.assertRaisesRegex(BrainProviderError, "DEEPSEEK_LOGIN_REQUIRED"):
+            invoke_brain("deepseek-head", "分析一个小任务", deepseek_runner=lambda _prompt, task_type: {"status": "UPSTREAM_HTTP_ERROR", "error_code": "UPSTREAM_HTTP_401"})
+        with patch("codex_ai_router.brain_providers.allowlisted_providers", return_value=[]):
+            with self.assertRaisesRegex(BrainProviderError, "EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED"):
+                invoke_brain("external-allowed", "分析一个小任务")
+            with self.assertRaisesRegex(BrainProviderError, "NO_HEALTHY_BRAIN_PROVIDER"):
+                invoke_brain("hybrid-agent", "分析一个小任务")
+
+    def test_brain_error_original_code_is_exposed_as_safe_plan_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            agent = LocalAgent(Path(temp) / "repo", Path(temp) / "agent")
+            with patch("codex_ai_router.local_agent.invoke_brain", side_effect=BrainProviderError("LOCAL_BACKEND_NOT_CONFIGURED", original_error_code="LOCAL_DIRECT_BACKEND_NOT_CONFIGURED")):
+                result = agent.plan("检查当前项目状态，不修改文件", "local-light", invoke_brain_now=True)
+        self.assertEqual(result["brain_error_code"], "LOCAL_BACKEND_NOT_CONFIGURED")
+        self.assertEqual(result["metadata"], {"original_error_code": "LOCAL_DIRECT_BACKEND_NOT_CONFIGURED"})
+        self.assertEqual((result["workspace_write"], result["prompt_response_logged"], result["secrets_logged"]), ("NO", "NO", "NO"))
 
     def test_explicit_brain_output_is_not_written_to_ledger(self):
         with tempfile.TemporaryDirectory() as temp:

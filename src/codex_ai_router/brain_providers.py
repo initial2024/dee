@@ -22,9 +22,61 @@ from .response_compat import extract_visible_text
 class BrainProviderError(RuntimeError):
     """Stable error returned to the UI without exposing provider details."""
 
-    def __init__(self, code: str):
-        super().__init__(code)
-        self.code = code
+    def __init__(self, code: str, *, original_error_code: str | None = None):
+        safe_code = _safe_error_code(code)
+        original = _safe_error_code(original_error_code or safe_code)
+        super().__init__(safe_code)
+        self.code = safe_code
+        self.original_error_code = original
+        self.metadata = {"original_error_code": original}
+
+
+def _safe_error_code(value: object) -> str:
+    code = str(value or "BRAIN_PROVIDER_ERROR").strip().upper()
+    return code if re.fullmatch(r"[A-Z0-9][A-Z0-9_.:-]{0,127}", code) else "BRAIN_PROVIDER_ERROR"
+
+
+def _provider_error(code: str, original: str | None = None) -> BrainProviderError:
+    return BrainProviderError(code, original_error_code=original or code)
+
+
+def _map_local_error(original: str) -> str:
+    code = original.upper()
+    if code == "LOCAL_DIRECT_BACKEND_NOT_CONFIGURED":
+        return "LOCAL_BACKEND_NOT_CONFIGURED"
+    if code in {"LOCAL_EMPTY_RESPONSE", "UPSTREAM_CONTENT_EMPTY", "EMPTY_RESPONSE"}:
+        return "LOCAL_EMPTY_RESPONSE"
+    if "TIMEOUT" in code:
+        return "LOCAL_MODEL_TIMEOUT"
+    if code in {"LOCAL_MODEL_OFFLINE", "LOCAL_UNAVAILABLE", "LLAMA_SERVER_NOT_FOUND", "NO_GGUF_MODEL", "MODEL_NOT_SELECTED", "MODEL_NOT_FOUND"}:
+        return "LOCAL_MODEL_OFFLINE"
+    return "LOCAL_MODEL_ERROR"
+
+
+def _map_deepseek_error(original: str) -> str:
+    code = original.upper()
+    if code in {"BRIDGE_OFFLINE", "BRIDGE_UNREACHABLE", "BRIDGE_NOT_LISTENING", "DEEPSEEK_BRIDGE_OFFLINE"}:
+        return "DEEPSEEK_BRIDGE_OFFLINE"
+    if code in {"LOGIN_REQUIRED", "DEEPSEEK_LOGIN_REQUIRED", "UPSTREAM_HTTP_401"}:
+        return "DEEPSEEK_LOGIN_REQUIRED"
+    if code in {"BRIDGE_BUSY", "DEEPSEEK_BRIDGE_BUSY"}:
+        return "DEEPSEEK_BRIDGE_BUSY"
+    if code in {"UPSTREAM_CONTENT_EMPTY", "DEEPSEEK_EMPTY_RESPONSE"}:
+        return "DEEPSEEK_EMPTY_RESPONSE"
+    if code == "DEEPSEEK_MODE_UNAVAILABLE":
+        return code
+    if code == "BRIDGE_REQUEST_FAILED":
+        return "DEEPSEEK_BRIDGE_ERROR"
+    return "DEEPSEEK_PROVIDER_ERROR"
+
+
+def _map_external_error(original: str) -> str:
+    code = original.upper()
+    if code in {"EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED", "EXTERNAL_PROVIDER_AUTH_MISSING"}:
+        return code
+    if code.startswith("UPSTREAM_HTTP_") or code in {"UPSTREAM_CONTENT_EMPTY", "AUTH_MISSING", "AUTH_FAILED", "RATE_LIMITED", "MODEL_NOT_FOUND"}:
+        return code
+    return "BRAIN_PROVIDER_ERROR"
 
 
 _SENSITIVE_TASK = re.compile(
@@ -69,11 +121,11 @@ def _external_provider() -> OpenAICompatibleProvider:
         and item.get("models")
     ]
     if not eligible:
-        raise BrainProviderError("EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED")
+        raise _provider_error("EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED")
     item = eligible[0]
     key_env = str(item.get("api_key_env") or "")
     if not key_env:
-        raise BrainProviderError("EXTERNAL_PROVIDER_AUTH_MISSING")
+        raise _provider_error("EXTERNAL_PROVIDER_AUTH_MISSING")
     return OpenAICompatibleProvider(
         base_url=str(item["endpoint"]),
         model=str(item["models"][0]),
@@ -97,7 +149,7 @@ def invoke_brain(
     default LocalAgent path does not call it; a caller must opt in.
     """
     if _SENSITIVE_TASK.search(task or ""):
-        raise BrainProviderError("LOCAL_AGENT_HIGH_RISK_STOP")
+        raise _provider_error("LOCAL_AGENT_HIGH_RISK_STOP")
     prompt = _prompt(task)
     try:
         if provider == "local-light":
@@ -106,7 +158,8 @@ def invoke_brain(
         elif provider == "deepseek-head":
             result = deepseek_runner(prompt, task_type="AUTO")
             if str(result.get("status")) != "PASS":
-                raise BrainProviderError(str(result.get("error_code") or result.get("status") or "BRIDGE_REQUEST_FAILED"))
+                original = str(result.get("error_code") or result.get("status") or "BRIDGE_REQUEST_FAILED")
+                raise _provider_error(_map_deepseek_error(original), original)
             text = _text(result.get("analysis") or result)
         elif provider == "external-allowed":
             text = _text(external_factory().ask(prompt))
@@ -124,20 +177,26 @@ def invoke_brain(
             elif "EXTERNAL_API_ALLOWED" in healthy:
                 text = invoke_brain("external-allowed", task, local_backend=local_backend, deepseek_runner=deepseek_runner, external_factory=external_factory)
             else:
-                raise BrainProviderError("NO_HEALTHY_BRAIN_PROVIDER")
+                raise _provider_error("NO_HEALTHY_BRAIN_PROVIDER")
         else:
-            raise BrainProviderError("BRAIN_PROVIDER_INVALID")
+            raise _provider_error("BRAIN_PROVIDER_INVALID")
     except BrainProviderError:
         raise
     except ProviderError as exc:
         code = str(exc)
         if provider == "local-light":
-            raise BrainProviderError("LOCAL_MODEL_OFFLINE" if "UNAVAILABLE" in code or "NOT_FOUND" in code else "LOCAL_MODEL_ERROR") from exc
-        raise BrainProviderError("BRAIN_PROVIDER_ERROR") from exc
+            raise _provider_error(_map_local_error(code), code) from exc
+        if provider == "deepseek-head":
+            raise _provider_error(_map_deepseek_error(code), code) from exc
+        if provider == "external-allowed":
+            raise _provider_error(_map_external_error(code), code) from exc
+        raise _provider_error("BRAIN_PROVIDER_ERROR", code) from exc
     except Exception as exc:
-        raise BrainProviderError("BRAIN_PROVIDER_ERROR") from exc
+        raise _provider_error("BRAIN_PROVIDER_ERROR", type(exc).__name__) from exc
     if not text:
-        raise BrainProviderError("UPSTREAM_CONTENT_EMPTY")
+        if provider == "local-light":
+            raise _provider_error("LOCAL_EMPTY_RESPONSE", "UPSTREAM_CONTENT_EMPTY")
+        raise _provider_error("UPSTREAM_CONTENT_EMPTY")
     return text
 
 

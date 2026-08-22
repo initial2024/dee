@@ -310,17 +310,19 @@ class LocalAgent:
         plan = make_plan(task, brain_provider, risk)
         brain_output: str | None = None
         brain_error: str | None = None
+        brain_error_metadata: dict[str, Any] = {}
         if invoke_brain_now and not plan.deny_reason:
             try:
                 brain_output = invoke_brain(brain_provider, task)
                 plan.brain_status = "CALLED_NOT_LOGGED"
             except BrainProviderError as exc:
                 brain_error = exc.code
+                brain_error_metadata = dict(getattr(exc, "metadata", {}) or {})
                 plan.brain_status = "BRAIN_ERROR"
         path = self._save_plan(plan)
         self._record(plan, "plan", "DENIED" if plan.deny_reason else "PASS", plan.deny_reason, int((time.monotonic() - started) * 1000), confirmed=False)
         result = plan.to_dict()
-        result.update({"mode": "PLAN_ONLY", "workspace_write": "NO", "plan_path": str(path), "brain_invoked": "YES" if invoke_brain_now and not plan.deny_reason else "NO", "brain_output": _safe_text(brain_output, 12000) if brain_output else None, "brain_error_code": brain_error, "prompt_response_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO", "auto_push": "NO", "auto_deploy": "NO", "secrets_logged": "NO"})
+        result.update({"mode": "PLAN_ONLY", "workspace_write": "NO", "plan_path": str(path), "brain_invoked": "YES" if invoke_brain_now and not plan.deny_reason else "NO", "brain_output": _safe_text(brain_output, 12000) if brain_output else None, "brain_error_code": brain_error, "metadata": brain_error_metadata, "prompt_response_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO", "auto_push": "NO", "auto_deploy": "NO", "secrets_logged": "NO"})
         return result
 
     @staticmethod
