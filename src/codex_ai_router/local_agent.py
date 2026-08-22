@@ -26,7 +26,7 @@ from .security.secrets import is_sensitive_path, redact
 from .brain_providers import BrainProviderError, invoke_brain
 
 
-BRAIN_PROVIDERS = ("local-light", "deepseek-head", "external-allowed", "hybrid-agent")
+BRAIN_PROVIDERS = ("local-light", "deepseek-head", "deepseek-bridge-direct", "external-allowed", "hybrid-agent")
 PLAN_MODES = ("READ_ONLY", "PLAN_ONLY", "PATCH_DRAFT", "APPLY_WITH_CONFIRM", "SAFE_TEST", "COMMIT_WITH_CONFIRM")
 
 _HIGH_RISK_PATTERNS = (

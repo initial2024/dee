@@ -64,6 +64,10 @@ class LocalAgentTests(unittest.TestCase):
             invoke_brain("deepseek-head", "分析一个小任务", deepseek_runner=lambda prompt, task_type: {"status": "PASS", "analysis": "DEEPSEEK_PLAN_OK"}),
             "DEEPSEEK_PLAN_OK",
         )
+        self.assertEqual(
+            invoke_brain("deepseek-bridge-direct", "分析一个小任务", deepseek_direct_runner=lambda prompt, task_type: {"status": "PASS", "analysis": "DIRECT_PLAN_OK"}),
+            "DIRECT_PLAN_OK",
+        )
         class FakeExternal:
             def ask(self, _prompt):
                 return "EXTERNAL_PLAN_OK"
@@ -98,6 +102,8 @@ class LocalAgentTests(unittest.TestCase):
             invoke_brain("deepseek-head", "分析一个小任务", deepseek_runner=lambda _prompt, task_type: {"status": "BRIDGE_OFFLINE", "error_code": "BRIDGE_OFFLINE"})
         with self.assertRaisesRegex(BrainProviderError, "DEEPSEEK_LOGIN_REQUIRED"):
             invoke_brain("deepseek-head", "分析一个小任务", deepseek_runner=lambda _prompt, task_type: {"status": "UPSTREAM_HTTP_ERROR", "error_code": "UPSTREAM_HTTP_401"})
+        with self.assertRaisesRegex(BrainProviderError, "DEEPSEEK_MODE_UNAVAILABLE"):
+            invoke_brain("deepseek-bridge-direct", "分析一个小任务", deepseek_direct_runner=lambda _prompt, task_type: {"status": "DEEPSEEK_MODE_UNAVAILABLE", "error_code": "DEEPSEEK_MODE_UNAVAILABLE"})
         with patch("codex_ai_router.brain_providers.allowlisted_providers", return_value=[]):
             with self.assertRaisesRegex(BrainProviderError, "EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED"):
                 invoke_brain("external-allowed", "分析一个小任务")

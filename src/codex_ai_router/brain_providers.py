@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable
 
 from .deepseek_head import run_deepseek_head
+from .deepseek_bridge_direct import run_deepseek_bridge_direct
 from .provider_allowlist import providers as allowlisted_providers
 from .providers.base import ProviderError
 from .providers.local_backend import LocalBackend
@@ -141,6 +142,7 @@ def invoke_brain(
     *,
     local_backend: LocalBackend | None = None,
     deepseek_runner: Callable[..., dict[str, Any]] = run_deepseek_head,
+    deepseek_direct_runner: Callable[..., dict[str, Any]] = run_deepseek_bridge_direct,
     external_factory: Callable[[], OpenAICompatibleProvider] = _external_provider,
 ) -> str:
     """Invoke one explicitly selected brain and return advisory text.
@@ -161,6 +163,12 @@ def invoke_brain(
                 original = str(result.get("error_code") or result.get("status") or "BRIDGE_REQUEST_FAILED")
                 raise _provider_error(_map_deepseek_error(original), original)
             text = _text(result.get("analysis") or result)
+        elif provider == "deepseek-bridge-direct":
+            result = deepseek_direct_runner(prompt, task_type="AUTO")
+            if str(result.get("status")) != "PASS":
+                original = str(result.get("error_code") or result.get("status") or "DEEPSEEK_BRIDGE_OFFLINE")
+                raise _provider_error(_map_deepseek_error(original), original)
+            text = _text(result.get("analysis") or result)
         elif provider == "external-allowed":
             text = _text(external_factory().ask(prompt))
         elif provider == "hybrid-agent":
@@ -171,11 +179,11 @@ def invoke_brain(
                 if isinstance(item, dict) and item.get("enabled") is True and item.get("status") == "ENABLED"
             }
             if "LOCAL_MODEL" in healthy:
-                text = invoke_brain("local-light", task, local_backend=local_backend, deepseek_runner=deepseek_runner, external_factory=external_factory)
+                text = invoke_brain("local-light", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory)
             elif "DEEPSEEK_WEB_BRIDGE" in healthy:
-                text = invoke_brain("deepseek-head", task, local_backend=local_backend, deepseek_runner=deepseek_runner, external_factory=external_factory)
+                text = invoke_brain("deepseek-head", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory)
             elif "EXTERNAL_API_ALLOWED" in healthy:
-                text = invoke_brain("external-allowed", task, local_backend=local_backend, deepseek_runner=deepseek_runner, external_factory=external_factory)
+                text = invoke_brain("external-allowed", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory)
             else:
                 raise _provider_error("NO_HEALTHY_BRAIN_PROVIDER")
         else:
@@ -186,7 +194,7 @@ def invoke_brain(
         code = str(exc)
         if provider == "local-light":
             raise _provider_error(_map_local_error(code), code) from exc
-        if provider == "deepseek-head":
+        if provider in {"deepseek-head", "deepseek-bridge-direct"}:
             raise _provider_error(_map_deepseek_error(code), code) from exc
         if provider == "external-allowed":
             raise _provider_error(_map_external_error(code), code) from exc

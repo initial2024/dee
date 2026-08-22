@@ -127,7 +127,7 @@ def main() -> None:
     explain_mode = deepseek_sub.add_parser("explain-mode"); explain_mode.add_argument("task"); explain_mode.add_argument("--preference", choices=("auto", "normal", "search", "thinking", "expert"), default="auto"); explain_mode.add_argument("--model-alias"); explain_mode.add_argument("--codex-mode", default="CUSTOM_DEEPSEEK_TEXT_ONLY"); explain_mode.add_argument("--tools-policy", default="strict_reject"); explain_mode.add_argument("--no-search", action="store_true"); explain_mode.add_argument("--no-thinking", action="store_true"); explain_mode.add_argument("--no-expert", action="store_true")
     agent = sub.add_parser("agent", help="confirmation-gated Xiaoyu Local Agent")
     agent_sub = agent.add_subparsers(dest="agent_action", required=True)
-    agent_plan = agent_sub.add_parser("plan"); agent_plan.add_argument("--task", required=True); agent_plan.add_argument("--brain-provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_plan.add_argument("--invoke-brain", action="store_true", help="explicitly invoke the selected advisory brain; never enabled by default")
+    agent_plan = agent_sub.add_parser("plan"); agent_plan.add_argument("--task", required=True); agent_plan.add_argument("--brain-provider", "--brain", dest="brain_provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_plan.add_argument("--invoke-brain", action="store_true", help="explicitly invoke the selected advisory brain; never enabled by default")
     agent_readonly = agent_sub.add_parser("readonly"); agent_readonly.add_argument("--task", default=""); agent_readonly.add_argument("--plan")
     agent_draft = agent_sub.add_parser("draft-patch"); agent_draft.add_argument("--plan", required=True); agent_draft.add_argument("--confirm", action="store_true"); agent_draft.add_argument("--patch-text", default="")
     agent_apply = agent_sub.add_parser("apply"); agent_apply.add_argument("--plan", required=True); agent_apply.add_argument("--patch-file", required=True); agent_apply.add_argument("--confirm", action="store_true")
@@ -135,12 +135,17 @@ def main() -> None:
     agent_commit = agent_sub.add_parser("commit"); agent_commit.add_argument("--plan", required=True); agent_commit.add_argument("--file", action="append", default=[]); agent_commit.add_argument("--message", required=True); agent_commit.add_argument("--confirm", action="store_true")
     agent_stop = agent_sub.add_parser("stop"); agent_stop.add_argument("--plan")
     agent_api_health = agent_sub.add_parser("api-health")
-    agent_api_plan = agent_sub.add_parser("api-plan"); agent_api_plan.add_argument("--task", required=True); agent_api_plan.add_argument("--brain-provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_api_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_api_plan.add_argument("--invoke-brain", action="store_true")
+    agent_api_plan = agent_sub.add_parser("api-plan"); agent_api_plan.add_argument("--task", required=True); agent_api_plan.add_argument("--brain-provider", "--brain", dest="brain_provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_api_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_api_plan.add_argument("--invoke-brain", action="store_true")
     agent_api_readonly = agent_sub.add_parser("api-readonly"); agent_api_readonly.add_argument("--task", default=""); agent_api_readonly.add_argument("--plan-id")
     agent_api_draft = agent_sub.add_parser("api-draft-patch"); agent_api_draft.add_argument("--plan-id", required=True); agent_api_draft.add_argument("--patch-text", default=""); agent_api_draft.add_argument("--confirm", action="store_true"); agent_api_draft.add_argument("--confirm-token")
     agent_api_apply = agent_sub.add_parser("api-apply"); agent_api_apply.add_argument("--plan-id", required=True); agent_api_apply.add_argument("--patch-file", required=True); agent_api_apply.add_argument("--confirm", action="store_true"); agent_api_apply.add_argument("--confirm-token")
     agent_api_test = agent_sub.add_parser("api-test"); agent_api_test.add_argument("--plan-id", required=True); agent_api_test.add_argument("--test", choices=tuple(LocalAgent.SAFE_TESTS), default="python-unittest"); agent_api_test.add_argument("--confirm", action="store_true"); agent_api_test.add_argument("--confirm-token")
     agent_api_commit = agent_sub.add_parser("api-commit"); agent_api_commit.add_argument("--plan-id", required=True); agent_api_commit.add_argument("--file", action="append", default=[]); agent_api_commit.add_argument("--message", required=True); agent_api_commit.add_argument("--confirm", action="store_true"); agent_api_commit.add_argument("--confirm-token")
+    brain = sub.add_parser("brain", help="explicit local brain smoke commands")
+    brain_sub = brain.add_subparsers(dest="brain_action", required=True)
+    direct_smoke = brain_sub.add_parser("deepseek-direct-smoke", help="invoke only the loopback DeepSeek Web Bridge")
+    direct_smoke.add_argument("--task", required=True)
+    direct_smoke.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto")
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -219,6 +224,13 @@ def main() -> None:
                 emit(agent_runner.stop(args.plan))
         except LocalAgentError as exc:
             emit({"status": "DENIED", "error_code": exc.code, "codex_agent_used": "NO", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO", "auto_push": "NO", "auto_deploy": "NO", "secrets_logged": "NO"})
+    elif args.command == "brain":
+        if args.brain_action == "deepseek-direct-smoke":
+            agent_runner = LocalAgent(Path.cwd())
+            try:
+                emit(agent_runner.plan(args.task, brain_provider="deepseek-bridge-direct", risk=args.risk, invoke_brain_now=True))
+            except LocalAgentError as exc:
+                emit({"status": "DENIED", "error_code": exc.code, "codex_agent_used": "NO", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO", "auto_push": "NO", "auto_deploy": "NO", "secrets_logged": "NO"})
     elif args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
     elif args.command == "models":
