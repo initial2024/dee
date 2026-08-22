@@ -45,7 +45,7 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
     [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $temp -Destination $Path -Force
 }
-function Redact-Text([string]$Text) { return ($Text -replace '(?i)(bearer\s+)[^\s]+','$1[REDACTED]' -replace '(?i)(sk-[a-z0-9_-]+)','[REDACTED]' -replace '(?i)(authorization\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(cookie\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(token\s*[:=]\s*)[^\s,;]+','$1[REDACTED]') }
+function Redact-Text([string]$Text) { return ($Text -replace '(?i)(bearer\s+)[^\s]+','$1[REDACTED]' -replace '(?i)(sk-[a-z0-9_-]+)','[REDACTED]' -replace '(?i)(authorization\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(cookie\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(token\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?api[_ -]?key(?:=|\s+))[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?password(?:=|\s+))[^\s,;]+','$1[REDACTED]') }
 function Get-UiErrorExplanation([string]$Code) {
     switch ($Code) {
         'DOWNSTREAM_UNAVAILABLE' { return '下游服务不可用，可能是 Provider 未通过运行资格、模型未确认或服务未启动。' }
@@ -59,6 +59,9 @@ function Get-UiErrorExplanation([string]$Code) {
         'UI_CHANGED' { return 'DeepSeek 页面控件已变化，已停止模式判断，未发送提示词。' }
         'LOGIN_REQUIRED' { return 'DeepSeek 网页需要登录后才能继续。' }
         'RATE_LIMITED' { return 'DeepSeek 当前触发限流，请停止重试并等待冷却。' }
+        'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' { return '18789 被未知进程占用；未停止进程，也未向未知服务发送 POST。请先确认 PID 和命令行。' }
+        'STALE_OR_INCOMPATIBLE_ROUTER' { return '检测到旧版或不兼容的小羽 Router；请确认后停止旧进程，再启动当前版本。' }
+        'STOP_OLD_ROUTER_CONFIRMATION_REQUIRED' { return '检测到旧小羽 Router，但尚未获得停止确认；未终止任何进程。' }
         default { return '请查看高级信息，确认本地配置和服务状态后重试。' }
     }
 }
@@ -71,7 +74,7 @@ function Invoke-SafeUiAction([string]$Name,[scriptblock]$Action) {
     try { return (& $Action) }
     catch {
         $detail = Redact-Text ([string]$_.Exception.Message)
-        $code = if ($detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED)') { $Matches[1] } else { 'UI_ACTION_FAILED' }
+        $code = if ($detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED|PORT_OCCUPIED_BY_UNKNOWN_PROCESS|STOP_OLD_ROUTER_CONFIRMATION_REQUIRED|STALE_OR_INCOMPATIBLE_ROUTER)') { $Matches[1] } else { 'UI_ACTION_FAILED' }
         Add-UiDebugInfo -Name $Name -Code $code -Detail $detail
         $summary = "操作失败`r`n错误码：$code`r`n原因：$(Get-UiErrorExplanation $code)`r`n建议：请检查高级信息 / 调试信息后重试。"
         if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($summary,'小羽 Router 控制台',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
@@ -98,6 +101,68 @@ function Get-CodexStatus {
     if (Test-Path -LiteralPath $CodexConfig) { $lines = Get-Content -LiteralPath $CodexConfig -Encoding UTF8; foreach ($line in $lines) { if ($line -match '^\s*\[') { break }; if ($line -match '^\s*model_provider\s*=\s*"([^"]*)"') { $provider = $Matches[1] }; if ($line -match '^\s*model\s*=\s*"([^"]*)"') { $model = $Matches[1] }; if ($line -match '^\s*(?:model_reasoning_effort|reasoning_effort)\s*=\s*"([^"]*)"') { $reasoning = $Matches[1] } }; $xiaoyu = ([string]::Join("`n", $lines) -match '\[model_providers\.XiaoyuRouter\]') }
     return [pscustomobject]@{ provider = $provider; model = $model; reasoning = $reasoning; xiaoyu = $xiaoyu }
 }
+function Get-ProcessMetadata([int]$ProcessId) {
+    $name = ''; $path = ''; $commandLine = ''
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        $name = [string]$process.ProcessName
+        try { $path = [string]$process.Path } catch {}
+    } catch {}
+    try {
+        $processLine = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $ProcessId) -ErrorAction Stop
+        if ($processLine) {
+            if ([string]::IsNullOrWhiteSpace($path)) { $path = [string]$processLine.ExecutablePath }
+            $commandLine = [string]$processLine.CommandLine
+        }
+    } catch {
+        try {
+            $processLine = Get-WmiObject Win32_Process -Filter ('ProcessId=' + $ProcessId) -ErrorAction Stop
+            if ($processLine) {
+                if ([string]::IsNullOrWhiteSpace($path)) { $path = [string]$processLine.ExecutablePath }
+                $commandLine = [string]$processLine.CommandLine
+            }
+        } catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) { $path = '[UNAVAILABLE]' }
+    if ([string]::IsNullOrWhiteSpace($commandLine)) { $commandLine = '[UNAVAILABLE]' }
+    return [pscustomobject]@{
+        pid = $ProcessId
+        process_name = (Redact-Text $name)
+        executable_path = (Redact-Text $path)
+        command_line = (Redact-Text $commandLine)
+    }
+}
+function Invoke-RouterGet([string]$Uri) {
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec 2
+        $body = $null
+        try { $body = $response.Content | ConvertFrom-Json } catch {}
+        return [pscustomobject]@{ status_code = [int]$response.StatusCode; body = $body }
+    } catch {
+        $status = 0
+        try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch {}
+        return [pscustomobject]@{ status_code = $status; body = $null }
+    }
+}
+function Get-RouterIdentityProbe {
+    $base = 'http://127.0.0.1:18789'
+    $agent = Invoke-RouterGet ($base + '/agent/health')
+    $health = Invoke-RouterGet ($base + '/health')
+    $models = Invoke-RouterGet ($base + '/v1/models')
+    $isCurrent = ($agent.status_code -eq 200 -and $agent.body -and $agent.body.agent_api -eq $true -and [string]$agent.body.service -eq 'xiaoyu-router-agent-api')
+    $hasLegacySurface = ($health.status_code -eq 200 -or $models.status_code -eq 200)
+    $classification = if ($isCurrent) { 'CURRENT_ROUTER' } elseif ($agent.status_code -eq 404 -and $hasLegacySurface) { 'STALE_OR_INCOMPATIBLE_ROUTER' } elseif ($agent.status_code -eq 0 -and $health.status_code -eq 0 -and $models.status_code -eq 0) { 'UNREACHABLE' } else { 'UNKNOWN_SERVICE' }
+    return [pscustomobject]@{
+        classification = $classification
+        agent_health_status = $agent.status_code
+        agent_api = if ($isCurrent) { $true } else { $false }
+        agent_service = if ($agent.body) { [string]$agent.body.service } else { '' }
+        agent_version = if ($agent.body) { [string]$agent.body.version } else { '' }
+        health_status = $health.status_code
+        models_status = $models.status_code
+        no_post_sent = 'YES'
+    }
+}
 function Get-RouterListenerInfo {
     $entries = @(Get-NetTCPConnection -LocalPort 18789 -State Listen -ErrorAction SilentlyContinue)
     if ($entries.Count -eq 0) {
@@ -108,16 +173,26 @@ function Get-RouterListenerInfo {
             }
         }
     }
-    if ($entries.Count -eq 0) { return [pscustomobject]@{ listening = $false; loopback = $false; address = ''; port = 18789; pid = $null; process = ''; command_line = ''; owned = $false } }
+    if ($entries.Count -eq 0) { return [pscustomobject]@{ listening = $false; loopback = $false; address = ''; port = 18789; pid = $null; process = ''; executable_path = ''; command_line = ''; owner_kind = 'NONE'; owned = $false } }
     $entry = $entries | Select-Object -First 1
     $addresses = @($entries | ForEach-Object { [string]$_.LocalAddress } | Sort-Object -Unique)
-    $listenerPid = [int]$entry.OwningProcess; $processName = ''; $commandLine = ''
-    try { $processName = (Get-Process -Id $listenerPid -ErrorAction Stop).ProcessName } catch {}
-    try { $processLine = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $listenerPid) -ErrorAction Stop; if ($processLine) { $commandLine = [string]$processLine.CommandLine } } catch {}
-    $pidFile = $RouterPidFile; $managedPid = $null
-    if (Test-Path -LiteralPath $pidFile) { try { $managedPid = [int](Get-Content -LiteralPath $pidFile -Raw -Encoding UTF8).Trim() } catch {} }
-    $owned = ($managedPid -eq $listenerPid) -or ($processName -match '(?i)^xiaoyu-router$') -or ($commandLine -match '(?i)codex_ai_router[\\/]cli\.py.*\bserve\b')
-    return [pscustomobject]@{ listening = $true; loopback = (@($addresses | Where-Object { $_ -notin @('127.0.0.1','::1','localhost') }).Count -eq 0); address = ($addresses -join ', '); port = 18789; pid = $listenerPid; process = $processName; command_line = $commandLine; owned = $owned }
+    $listenerPid = [int]$entry.OwningProcess; $metadata = Get-ProcessMetadata $listenerPid
+    $identityText = ($metadata.process_name + ' ' + $metadata.executable_path + ' ' + $metadata.command_line)
+    $identityMatch = $identityText -match '(?i)(codex[_-]ai[_-]router|xiaoyu[-_]router|python(?:\.exe)?\s+.*-m\s+codex_ai_router\.cli\s+serve)'
+    $ownerKind = if ($identityMatch) { 'XIAOYU_ROUTER' } else { 'UNKNOWN_PROCESS' }
+    $loopback = (@($addresses | Where-Object { $_ -notin @('127.0.0.1','::1','localhost') }).Count -eq 0)
+    return [pscustomobject]@{
+        listening = $true
+        loopback = $loopback
+        address = ($addresses -join ', ')
+        port = 18789
+        pid = $listenerPid
+        process = $metadata.process_name
+        executable_path = $metadata.executable_path
+        command_line = $metadata.command_line
+        owner_kind = $ownerKind
+        owned = ($identityMatch -and $loopback)
+    }
 }
 function Get-RouterToolsPolicyName {
     $path = Join-Path $env:USERPROFILE '.codex-ai-router\tools-policy.json'
@@ -125,13 +200,39 @@ function Get-RouterToolsPolicyName {
     return 'strict_reject'
 }
 function Get-RouterStatus {
-    $listener = Get-RouterListenerInfo; $healthOk = $false; $models = $null; $healthStatus = '未响应'; $modelsStatus = '未检查'
+    $listener = Get-RouterListenerInfo; $models = $null; $probe = [pscustomobject]@{ classification = 'NOT_LISTENING'; agent_health_status = 0; agent_api = $false; agent_service = ''; agent_version = ''; health_status = 0; models_status = 0; no_post_sent = 'YES' }
     if ($listener.listening -and $listener.loopback) {
-        try { $health = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/health' -TimeoutSec 2; $healthOk = ($health.StatusCode -eq 200); $healthStatus = if ($healthOk) { 'PASS' } else { [string]$health.StatusCode } } catch { $healthStatus = 'HTTP_ERROR' }
-        try { $modelsResponse = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/v1/models' -TimeoutSec 2; $models = $modelsResponse.Content | ConvertFrom-Json; $modelsStatus = if ($modelsResponse.StatusCode -eq 200) { 'PASS' } else { [string]$modelsResponse.StatusCode } } catch { $modelsStatus = 'HTTP_ERROR' }
-    } elseif ($listener.listening) { $healthStatus = '非回环绑定'; $modelsStatus = '未检查' }
+        $probe = Get-RouterIdentityProbe
+        if ($probe.models_status -eq 200) { $modelsResponse = Invoke-RouterGet 'http://127.0.0.1:18789/v1/models'; $models = $modelsResponse.body }
+    } elseif ($listener.listening) { $probe = [pscustomobject]@{ classification = 'NON_LOOPBACK_BINDING'; agent_health_status = 0; agent_api = $false; agent_service = ''; agent_version = ''; health_status = 0; models_status = 0; no_post_sent = 'YES' } }
     $codex = Get-CodexStatus
-    return [pscustomobject]@{ running = ($listener.listening -and $listener.loopback -and $healthOk); address = 'http://127.0.0.1:18789/v1'; mode = 'AUTO'; models = $models; listener_status = if($listener.listening){'LISTENING'}else{'NOT_LISTENING'}; listener_address = $listener.address; listener_port = 18789; listener_pid = $listener.pid; listener_process = $listener.process; listener_owned = $listener.owned; health_status = $healthStatus; models_status = $modelsStatus; current_codex_mode = $codex.provider; current_codex_model = $codex.model; tools_policy = Get-RouterToolsPolicyName }
+    return [pscustomobject]@{
+        running = ($listener.listening -and $listener.loopback -and $probe.classification -eq 'CURRENT_ROUTER')
+        address = 'http://127.0.0.1:18789/v1'
+        mode = 'AUTO'
+        models = $models
+        listener_status = if($listener.listening){'LISTENING'}else{'NOT_LISTENING'}
+        listener_address = $listener.address
+        listener_port = 18789
+        listener_pid = $listener.pid
+        listener_process = $listener.process
+        listener_executable_path = $listener.executable_path
+        listener_command_line = $listener.command_line
+        listener_owner_kind = if($probe.classification -eq 'CURRENT_ROUTER'){'CURRENT_ROUTER'}else{$listener.owner_kind}
+        listener_owned = ($listener.owned -or $probe.classification -eq 'CURRENT_ROUTER')
+        health_status = if($probe.health_status -eq 200){'PASS'}else{[string]$probe.health_status}
+        models_status = if($probe.models_status -eq 200){'PASS'}else{[string]$probe.models_status}
+        agent_health_status = $probe.agent_health_status
+        agent_api = $probe.agent_api
+        agent_service = $probe.agent_service
+        agent_version = $probe.agent_version
+        identity_status = $probe.classification
+        stale_or_incompatible = if($probe.classification -eq 'STALE_OR_INCOMPATIBLE_ROUTER'){'YES'}else{'NO'}
+        post_to_unknown_service = 'NO'
+        current_codex_mode = $codex.provider
+        current_codex_model = $codex.model
+        tools_policy = Get-RouterToolsPolicyName
+    }
 }
 function Get-RouterLaunchSpec {
     $candidates = @()
@@ -152,13 +253,29 @@ function Get-RouterLaunchSpec {
     if (Test-Path -LiteralPath $knownPython) { return [pscustomobject]@{ path = $knownPython; kind = 'PYTHON_MODULE' } }
     throw 'ROUTER_RUNTIME_NOT_FOUND'
 }
+function Confirm-StopOldRouter([object]$Listener,[object]$Identity) {
+    $message = "检测到旧小羽 Router 正在占用 18789。`r`nPID：$($Listener.pid)`r`n进程：$($Listener.process)`r`n可执行路径：$($Listener.executable_path)`r`n命令行：$($Listener.command_line)`r`n身份探测：$($Identity.classification)`r`n仅停止已识别的小羽 Router，不会停止未知进程。`r`n是否停止旧进程并重新启动当前 Router？"
+    if ($NoShow -or $SelfTest) { return $false }
+    return ([System.Windows.Forms.MessageBox]::Show($message,'旧小羽 Router 占用端口',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+function Stop-IdentifiedRouterProcess([object]$Listener) {
+    if (-not $Listener.owned) { throw 'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' }
+    Stop-Process -Id ([int]$Listener.pid) -Force -ErrorAction Stop
+    for ($attempt = 0; $attempt -lt 20; $attempt++) { Start-Sleep -Milliseconds 250; if (-not (Get-RouterListenerInfo).listening) { return } }
+    throw 'ROUTER_STOP_TIMEOUT'
+}
 function Start-Router {
     $existing = Get-RouterListenerInfo
     if ($existing.listening) {
         if (-not $existing.loopback) { throw 'ROUTER_NON_LOOPBACK_BINDING' }
-        if (-not $existing.owned) { throw 'ROUTER_PORT_IN_USE_UNKNOWN_PROCESS' }
-        if ((Get-RouterStatus).running) { return [pscustomobject]@{ status = 'ALREADY_RUNNING'; pid = $existing.pid; address = '127.0.0.1:18789' } }
-        throw 'ROUTER_LISTENER_UNHEALTHY'
+        $status = Get-RouterStatus
+        if ($status.identity_status -eq 'CURRENT_ROUTER') { return [pscustomobject]@{ status = 'ALREADY_RUNNING'; pid = $existing.pid; address = '127.0.0.1:18789'; identity = $status.identity_status } }
+        if ($existing.owner_kind -eq 'XIAOYU_ROUTER' -and $status.identity_status -eq 'STALE_OR_INCOMPATIBLE_ROUTER') {
+            if (-not (Confirm-StopOldRouter $existing $status)) { throw 'STOP_OLD_ROUTER_CONFIRMATION_REQUIRED' }
+            Stop-IdentifiedRouterProcess $existing
+        } else {
+            throw 'PORT_OCCUPIED_BY_UNKNOWN_PROCESS'
+        }
     }
     $runtimeDir = Join-Path $ProjectRoot '.runtime\router'; if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
     $stdout = Join-Path $runtimeDir 'router.stdout.log'; $stderr = Join-Path $runtimeDir 'router.stderr.log'; $pidFile = $RouterPidFile
@@ -200,12 +317,29 @@ function Stop-Router {
     $listener = Get-RouterListenerInfo
     if (-not $listener.listening) { return [pscustomobject]@{ status = 'ALREADY_STOPPED' } }
     if (-not $listener.loopback) { throw 'ROUTER_NON_LOOPBACK_BINDING' }
-    if (-not $listener.owned) { throw 'ROUTER_PORT_IN_USE_UNKNOWN_PROCESS' }
-    Stop-Process -Id $listener.pid -Force -ErrorAction Stop
-    for ($attempt = 0; $attempt -lt 20; $attempt++) { Start-Sleep -Milliseconds 250; if (-not (Get-RouterListenerInfo).listening) { break } }
+    $status = Get-RouterStatus
+    $knownCurrent = ($status.identity_status -eq 'CURRENT_ROUTER')
+    if (-not $listener.owned -and -not $knownCurrent) { throw 'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' }
+    if ($status.identity_status -eq 'STALE_OR_INCOMPATIBLE_ROUTER') {
+        if (-not (Confirm-StopOldRouter $listener $status)) { throw 'STOP_OLD_ROUTER_CONFIRMATION_REQUIRED' }
+    }
+    if ($knownCurrent -and -not $listener.owned) {
+        Stop-Process -Id ([int]$listener.pid) -Force -ErrorAction Stop
+        for ($attempt = 0; $attempt -lt 20; $attempt++) { Start-Sleep -Milliseconds 250; if (-not (Get-RouterListenerInfo).listening) { break } }
+    } else { Stop-IdentifiedRouterProcess $listener }
     Remove-Item -LiteralPath $RouterPidFile -Force -ErrorAction SilentlyContinue
     if ((Get-RouterListenerInfo).listening) { throw 'ROUTER_STOP_TIMEOUT' }
     return [pscustomobject]@{ status = 'STOPPED' }
+}
+function Stop-OldRouter {
+    $listener = Get-RouterListenerInfo
+    if (-not $listener.listening) { return [pscustomobject]@{ status = 'NOT_LISTENING' } }
+    if (-not $listener.loopback) { throw 'ROUTER_NON_LOOPBACK_BINDING' }
+    $status = Get-RouterStatus
+    if ($listener.owner_kind -ne 'XIAOYU_ROUTER' -or $status.identity_status -ne 'STALE_OR_INCOMPATIBLE_ROUTER') { throw 'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' }
+    if (-not (Confirm-StopOldRouter $listener $status)) { throw 'STOP_OLD_ROUTER_CONFIRMATION_REQUIRED' }
+    Stop-IdentifiedRouterProcess $listener
+    return [pscustomobject]@{ status = 'OLD_ROUTER_STOPPED'; pid = $listener.pid }
 }
 function Get-DeepSeekPortState([int]$Port) {
     $entries = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
@@ -267,11 +401,16 @@ function Invoke-DeepSeekLocalScript([ValidateSet('start-bridge','start-worker','
 function Invoke-RouterDirectSmoke {
     $body = @{ model = 'xiaoyu-lightboat'; input = 'Reply exactly: ROUTER_SMOKE_OK'; max_output_tokens = 8; stream = $false } | ConvertTo-Json -Compress
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $preflight = Get-RouterStatus
+    if (-not $preflight.running) {
+        $blockedCode = if ($preflight.identity_status -eq 'STALE_OR_INCOMPATIBLE_ROUTER') { 'STALE_OR_INCOMPATIBLE_ROUTER' } elseif ($preflight.listener_status -eq 'LISTENING') { 'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' } else { 'ROUTER_NOT_RUNNING' }
+        return [pscustomobject]@{ success = $false; status = 'BLOCKED'; seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); error_code = $blockedCode; post_sent = 'NO' }
+    }
     try {
         $result = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18789/v1/responses' -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 25
-        return [pscustomobject]@{ success = ($result.StatusCode -eq 200); status = $result.StatusCode; seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); error_code = $null }
+        return [pscustomobject]@{ success = ($result.StatusCode -eq 200); status = $result.StatusCode; seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); error_code = $null; post_sent = 'YES' }
     } catch {
-        return [pscustomobject]@{ success = $false; status = 'FAILED'; seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); error_code = 'ROUTER_SMOKE_FAILED' }
+        return [pscustomobject]@{ success = $false; status = 'FAILED'; seconds = [math]::Round($watch.Elapsed.TotalSeconds, 2); error_code = 'ROUTER_SMOKE_FAILED'; post_sent = 'YES' }
     }
 }
 function Update-ProviderEnabled([string]$Id) { $data = Get-ProviderData; $provider = $data.providers.($Id); if (-not $provider) { throw 'Provider was not found.' }; $provider.enabled = ($provider.enabled -eq $false); Write-JsonAtomic $ProviderConfig $data }
@@ -385,14 +524,31 @@ if ($RouterAction) {
         $result | ConvertTo-Json -Depth 8 -Compress
         exit 0
     } catch {
-        [pscustomobject]@{ status = 'ERROR'; error_code = [string]$_.Exception.Message } | ConvertTo-Json -Compress
+        $owner = Get-RouterListenerInfo
+        $probe = if ($owner.listening -and $owner.loopback) { Get-RouterIdentityProbe } else { [pscustomobject]@{ classification = 'NOT_PROBED'; agent_health_status = 0; health_status = 0; models_status = 0; no_post_sent = 'YES' } }
+        [pscustomobject]@{
+            status = 'ERROR'
+            error_code = [string]$_.Exception.Message
+            port = 18789
+            listener_address = $owner.address
+            listener_pid = $owner.pid
+            listener_process = $owner.process
+            listener_executable_path = $owner.executable_path
+            listener_command_line = $owner.command_line
+            listener_owner_kind = $owner.owner_kind
+            identity_status = $probe.classification
+            agent_health_status = $probe.agent_health_status
+            health_status = $probe.health_status
+            models_status = $probe.models_status
+            post_to_unknown_service = 'NO'
+        } | ConvertTo-Json -Depth 8 -Compress
         exit 1
     }
 }
 
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
-    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
+    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; Write-Output 'ROUTER_PORT_OWNER_FIELDS=YES'; Write-Output 'ROUTER_IDENTITY_PROBE=YES'; Write-Output 'STALE_ROUTER_CONFIRMATION_GATE=YES'; Write-Output 'UNKNOWN_PROCESS_SAFE_STOP=YES'; Write-Output 'UNKNOWN_SERVICE_POST_BLOCKED=YES'; exit 0
 }
 
 $uiFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
@@ -619,6 +775,10 @@ function Get-LocalErrorExplanation([string]$Code) {
     switch ([string]$Code) {
         'PORT_IN_USE' { return '端口被占用，系统会尝试安全切换备用端口。' }
         'PORT_IN_USE_BY_UNKNOWN_PROCESS' { return '未知进程占用，未强制结束；已保留系统安全。' }
+        'ROUTER_PORT_IN_USE_UNKNOWN_PROCESS' { return '18789 被未知进程占用；未停止进程，也未向未知服务发送 POST。请先确认 PID 和命令行。' }
+        'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' { return '18789 被未知进程占用；未停止进程，也未向未知服务发送 POST。请先确认 PID 和命令行。' }
+        'STALE_OR_INCOMPATIBLE_ROUTER' { return '检测到旧版或不兼容的小羽 Router；请确认后停止旧进程，再启动当前版本。' }
+        'STOP_OLD_ROUTER_CONFIRMATION_REQUIRED' { return '检测到旧小羽 Router，但尚未获得停止确认；未终止任何进程。' }
         'LOCAL_PORTS_EXHAUSTED' { return '本地备用端口已耗尽，请关闭无关服务后重试。' }
         'LOCAL_MODEL_LOAD_TIMEOUT' { return '本地模型加载超时，可能是模型太大或内存不足。' }
         'LOCAL_EMPTY_RESPONSE' { return '本地模型无返回，请检查模型状态。' }
@@ -733,7 +893,7 @@ function Refresh-Usage {
     if ($codex.provider -eq 'XiaoyuRouter') { $warning = '当前推理优先通过 XiaoyuRouter；这不是官方额度结论。' } elseif ($summary.openai -ge 5) { $warning = '当前可能快速消耗 Codex 额度；可按需切换到 XiaoyuRouter。' } else { $warning = '当前 Provider 可能消耗官方 Codex 推理额度。' }
     $usageText.Text = ("官方剩余额度：请在官方用量面板查看。本控制台不会伪造额度。`r`n`r`n本地统计，不是官方额度：`r`n今日任务：{0}`r`n本周任务：{1}`r`nOpenAI Provider：{2}`r`nXiaoyuRouter：{3}`r`nLightboat：{4}`r`nLocal：{5}`r`n失败/超时：{6}`r`n`r`n{7}`r`n`r`nOpenAI 轻量测试档：gpt-5.6-luna，低推理；仅用于小型 smoke，不应用于复杂或高风险任务。`r`n`r`n建议：短小低风险任务使用 XiaoyuRouter/Local；中等编码使用 XiaoyuRouter API；复杂或高风险任务使用更强 OpenAI Codex 或 Strong API + review。" -f $summary.today,$summary.week,$summary.openai,$summary.xiaoyu,$summary.lightboat,$summary.local,$summary.failed,$warning)
 }
-function Refresh-Home { $router = Get-RouterStatus; $codex = Get-CodexStatus; $statusBox.Text = ("Router：{0}`r`n监听状态：{1}`r`n监听地址：{2}`r`n监听端口：{3}`r`n进程：{4}（PID {5}）`r`n仅本机：{6}`r`n健康检查：{7}`r`n/v1/models：{8}`r`n当前 Codex Provider：{9}`r`n当前 Codex 模型：{10}`r`n工具策略：{11}`r`n网络模式：{12}`r`nXiaoyuRouter 已安装：{13}`r`n`r`n官方委托提示：Luna+low 适合轻量调度；Terra+medium 适合中等实现；高风险建议 Sol/最强模型 + high/xhigh。委托不会自动热切当前 Codex 模型。" -f $(if ($router.running) { '运行中' } else { '已停止' }),$router.listener_status,$router.listener_address,$router.listener_port,$router.listener_process,$router.listener_pid,$(if($router.listener_status -eq 'LISTENING' -and $router.listener_address -in @('127.0.0.1','::1','localhost')){'是'}else{'否'}),$router.health_status,$router.models_status,$codex.provider,$codex.model,$router.tools_policy,$router.mode,$(if($codex.xiaoyu){'是'}else{'否'})); $diagnosticsText.Text = Redact-Text ((Get-ProviderRows | Format-Table -AutoSize | Out-String) + "`r`n" + $statusBox.Text); Refresh-Providers; Refresh-Usage; Refresh-DirectLocalCard }
+function Refresh-Home { $router = Get-RouterStatus; $codex = Get-CodexStatus; $statusBox.Text = ("Router：{0}`r`n监听状态：{1}`r`n监听地址：{2}`r`n监听端口：{3}`r`n进程：{4}（PID {5}）`r`n可执行路径：{6}`r`n命令行：{7}`r`n端口所有者：{8}`r`n身份探测：{9}`r`nAgent API：{10}（版本 {11}）`r`n仅本机：{12}`r`n健康检查：{13}`r`n/v1/models：{14}`r`n未知服务 POST：{15}`r`n当前 Codex Provider：{16}`r`n当前 Codex 模型：{17}`r`n工具策略：{18}`r`n网络模式：{19}`r`nXiaoyuRouter 已安装：{20}`r`n`r`n官方委托提示：Luna+low 适合轻量调度；Terra+medium 适合中等实现；高风险建议 Sol/最强模型 + high/xhigh。委托不会自动热切当前 Codex 模型。" -f $(if ($router.running) { '运行中' } else { '已停止' }),$router.listener_status,$router.listener_address,$router.listener_port,$router.listener_process,$router.listener_pid,$router.listener_executable_path,$router.listener_command_line,$router.listener_owner_kind,$router.identity_status,$router.agent_api,$router.agent_version,$(if($router.listener_status -eq 'LISTENING' -and $router.listener_address -in @('127.0.0.1','::1','localhost')){'是'}else{'否'}),$router.health_status,$router.models_status,$router.post_to_unknown_service,$codex.provider,$codex.model,$router.tools_policy,$router.mode,$(if($codex.xiaoyu){'是'}else{'否'})); $diagnosticsText.Text = Redact-Text ((Get-ProviderRows | Format-Table -AutoSize | Out-String) + "`r`n" + $statusBox.Text); Refresh-Providers; Refresh-Usage; Refresh-DirectLocalCard }
 function Add-HomeButton([string]$Caption,[scriptblock]$Action,[ValidateSet('Router','Switch')][string]$Area = 'Router') { $button = New-Object System.Windows.Forms.Button; $button.Text = $Caption; $button.Width = 170; $button.Height = 42; $button.Font = $buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(5); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); if($Area -eq 'Router'){[void]$homeButtons.Controls.Add($button)}else{[void]$switchButtons.Controls.Add($button)} }
 function Add-DirectLocalButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$directLocalButtons.Controls.Add($button) }
 function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=36; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(5); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekButtons.Controls.Add($button) }
@@ -745,7 +905,8 @@ function Add-ProviderButton([string]$Caption,[scriptblock]$Action) { $button = N
 Add-HomeButton '启动 Router' { Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
 Add-HomeButton '停止 Router' { Stop-Router; Refresh-Home }
 Add-HomeButton '重启 Router' { Stop-Router; Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
-Add-HomeButton '检查 18789' { $router = Get-RouterStatus; [System.Windows.Forms.MessageBox]::Show(("监听：{0}`r`n地址：{1}`r`n健康：{2}`r`n/v1/models：{3}`r`n工具策略：{4}" -f $router.listener_status,$router.listener_address,$router.health_status,$router.models_status,$router.tools_policy),'Router 本地状态') ; Refresh-Home }
+Add-HomeButton '检查 18789' { $router = Get-RouterStatus; [System.Windows.Forms.MessageBox]::Show(("监听：{0}`r`n地址：{1}`r`nPID：{2}`r`n进程：{3}`r`n可执行路径：{4}`r`n命令行：{5}`r`n身份：{6}`r`n健康：{7}`r`nAgent API：{8}`r`n版本：{9}`r`n/v1/models：{10}`r`n未知服务 POST：{11}`r`n工具策略：{12}" -f $router.listener_status,$router.listener_address,$router.listener_pid,$router.listener_process,$router.listener_executable_path,$router.listener_command_line,$router.identity_status,$router.health_status,$router.agent_api,$router.agent_version,$router.models_status,$router.post_to_unknown_service,$router.tools_policy),'Router 本地状态') ; Refresh-Home }
+Add-HomeButton '停止旧小羽 Router（需确认）' { Stop-OldRouter; Refresh-Home }
 Add-HomeButton '查看 /v1/models' { [System.Windows.Forms.MessageBox]::Show(((Get-RouterStatus).models | ConvertTo-Json -Depth 5),'Router 模型') }
 Add-HomeButton 'Router 直连测试' { $smoke = Invoke-RouterDirectSmoke; Add-UsageRecord @{ active_provider = (Get-CodexStatus).provider; active_model = (Get-CodexStatus).model; router_virtual_model = 'xiaoyu-lightboat'; task_mode = 'safe_smoke'; duration_seconds = $smoke.seconds; success = $smoke.success; error_code = $smoke.error_code; estimated_route = 'lightboat'; remote_provider_used = 'YES'; local_provider_used = 'NO' }; [System.Windows.Forms.MessageBox]::Show(("状态：{0}`r`n耗时秒数：{1}`r`n响应内容不会被记录。" -f $smoke.status,$smoke.seconds),'Router 直连测试'); Refresh-Usage }
 Add-HomeButton '生成交接文档' { $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'make-codex-handoff.ps1') 2>&1; [System.Windows.Forms.MessageBox]::Show((Redact-Text ($out | Out-String)),'交接文档') } 'Switch'

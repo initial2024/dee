@@ -53,6 +53,8 @@ class AgentApiTests(unittest.TestCase):
     def test_health_is_loopback_only_and_metadata_safe(self):
         status, body = self.get("/agent/health")
         self.assertEqual((status, body["loopback_only"], body["bind_host"], body["port"]), (200, "YES", "127.0.0.1", 18789))
+        self.assertEqual((body["service"], body["agent_api"], body["version"]), ("xiaoyu-router-agent-api", True, "1.0"))
+        self.assertIn("readonly", body["capabilities"])
         self.assertEqual((body["public_exposure"], body["lan_exposure"], body["codex_agent_used"]), ("NO", "NO", "NO"))
 
     def test_plan_does_not_invoke_brain_and_records_no_body(self):

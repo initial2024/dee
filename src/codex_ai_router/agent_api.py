@@ -17,6 +17,8 @@ from .local_agent import LocalAgent, LocalAgentError
 AGENT_API_HOST = "127.0.0.1"
 AGENT_API_PORT = 18789
 AGENT_API_BASE = f"http://{AGENT_API_HOST}:{AGENT_API_PORT}"
+AGENT_API_SERVICE = "xiaoyu-router-agent-api"
+AGENT_API_VERSION = "1.0"
 MAX_AGENT_BODY_BYTES = 256 * 1024
 
 _RECORD_FIELDS = (
@@ -53,7 +55,19 @@ class AgentApiController:
     def health(self) -> dict[str, Any]:
         return {
             "status": "ok",
-            "service": "xiaoyu-local-agent",
+            "service": AGENT_API_SERVICE,
+            "version": AGENT_API_VERSION,
+            "agent_api": True,
+            "capabilities": [
+                "health",
+                "plan",
+                "readonly",
+                "draft-patch",
+                "apply",
+                "test",
+                "commit",
+                "records",
+            ],
             "bind_host": AGENT_API_HOST,
             "port": AGENT_API_PORT,
             "loopback_only": "YES",
