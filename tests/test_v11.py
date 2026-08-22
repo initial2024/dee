@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 from codex_ai_router.codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
@@ -130,6 +131,8 @@ class RouterV11Tests(unittest.TestCase):
                 self.assertEqual(response.headers.get_content_type(), "text/event-stream")
                 self.assertEqual(response.headers.get("Cache-Control"), "no-cache")
             self.assertIn("response.completed", raw)
+            self.assertIn("response.output_text.delta", raw)
+            self.assertIn("data: [DONE]", raw)
         finally:
             server.stop()
 
@@ -143,6 +146,33 @@ class RouterV11Tests(unittest.TestCase):
                 self.assertEqual(response.headers.get_content_type(), "application/json")
                 self.assertEqual(response.headers.get("X-Xiaoyu-Normalized"), "yes")
                 self.assertEqual(response.headers.get("X-Xiaoyu-Content-Detected"), "yes")
+        finally:
+            server.stop()
+
+    def test_118c_strict_tools_error_has_chinese_guidance(self):
+        server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal(), tools_policy="strict_reject"), port=0)
+        server.start()
+        try:
+            port = server.httpd.server_address[1]
+            request = Request(f"http://127.0.0.1:{port}/v1/responses", data=json.dumps({"model": "xiaoyu-local", "input": "ok", "tools": [{"type": "function"}]}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with self.assertRaises(HTTPError) as ctx:
+                urlopen(request, timeout=3)
+            body = ctx.exception.read().decode("utf-8")
+            self.assertIn("TOOLS_NOT_SUPPORTED_BY_BACKEND", body)
+            self.assertIn("TEXT_ONLY", body)
+        finally:
+            server.stop()
+
+    def test_118d_text_only_server_returns_visible_text_without_tool_calls(self):
+        server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal(), tools_policy="text_only_strip"), port=0)
+        server.start()
+        try:
+            port = server.httpd.server_address[1]
+            request = Request(f"http://127.0.0.1:{port}/v1/responses", data=json.dumps({"model": "xiaoyu-local", "input": "只回复 TEXT_ONLY_OK", "tools": [{"type": "function"}], "tool_choice": "auto"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=3) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(body["output_text"].endswith("只回复 TEXT_ONLY_OK"))
+            self.assertNotIn("tool_calls", body)
         finally:
             server.stop()
 

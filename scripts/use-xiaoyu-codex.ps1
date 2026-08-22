@@ -30,6 +30,9 @@ function Save-Utf8Atomic([string]$Path, [string[]]$Lines) {
 }
 
 if (-not (Test-Path -LiteralPath $ConfigPath)) { throw 'Codex config.toml was not found.' }
+$repairStateRoot = Join-Path (Split-Path -Parent $ConfigPath) '.xiaoyu-wire-api-repair'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'codex-mode-manager.ps1') -Action repair-wire-api -ConfigPath $ConfigPath -StateRoot $repairStateRoot | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Codex wire_api repair failed before Xiaoyu Router switch.' }
 $source = Get-Content -LiteralPath $ConfigPath -Encoding UTF8
 $providerId = $null; $section = $null
 foreach ($line in $source) {

@@ -21,6 +21,7 @@ from .handoff import compact_handoff
 from .codex_integration import install_xiaoyu_router_provider, same_thread_provider_switch_support
 from .delegation import explain_delegation
 from .groq_diagnostics import diagnose as diagnose_groq, live_smoke as live_smoke_groq
+from .tools_policy import VALID_POLICIES, load_policy, policy_path, save_policy
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -83,6 +84,7 @@ def main() -> None:
     handoff = sub.add_parser("handoff"); handoff.add_argument("task"); handoff.add_argument("--tests", default="NOT_RUN"); handoff.add_argument("--blockers", default="NONE"); handoff.add_argument("--constraints", default="")
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
     config = sub.add_parser("config"); config.add_argument("action", choices=("show",))
+    tools_policy = sub.add_parser("tools-policy"); tools_policy.add_argument("action", choices=("show", "set")); tools_policy.add_argument("policy", nargs="?", choices=VALID_POLICIES)
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -104,7 +106,13 @@ def main() -> None:
     config_data = load_config(args.config) if args.config else {}
     policy = SelectionPolicy.from_config(config_data).merged_with(task_policy) if args.config else task_policy
     router = Router.default(Path.cwd(), policy, FastLocalPolicy.from_config(config_data))
-    if args.command == "doctor": emit(router.doctor())
+    if args.command == "tools-policy":
+        if args.action == "show":
+            emit({"codex_tools_policy": load_policy(), "default": "strict_reject", "path": str(policy_path())})
+        else:
+            if not args.policy: raise SystemExit("POLICY_REQUIRED")
+            emit(save_policy(args.policy))
+    elif args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
     elif args.command == "models":
         ld = router.local.models(); ad = router.api.models(); _, le = router.provider_models("local"); _, ae = router.provider_models("api")

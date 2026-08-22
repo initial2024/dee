@@ -44,6 +44,7 @@ function Get-UiErrorExplanation([string]$Code) {
         'EXTERNAL_MODEL_NOT_ELIGIBLE' { return '外部模型未通过运行资格检查。' }
         'LIVE_CONFIRMATION_REQUIRED' { return '真实外部 API 测试需要用户手动确认。' }
         'AUTH_MISSING' { return '未检测到可用鉴权配置。' }
+        'TOOLS_NOT_SUPPORTED_BY_BACKEND' { return '当前后端不支持工具调用；可切换官方直连，或手动启用文本兼容模式。' }
         default { return '请查看高级信息，确认本地配置和服务状态后重试。' }
     }
 }
@@ -157,6 +158,14 @@ function Invoke-RouterDirectSmoke {
 }
 function Update-ProviderEnabled([string]$Id) { $data = Get-ProviderData; $provider = $data.providers.($Id); if (-not $provider) { throw 'Provider was not found.' }; $provider.enabled = ($provider.enabled -eq $false); Write-JsonAtomic $ProviderConfig $data }
 function Invoke-RouterCli([string[]]$Arguments) { return (Redact-Text (& xiaoyu-router @Arguments 2>&1 | Out-String)) }
+function Get-ToolsPolicyRecord {
+    try { return (Invoke-RouterCli @('tools-policy','show') | ConvertFrom-Json) }
+    catch { return [pscustomobject]@{ codex_tools_policy = 'strict_reject'; default = 'strict_reject'; path = (Join-Path $env:USERPROFILE '.codex-ai-router\tools-policy.json') } }
+}
+function Set-ToolsPolicy([ValidateSet('strict_reject','text_only_strip','manual_plan')][string]$Policy) {
+    $raw = Invoke-RouterCli @('tools-policy','set',$Policy)
+    try { return ($raw | ConvertFrom-Json) } catch { throw 'TOOLS_POLICY_SAVE_FAILED' }
+}
 function Add-UsageRecord([hashtable]$Record) {
     $allowed = @('timestamp','active_provider','active_model','router_virtual_model','task_mode','duration_seconds','success','error_code','estimated_route','remote_provider_used','local_provider_used'); $safe = @{}
     foreach ($key in $allowed) { if ($Record.ContainsKey($key)) { $safe[$key] = $Record[$key] } }; $safe.timestamp = (Get-Date).ToUniversalTime().ToString('o'); $directory = Split-Path -Parent $UsageLedger
@@ -170,7 +179,7 @@ function Get-UsageSummary {
 
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
-    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
+    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
 }
 
 $uiFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
@@ -207,14 +216,17 @@ $deepSeekActionsGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekActio
 $deepSeekButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekButtons.Dock = 'Fill'; $deepSeekButtons.AutoScroll = $true; $deepSeekButtons.Font = $buttonFont; $deepSeekActionsGroup.Controls.Add($deepSeekButtons)
 $deepSeekLogGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekLogGroup.Text = '最近本地操作日志（已脱敏）'; $deepSeekLogGroup.Dock = 'Fill'; $deepSeekLogGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekLogGroup,0,2)
 $deepSeekLog = New-Object System.Windows.Forms.TextBox; $deepSeekLog.Multiline = $true; $deepSeekLog.ReadOnly = $true; $deepSeekLog.ScrollBars = 'Vertical'; $deepSeekLog.Font = $uiFont; $deepSeekLog.Dock = 'Fill'; $deepSeekLogGroup.Controls.Add($deepSeekLog)
-$assistantLayout = New-Object System.Windows.Forms.TableLayoutPanel; $assistantLayout.Dock = 'Fill'; $assistantLayout.Padding = New-Object System.Windows.Forms.Padding(12); $assistantLayout.RowCount = 3; $assistantLayout.ColumnCount = 1; [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,52))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,48))); $assistantTab.Controls.Add($assistantLayout)
+$assistantLayout = New-Object System.Windows.Forms.TableLayoutPanel; $assistantLayout.Dock = 'Fill'; $assistantLayout.Padding = New-Object System.Windows.Forms.Padding(12); $assistantLayout.RowCount = 4; $assistantLayout.ColumnCount = 1; [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,145))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,45))); [void]$assistantLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,55))); $assistantTab.Controls.Add($assistantLayout)
 $codexModeGroup = New-Object System.Windows.Forms.GroupBox; $codexModeGroup.Text = 'Codex 连接模式'; $codexModeGroup.Dock = 'Fill'; $codexModeGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($codexModeGroup,0,0)
 $codexModeStatus = New-Object System.Windows.Forms.TextBox; $codexModeStatus.Multiline = $true; $codexModeStatus.ReadOnly = $true; $codexModeStatus.Dock = 'Fill'; $codexModeStatus.Font = $uiFont; $codexModeGroup.Controls.Add($codexModeStatus)
 $codexModeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $codexModeButtons.Dock = 'Bottom'; $codexModeButtons.Height = 42; $codexModeGroup.Controls.Add($codexModeButtons)
+$toolsPolicyGroup = New-Object System.Windows.Forms.GroupBox; $toolsPolicyGroup.Text = 'Codex 工具策略（默认严格拒绝）'; $toolsPolicyGroup.Dock = 'Fill'; $toolsPolicyGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($toolsPolicyGroup,0,1)
+$toolsPolicyStatus = New-Object System.Windows.Forms.TextBox; $toolsPolicyStatus.Multiline = $true; $toolsPolicyStatus.ReadOnly = $true; $toolsPolicyStatus.Dock = 'Fill'; $toolsPolicyStatus.Font = $uiFont; $toolsPolicyGroup.Controls.Add($toolsPolicyStatus)
+$toolsPolicyButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $toolsPolicyButtons.Dock = 'Bottom'; $toolsPolicyButtons.Height = 42; $toolsPolicyGroup.Controls.Add($toolsPolicyButtons)
 # Provider Allowlist 是内部调试字段；用户界面统一显示为“供应商白名单”。
-$allowlistGroup = New-Object System.Windows.Forms.GroupBox; $allowlistGroup.Text = '供应商白名单（Codex 请求触发调用；外部 API 默认禁用）'; $allowlistGroup.Dock = 'Fill'; $allowlistGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($allowlistGroup,0,1)
+$allowlistGroup = New-Object System.Windows.Forms.GroupBox; $allowlistGroup.Text = '供应商白名单（Codex 请求触发调用；外部 API 默认禁用）'; $allowlistGroup.Dock = 'Fill'; $allowlistGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($allowlistGroup,0,2)
 $allowlistStatus = New-Object System.Windows.Forms.TextBox; $allowlistStatus.Multiline = $true; $allowlistStatus.ReadOnly = $true; $allowlistStatus.ScrollBars = 'Vertical'; $allowlistStatus.Dock = 'Fill'; $allowlistStatus.Font = $uiFont; $allowlistGroup.Controls.Add($allowlistStatus)
-$recordGroup = New-Object System.Windows.Forms.GroupBox; $recordGroup.Text = '本地调用记录（仅元数据，默认不保存正文）'; $recordGroup.Dock = 'Fill'; $recordGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($recordGroup,0,2)
+$recordGroup = New-Object System.Windows.Forms.GroupBox; $recordGroup.Text = '本地调用记录（仅元数据，默认不保存正文）'; $recordGroup.Dock = 'Fill'; $recordGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($recordGroup,0,3)
 $recordStatus = New-Object System.Windows.Forms.TextBox; $recordStatus.Multiline = $true; $recordStatus.ReadOnly = $true; $recordStatus.ScrollBars = 'Vertical'; $recordStatus.Dock = 'Fill'; $recordStatus.Font = $uiFont; $recordGroup.Controls.Add($recordStatus)
 $usageText = New-Object System.Windows.Forms.TextBox; $usageText.Multiline = $true; $usageText.ReadOnly = $true; $usageText.Font = $uiFont; $usageText.Dock = 'Fill'; $usageTab.Controls.Add($usageText)
 $usageButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $usageButtons.Dock = 'Top'; $usageButtons.Height = 42; $usageTab.Controls.Add($usageButtons)
@@ -251,12 +263,22 @@ function Get-CodexModeState {
 }
 function Refresh-CodexModePanel {
     $state = Get-CodexModeState
-    $codexModeStatus.Text = ("当前模式：{0}`r`nProvider：{1}`r`n模型：{2}`r`n端点摘要：{3}`r`n备份目录：{4}`r`n环境变量修改：{5}`r`n无官方额度模式：{6}`r`n`r`nOFFICIAL_DIRECT：官方直连；CUSTOM_ROUTER：本地 Router；OFFICIAL_ASSISTED：官方主工作流 + 辅助分析；DEEPSEEK_HEAD：建议模式；CUSTOM_DEEPSEEK_HEAD：{7}；CUSTOM_LOCAL_LIGHT：本地模型；CUSTOM_EXTERNAL_API：仅显式 allowlist；CUSTOM_HYBRID_AGENT：已启用 Provider 的统一入口。`r`n控制台不接收主要任务输入；任务仍在 Codex 中提交。" -f $state.mode,$state.provider,$state.model,$state.endpoint,$state.backup_directory,$state.env_mutation,$state.no_quota_mode,$DeepSeekLocalApiAddress)
+    $tools = Get-ToolsPolicyRecord
+    $policy = [string]$tools.codex_tools_policy
+    $toolsPolicyStatus.Text = ("当前工具策略：{0}`r`n策略文件：{1}`r`n`r`n严格拒绝：后端不支持工具时直接报错，不会调用模型。`r`n文本兼容：移除工具定义，仅生成分析/计划/指令，不会改文件。`r`n手动计划：返回结构化计划模板，不调用模型。" -f $policy,$tools.path)
+    $codexModeStatus.Text = ("当前模式：{0}`r`nProvider：{1}`r`n模型：{2}`r`n端点摘要：{3}`r`n备份目录：{4}`r`n环境变量修改：{5}`r`n无官方额度模式：{6}`r`n工具策略：{7}`r`n`r`nOFFICIAL_DIRECT：官方直连；CUSTOM_ROUTER：本地 Router；OFFICIAL_ASSISTED：官方主工作流 + 辅助分析；DEEPSEEK_HEAD：建议模式；CUSTOM_DEEPSEEK_HEAD：{8}；CUSTOM_LOCAL_LIGHT：本地模型；CUSTOM_EXTERNAL_API：仅显式 allowlist；CUSTOM_HYBRID_AGENT：已启用 Provider 的统一入口；CUSTOM_DEEPSEEK_TEXT_ONLY / CUSTOM_LOCAL_TEXT_ONLY / CUSTOM_HYBRID_TEXT_ONLY：本地 Router 文本兼容模式。`r`n控制台不接收主要任务输入；任务仍在 Codex 中提交。" -f $state.mode,$state.provider,$state.model,$state.endpoint,$state.backup_directory,$state.env_mutation,$state.no_quota_mode,$policy,$DeepSeekLocalApiAddress)
 }
-function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','official-assisted','deepseek-head','local-agent-pending','restore')][string]$Action) {
+function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','custom-deepseek-head','custom-local-light','custom-external-api','custom-hybrid-agent','custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only','official-assisted','deepseek-head','local-agent-pending','restore')][string]$Action) {
     $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $CodexModeScript -Action $Action 2>&1 | Out-String
     Refresh-CodexModePanel; Refresh-Home
     [System.Windows.Forms.MessageBox]::Show((Redact-Text $output),'Codex 连接模式')
+}
+function Invoke-CodexTextOnlyMode([ValidateSet('custom-deepseek-text-only','custom-local-text-only','custom-hybrid-text-only')][string]$Action) {
+    $confirm = [System.Windows.Forms.MessageBox]::Show('文本兼容模式会切换到本地 Router，并移除 Codex 工具定义；模型只输出文本计划，不会执行工具、修改文件或部署。是否继续？','TEXT_ONLY 模式',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    Invoke-CodexModeAction $Action
+    [void](Set-ToolsPolicy 'text_only_strip')
+    Refresh-CodexModePanel
 }
 function Invoke-ModelsOnlyDiagnostic {
     $record = [ordered]@{ endpoint=$DeepSeekLocalApiAddress; mode=(Get-CodexModeState).mode; upstream_status='UNREACHABLE'; content_type='UNKNOWN'; stream_support='UNKNOWN'; normalized='UNKNOWN'; content_detected='UNKNOWN'; last_error=$null }
@@ -411,6 +433,7 @@ function Add-HomeButton([string]$Caption,[scriptblock]$Action,[ValidateSet('Rout
 function Add-DirectLocalButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$directLocalButtons.Controls.Add($button) }
 function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=36; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(5); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekButtons.Controls.Add($button) }
 function Add-CodexModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$codexModeButtons.Controls.Add($button) }
+function Add-ToolsPolicyButton([string]$Caption,[scriptblock]$Action,[int]$Width=180) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$toolsPolicyButtons.Controls.Add($button) }
 function Add-ProviderButton([string]$Caption,[scriptblock]$Action) { $button = New-Object System.Windows.Forms.Button; $button.Text = $Caption; $button.Width = 135; $button.Height = 36; $button.Font = $buttonFont; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); $target = if($Caption -in @('刷新模型','运行探测','选择模型','批量管理','解释选择','Groq 诊断')){$providerModelButtons}elseif($Caption -eq '转换为 Groq SDK'){$providerMigrationButtons}else{$providerButtons}; [void]$target.Controls.Add($button) }
 Add-HomeButton '启动 Router' { Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
 Add-HomeButton '停止 Router' { Stop-Router; Refresh-Home }
@@ -459,11 +482,17 @@ Add-CodexModeButton '混合助手' { Invoke-CodexModeAction 'custom-hybrid-agent
 Add-CodexModeButton '启用官方辅助模式' { Invoke-CodexModeAction 'official-assisted' } 170
 Add-CodexModeButton '启用 DeepSeek 首脑' { Invoke-CodexModeAction 'deepseek-head' } 170
 Add-CodexModeButton '本地 Agent（预留）' { Invoke-CodexModeAction 'local-agent-pending' } 170
+Add-CodexModeButton 'DeepSeek 文本兼容模式' { Invoke-CodexTextOnlyMode 'custom-deepseek-text-only' } 190
+Add-CodexModeButton '本地模型文本兼容' { Invoke-CodexTextOnlyMode 'custom-local-text-only' } 180
+Add-CodexModeButton '混合助手文本兼容' { Invoke-CodexTextOnlyMode 'custom-hybrid-text-only' } 180
 Add-CodexModeButton '恢复上一次配置' { Invoke-CodexModeAction 'restore' }
 Add-CodexModeButton '打开备份目录' { $path=(Get-CodexModeState).backup_directory;if(Test-Path -LiteralPath $path){Start-Process explorer.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('尚未创建备份目录。','Codex 连接模式')} }
 Add-CodexModeButton '仅检查模型列表' { Invoke-ModelsOnlyDiagnostic } 150
 Add-CodexModeButton '刷新供应商白名单' { $allowlistStatus.Text=(Redact-Text ((& py.exe -3 -m codex_ai_router.provider_allowlist 2>&1)|Out-String)) } 180
 Add-CodexModeButton '查看本地调用记录' { $path=Join-Path $env:USERPROFILE '.codex-ai-router\call-ledger.jsonl';if(Test-Path -LiteralPath $path){Start-Process notepad.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('尚无本地调用记录。','调用记录')} } 175
+Add-ToolsPolicyButton '严格拒绝工具（推荐）' { [void](Set-ToolsPolicy 'strict_reject'); Refresh-CodexModePanel }
+Add-ToolsPolicyButton '文本兼容：忽略工具' { $confirm=[System.Windows.Forms.MessageBox]::Show('文本兼容模式会移除工具定义，只生成分析和计划，不会执行工具或修改文件。是否启用？','TEXT_ONLY 兼容模式',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning); if($confirm -eq [System.Windows.Forms.DialogResult]::Yes){[void](Set-ToolsPolicy 'text_only_strip');Refresh-CodexModePanel} } 190
+Add-ToolsPolicyButton '手动计划（不调用模型）' { [void](Set-ToolsPolicy 'manual_plan'); Refresh-CodexModePanel } 190
 Add-ProviderButton '新增供应商' { [System.Windows.Forms.MessageBox]::Show('标准 Bearer API Key 供应商通常不需要自定义 Header。Groq（https://api.groq.com/openai/v1）使用官方 SDK，默认不配置自定义 Header。','新增供应商提示'); Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'configure-provider.ps1') + '"') }
 Add-ProviderButton '轮换 Header' { $id = Require-SelectedProvider; if($id){ Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'configure-provider-header.ps1') + '"'); Add-ProviderLog ('打开 Header 配置：' + $id) } }
 Add-ProviderButton '刷新列表' { Refresh-Providers }
@@ -501,6 +530,7 @@ if ($SelfTest) {
     Write-Output 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
+    Write-Output 'TOOLS_POLICY_UI_CONSTRUCTION=PASS'
     Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'
     exit 0
 }

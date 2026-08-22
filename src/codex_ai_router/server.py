@@ -21,10 +21,20 @@ from .providers.runtime_models import RuntimeModelState, text_candidates
 from .call_records import append as append_call_record
 from .provider_allowlist import model_catalog, providers as allowlisted_providers, resolve as resolve_allowlisted
 from .response_compat import ResponseCompatibilityError, diagnostic_headers, extract_visible_text, iter_normalized_sse, normalize_chat_completion
+from .tools_policy import MANUAL_PLAN, STRICT_REJECT, TEXT_ONLY_STRIP, TEXT_ONLY_SYSTEM_INSTRUCTION, load_policy, request_has_tools, strip_tool_fields, normalize_policy
 from .vision import VisionProxy
 
 
 VIRTUAL_MODELS = ("xiaoyu-auto", "xiaoyu-local", "xiaoyu-api-auto", "xiaoyu-api-local", "xiaoyu-lightboat")
+
+
+class ToolsPolicyError(RuntimeError):
+    """A safe, user-facing tool capability error with no request-body details."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(code)
+        self.code = code
+        self.message = message
 
 
 def provider_virtual_model(provider_id: str) -> str: return "xiaoyu-api-" + provider_id
@@ -66,12 +76,13 @@ def _has_image(value: object) -> bool:
 
 class RouterService:
     """Secret-free local Responses facade for a Codex custom provider."""
-    def __init__(self, network_mode: NetworkMode = NetworkMode.AUTO, local: object | None = None, fast_local_policy: FastLocalPolicy | None = None, runtime_models: RuntimeModelState | None = None):
+    def __init__(self, network_mode: NetworkMode = NetworkMode.AUTO, local: object | None = None, fast_local_policy: FastLocalPolicy | None = None, runtime_models: RuntimeModelState | None = None, tools_policy: str | None = None):
         self.network = NetworkState(network_mode)
         self.local = local or LocalBackend(lmstudio=LMStudioProvider())
         self.fast_local_policy = fast_local_policy or FastLocalPolicy()
         self.vision = VisionProxy()
         self.runtime_models = runtime_models or RuntimeModelState()
+        self.tools_policy = normalize_policy(tools_policy) if tools_policy is not None else load_policy()
 
     def models(self) -> list[dict]:
         names = [*VIRTUAL_MODELS, *(provider_virtual_model(provider_id) for provider_id, _ in self._provider_entries())]
@@ -330,7 +341,20 @@ class RouterService:
 
     @staticmethod
     def _tools_requested(request_payload: dict) -> bool:
-        return bool(request_payload.get("tools") or request_payload.get("tool_choice") or request_payload.get("function_call"))
+        return request_has_tools(request_payload)
+
+    def _prepare_tools_request(self, request_payload: dict, *, chat: bool = False) -> tuple[dict, bool]:
+        """Apply the explicit local tool policy without fabricating tool calls."""
+        if self.tools_policy == MANUAL_PLAN:
+            return request_payload, True
+        if not self._tools_requested(request_payload):
+            return request_payload, False
+        if self.tools_policy == STRICT_REJECT:
+            raise ToolsPolicyError(
+                "TOOLS_NOT_SUPPORTED_BY_BACKEND",
+                "当前后端不支持工具调用。请切换 OFFICIAL_DIRECT，或启用 TEXT_ONLY 兼容模式。",
+            )
+        return strip_tool_fields(request_payload, chat=chat), False
 
     @staticmethod
     def _manual_plan(prompt: str) -> str:
@@ -341,6 +365,7 @@ class RouterService:
             "Codex Instruction: Review this plan and execute only approved, reversible steps.",
             "Manual Commands: None generated automatically.",
             "Risk Check: No file, network, or provider mutation was performed.",
+            "Requires Official Codex Tools: YES",
             "Requires User Confirmation: YES",
         ])
 
@@ -369,7 +394,12 @@ class RouterService:
         target_model = model
         if model == "hybrid-agent":
             target_model = str((provider.get("models") or ["deepseek-web"])[0])
-        outbound: dict[str, object] = {"model": target_model, "messages": [{"role": "user", "content": prompt}], "stream": False}
+        outbound_messages: list[dict[str, str]] = []
+        instructions = request_payload.get("instructions")
+        if isinstance(instructions, str) and instructions.strip():
+            outbound_messages.append({"role": "system", "content": instructions})
+        outbound_messages.append({"role": "user", "content": prompt})
+        outbound: dict[str, object] = {"model": target_model, "messages": outbound_messages, "stream": False}
         headers = {"Content-Type": "application/json"}
         if provider.get("type") == "EXTERNAL_API_ALLOWED":
             key_env = provider.get("api_key_env")
@@ -404,8 +434,9 @@ class RouterService:
         model = request_payload.get("model")
         if not isinstance(model, str):
             raise RuntimeError("MODEL_REQUIRED")
-        if self._tools_requested(request_payload) and model != "manual-plan":
-            raise RuntimeError("TOOLS_NOT_SUPPORTED_BY_BACKEND")
+        request_payload, manual_plan = self._prepare_tools_request(request_payload, chat=True)
+        if manual_plan and model != "manual-plan":
+            return normalize_chat_completion(self._response(model, self._manual_plan(_input_text(request_payload.get("messages", [])))), model=model)
         if model in self._allowlisted_models():
             response = self._allowlisted_response({**request_payload, "input": request_payload.get("messages", request_payload.get("input"))}, model)
         else:
@@ -416,8 +447,11 @@ class RouterService:
         model = request_payload.get("model")
         if not isinstance(model, str):
             raise RuntimeError("MODEL_REQUIRED")
-        if self._tools_requested(request_payload) and model != "manual-plan":
-            raise RuntimeError("TOOLS_NOT_SUPPORTED_BY_BACKEND")
+        request_payload, manual_plan = self._prepare_tools_request(request_payload, chat=True)
+        if manual_plan and model != "manual-plan":
+            response = normalize_chat_completion(self._response(model, self._manual_plan(_input_text(request_payload.get("messages", [])))), model=model)
+            yield from iter_normalized_sse(["data: " + json.dumps(response, ensure_ascii=False)], model=model)
+            return
         if model not in self._allowlisted_models():
             response = self.chat_completion({**request_payload, "stream": False})
             yield from iter_normalized_sse(["data: " + json.dumps(response, ensure_ascii=False)], model=model)
@@ -451,8 +485,9 @@ class RouterService:
         virtual_model = request_payload.get("model")
         if not isinstance(virtual_model, str):
             raise RuntimeError("MODEL_REQUIRED")
-        if self._tools_requested(request_payload) and virtual_model != "manual-plan":
-            raise RuntimeError("TOOLS_NOT_SUPPORTED_BY_BACKEND")
+        request_payload, manual_plan = self._prepare_tools_request(request_payload)
+        if manual_plan and virtual_model != "manual-plan":
+            return self._response(virtual_model, self._manual_plan(_input_text(request_payload.get("input"))))
         if virtual_model in self._allowlisted_models():
             if _has_image(request_payload.get("input")):
                 raise RuntimeError("VISION_PROVIDER_UNAVAILABLE")
@@ -463,6 +498,9 @@ class RouterService:
             outcome = self.vision.route(True, [], self.network.mode is NetworkMode.OFFLINE)
             raise RuntimeError(outcome.status)
         prompt = _input_text(request_payload.get("input"))
+        instructions = request_payload.get("instructions")
+        if isinstance(instructions, str) and instructions.strip():
+            prompt = instructions + "\n\n" + prompt
         if not prompt:
             raise RuntimeError("INPUT_REQUIRED")
         if virtual_model == "xiaoyu-local":
@@ -495,8 +533,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _send_sse(self, body: dict) -> None:
-        raw = json.dumps({"type": "response.completed", "response": body}, ensure_ascii=False)
-        encoded = ("event: response.completed\ndata: " + raw + "\n\ndata: [DONE]\n\n").encode("utf-8")
+        response_id = body.get("id")
+        model = body.get("model")
+        created = body.get("created_at")
+        text = body.get("output_text") or ""
+        events = [
+            "event: response.created\ndata: " + json.dumps({"type": "response.created", "response": {"id": response_id, "object": "response", "model": model, "created_at": created}}, ensure_ascii=False) + "\n\n",
+            "event: response.in_progress\ndata: " + json.dumps({"type": "response.in_progress", "response": {"id": response_id, "status": "in_progress"}}, ensure_ascii=False) + "\n\n",
+        ]
+        if text:
+            events.append("event: response.output_text.delta\ndata: " + json.dumps({"type": "response.output_text.delta", "item_id": response_id, "delta": text}, ensure_ascii=False) + "\n\n")
+        events.append("event: response.completed\ndata: " + json.dumps({"type": "response.completed", "response": body}, ensure_ascii=False) + "\n\n")
+        events.append("data: [DONE]\n\n")
+        encoded = "".join(events).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -548,6 +597,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(200, response, diagnostic_headers(upstream_status=200, upstream_content_type="application/json", endpoint_mode="ROUTER_RESPONSES", normalized=True, content_detected=bool(response.get("output_text")), stream_mode="non_stream"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             self._send(400, {"error": {"code": "invalid_json"}})
+        except ToolsPolicyError as exc:
+            self._send(400, {"error": {"code": exc.code, "message": exc.message}})
         except RuntimeError as exc:
             code = str(exc)
             status = 504 if code.startswith("DOWNSTREAM_TIMEOUT:") else (503 if code in {"LOCAL_UNAVAILABLE", "API_PROVIDER_UNAVAILABLE", "DOWNSTREAM_UNAVAILABLE", "REMOTE_FALLBACK_DISABLED_OFFLINE", "REMOTE_UNAVAILABLE", "BRIDGE_OFFLINE", "BRIDGE_BUSY", "LOCAL_MODEL_OFFLINE", "NO_HEALTHY_PROVIDER", "UPSTREAM_UNAVAILABLE"} else 400)

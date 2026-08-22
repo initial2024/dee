@@ -13,6 +13,7 @@ Assert-True ($text -match 'USAGE_GUARD_VISIBLE=YES') 'desktop_control_usage_guar
 Assert-True ($text -match 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES') 'desktop_control_deepseek_local_bridge_panel_visible'
 Assert-True ($text -match 'CODEX_MODE_PANEL_VISIBLE=YES' -and $text -match 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES' -and $text -match 'LOCAL_RECORDS_PANEL_VISIBLE=YES') 'desktop_control_codex_mode_allowlist_and_records_panels_visible'
 Assert-True ($text -match 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES') 'desktop_control_response_compat_diagnostics_visible'
+Assert-True ($text -match 'TOOLS_POLICY_UI_VISIBLE=YES' -and $text -match 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES') 'desktop_control_tools_policy_visible_and_safe_default'
 Assert-True ($text -match 'DEEPSEEK_HEALTH_PROMPT_SENT=NO') 'desktop_control_deepseek_health_never_sends_prompt'
 Assert-True ($text -match 'CONTROL_PANEL_EXCEPTION_GUARD=YES' -and $text -match 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES') 'desktop_control_has_safe_exception_guard'
 Assert-True ($text -match 'SECRET_VALUES_VISIBLE=NO') 'desktop_control_hides_secret_values'
@@ -60,6 +61,7 @@ Assert-True (($ui -join "`n") -match 'MODEL_PICKER_UI_CONSTRUCTION=(PASS|SKIPPED
 Assert-True (($ui -join "`n") -match 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS') 'direct_local_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS') 'local_repair_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS') 'deepseek_local_bridge_ui_selftest_reported'
+Assert-True (($ui -join "`n") -match 'TOOLS_POLICY_UI_CONSTRUCTION=PASS') 'tools_policy_ui_selftest_reported'
 Assert-True ($source -match '直接本地模型（推荐）' -and $source -match '扫描 LM Studio 模型' -and $source -match '启动本地后端' -and $source -match '测试本地推理') 'direct_local_controls_present'
 Assert-True ($source -match '修复本地后端' -and $source -match "local @Arguments") 'direct_local_repair_control_present'
 Assert-True ($source -match 'llama.cpp direct' -and $source -match 'LM Studio：仅作可选 fallback') 'direct_local_is_primary_lmstudio_is_fallback'
@@ -69,6 +71,9 @@ Assert-True ($source -match 'DeepSeek 本地桥接' -and $source -match 'LOCAL_D
 Assert-True ($source -match 'OFFICIAL_DIRECT' -and $source -match 'CUSTOM_ROUTER' -and $source -match 'OFFICIAL_ASSISTED') 'codex_legacy_modes_documented'
 Assert-True ($source -match 'CUSTOM_DEEPSEEK_HEAD' -and $source -match 'CUSTOM_HYBRID_AGENT') 'deepseek_head_and_hybrid_modes_present'
 Assert-True ($source -match 'CUSTOM_DEEPSEEK_HEAD' -and $source -match 'CUSTOM_LOCAL_LIGHT' -and $source -match 'CUSTOM_EXTERNAL_API' -and $source -match 'CUSTOM_HYBRID_AGENT') 'a4_codex_modes_present'
+Assert-True ($source -match '严格拒绝工具' -and $source -match '文本兼容：忽略工具' -and $source -match '手动计划（不调用模型）') 'text_only_tools_policy_buttons_present'
+Assert-True ($source -match 'tools-policy' -and $source -match 'TEXT_ONLY 兼容模式' -and $source -match '不会执行工具或修改文件') 'text_only_tools_policy_is_explicit_and_chinese'
+Assert-True ($source -match 'custom-deepseek-text-only' -and $source -match 'custom-local-text-only' -and $source -match 'custom-hybrid-text-only') 'text_only_mode_switch_actions_present'
 Assert-True ($source -match 'Provider Allowlist' -and $source -match '外部 API 默认禁用' -and $source -match 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY') 'allowlist_panel_and_codex_task_boundary_present'
 Assert-True ($source -notmatch '\$lunaTask' -and $source -notmatch 'DeepSeek 首脑 / Luna Agent') 'xiaoyu_console_has_no_primary_task_input'
 Assert-True ($source -match 'Invoke-ModelsOnlyDiagnostic' -and $source -notmatch 'Invoke-ModelsOnlyDiagnostic.*chat/completions') 'models_diagnostic_has_no_chat_prompt'
@@ -103,6 +108,12 @@ try {
   Assert-True ($externalCustom.mode -eq 'CUSTOM_EXTERNAL_API' -and $externalCustom.model -eq 'external-fast' -and $externalCustom.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_external_api_uses_local_router'
   $hybridCustom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-hybrid-agent -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
   Assert-True ($hybridCustom.mode -eq 'CUSTOM_HYBRID_AGENT' -and $hybridCustom.model -eq 'hybrid-agent' -and $hybridCustom.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_hybrid_uses_local_router'
+  $deepseekText = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-deepseek-text-only -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($deepseekText.mode -eq 'CUSTOM_DEEPSEEK_TEXT_ONLY' -and $deepseekText.model -eq 'deepseek-web' -and $deepseekText.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_deepseek_text_only_uses_router'
+  $localText = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-local-text-only -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($localText.mode -eq 'CUSTOM_LOCAL_TEXT_ONLY' -and $localText.model -eq 'local-light' -and $localText.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_local_text_only_uses_router'
+  $hybridText = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action custom-hybrid-text-only -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
+  Assert-True ($hybridText.mode -eq 'CUSTOM_HYBRID_TEXT_ONLY' -and $hybridText.model -eq 'hybrid-agent' -and $hybridText.endpoint -eq 'LOCAL_ROUTER_18789') 'custom_hybrid_text_only_uses_router'
   $assisted = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action official-assisted -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
   Assert-True ($assisted.mode -eq 'OFFICIAL_ASSISTED' -and $assisted.env_mutation -eq 'NONE') 'official_assisted_preserves_endpoint_environment'
   $head = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $modeManager -Action deepseek-head -ConfigPath $modeConfig -StateRoot (Join-Path $modeRoot 'state') 2>&1 | Out-String | ConvertFrom-Json
@@ -122,7 +133,7 @@ try {
   Assert-True ((Get-Content -LiteralPath $shortcutScript -Raw -Encoding UTF8) -match 'FontScale 1\.2') 'shortcut_uses_default_font_scale'
 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force } }
 
-Write-Output 'POWERSHELL_TEST_TOTAL=76'
+Write-Output 'POWERSHELL_TEST_TOTAL=84'
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }
