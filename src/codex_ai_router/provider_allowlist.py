@@ -96,7 +96,7 @@ def providers() -> list[dict[str, Any]]:
             continue
         key_env = str(entry.get("api_key_env", ""))
         key_present = bool(key_env and os.getenv(key_env))
-        records.append({"id": provider_id, "type": "EXTERNAL_API_ALLOWED", "endpoint": str(entry.get("base_url", "")), "models": [str(value) for value in entry.get("models", []) if isinstance(value, str)], "enabled": enabled, "status": "ENABLED" if enabled and key_present else ("AUTH_MISSING" if enabled else "DISABLED"), "api_key_env": key_env, "api_key_env_configured": bool(key_env), "api_key_present": key_present})
+        records.append({"id": provider_id, "type": "EXTERNAL_API_ALLOWED", "endpoint": str(entry.get("base_url", "")), "wire_api": str(entry.get("wire_api") or "chat_completions"), "models": [str(value) for value in entry.get("models", []) if isinstance(value, str)], "enabled": enabled, "status": "ENABLED" if enabled and key_present else ("AUTH_MISSING" if enabled else "DISABLED"), "api_key_env": key_env, "api_key_env_configured": bool(key_env), "api_key_present": key_present})
     records.append({"id": "manual-plan", "type": "MANUAL_PLAN", "endpoint": None, "models": ["manual-plan"], "enabled": True, "status": "ENABLED"})
     return records
 

@@ -23,6 +23,7 @@ from .delegation import explain_delegation
 from .groq_diagnostics import diagnose as diagnose_groq, live_smoke as live_smoke_groq
 from .tools_policy import VALID_POLICIES, load_policy, policy_path, save_policy
 from .deepseek_modes import load_probe_state, probe_deepseek_modes, select_deepseek_mode
+from .local_agent import BRAIN_PROVIDERS, LocalAgent, LocalAgentError
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -90,6 +91,15 @@ def main() -> None:
     deepseek_sub = deepseek.add_subparsers(dest="deepseek_action", required=True)
     deepseek_sub.add_parser("mode-probe")
     explain_mode = deepseek_sub.add_parser("explain-mode"); explain_mode.add_argument("task"); explain_mode.add_argument("--preference", choices=("auto", "normal", "search", "thinking", "expert"), default="auto"); explain_mode.add_argument("--model-alias"); explain_mode.add_argument("--codex-mode", default="CUSTOM_DEEPSEEK_TEXT_ONLY"); explain_mode.add_argument("--tools-policy", default="strict_reject"); explain_mode.add_argument("--no-search", action="store_true"); explain_mode.add_argument("--no-thinking", action="store_true"); explain_mode.add_argument("--no-expert", action="store_true")
+    agent = sub.add_parser("agent", help="confirmation-gated Xiaoyu Local Agent")
+    agent_sub = agent.add_subparsers(dest="agent_action", required=True)
+    agent_plan = agent_sub.add_parser("plan"); agent_plan.add_argument("--task", required=True); agent_plan.add_argument("--brain-provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_plan.add_argument("--invoke-brain", action="store_true", help="explicitly invoke the selected advisory brain; never enabled by default")
+    agent_readonly = agent_sub.add_parser("readonly"); agent_readonly.add_argument("--task", default=""); agent_readonly.add_argument("--plan")
+    agent_draft = agent_sub.add_parser("draft-patch"); agent_draft.add_argument("--plan", required=True); agent_draft.add_argument("--confirm", action="store_true"); agent_draft.add_argument("--patch-text", default="")
+    agent_apply = agent_sub.add_parser("apply"); agent_apply.add_argument("--plan", required=True); agent_apply.add_argument("--patch-file", required=True); agent_apply.add_argument("--confirm", action="store_true")
+    agent_test = agent_sub.add_parser("test"); agent_test.add_argument("--plan", required=True); agent_test.add_argument("--test", choices=tuple(LocalAgent.SAFE_TESTS), default="python-unittest"); agent_test.add_argument("--confirm", action="store_true")
+    agent_commit = agent_sub.add_parser("commit"); agent_commit.add_argument("--plan", required=True); agent_commit.add_argument("--file", action="append", default=[]); agent_commit.add_argument("--message", required=True); agent_commit.add_argument("--confirm", action="store_true")
+    agent_stop = agent_sub.add_parser("stop"); agent_stop.add_argument("--plan")
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -123,6 +133,25 @@ def main() -> None:
         else:
             state = load_probe_state()
             emit(select_deepseek_mode(args.task, codex_mode=args.codex_mode, tools_policy=args.tools_policy, user_preference=args.preference, explicit_model_alias=args.model_alias, availability=state.get("modes"), search_allowed=not args.no_search, thinking_allowed=not args.no_thinking, expert_allowed=not args.no_expert))
+    elif args.command == "agent":
+        agent_runner = LocalAgent(Path.cwd())
+        try:
+            if args.agent_action == "plan":
+                emit(agent_runner.plan(args.task, brain_provider=args.brain_provider, risk=args.risk, invoke_brain_now=args.invoke_brain))
+            elif args.agent_action == "readonly":
+                emit(agent_runner.readonly(args.task, args.plan))
+            elif args.agent_action == "draft-patch":
+                emit(agent_runner.draft_patch(args.plan, confirm=args.confirm, patch_text=args.patch_text))
+            elif args.agent_action == "apply":
+                emit(agent_runner.apply(args.plan, args.patch_file, confirm=args.confirm))
+            elif args.agent_action == "test":
+                emit(agent_runner.test(args.plan, test_name=args.test, confirm=args.confirm))
+            elif args.agent_action == "commit":
+                emit(agent_runner.commit(args.plan, args.file, args.message, confirm=args.confirm))
+            else:
+                emit(agent_runner.stop(args.plan))
+        except LocalAgentError as exc:
+            emit({"status": "DENIED", "error_code": exc.code, "codex_agent_used": "NO", "auto_file_modify": "NO", "auto_command_execute": "NO", "auto_commit": "NO", "auto_push": "NO", "auto_deploy": "NO", "secrets_logged": "NO"})
     elif args.command == "doctor": emit(router.doctor())
     elif args.command == "status": emit(router.status())
     elif args.command == "models":

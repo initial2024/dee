@@ -31,6 +31,8 @@ $script:DeepSeekModePreference = 'auto'
 $script:DeepSeekLastSelection = $null
 $script:LastModeDebugJson = ''
 $script:UiDebugEntries = [System.Collections.Generic.List[string]]::new()
+$script:LocalAgentPlanId = ''
+$script:LocalAgentPlanJson = $null
 
 function Read-JsonFile([string]$Path, [object]$Fallback) {
     try { if (Test-Path -LiteralPath $Path) { return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json) } } catch {}
@@ -286,6 +288,78 @@ function Invoke-RouterCli([string[]]$Arguments) {
     }
     return (Redact-Text (& $spec.path @Arguments 2>&1 | Out-String))
 }
+function Add-LocalAgentLog([string]$Message) {
+    if ($localAgentLog) { $localAgentLog.AppendText(('[{0}] {1}' -f (Get-Date).ToString('HH:mm:ss'), (Redact-Text $Message)) + "`r`n") }
+}
+function Refresh-LocalAgentPanel {
+    $plan = $script:LocalAgentPlanJson
+    if (-not $plan) {
+        $localAgentStatus.Text = "当前 Agent 模式：PLAN_ONLY / READ_ONLY`r`n当前大脑：local-light（仅计划模板，尚未调用 Provider）`r`n风险等级：UNKNOWN`r`n待执行计划：无`r`n`r`n默认不会修改文件、运行测试或提交 commit。所有写入、测试、commit 都需要显式确认。"
+        return
+    }
+    $steps = @($plan.steps | ForEach-Object { '{0}：{1}（确认：{2}）' -f $_.type,$_.description,$_.requires_confirmation }) -join "`r`n"
+    $brainResult = if ($plan.brain_output) { Redact-Text ([string]$plan.brain_output).Substring(0, [Math]::Min(500, ([string]$plan.brain_output).Length)) } elseif ($plan.brain_error_code) { '大脑调用错误：' + $plan.brain_error_code } else { '尚未显式调用大脑；默认仅生成计划模板。' }
+    $localAgentStatus.Text = ("当前 Agent 模式：{0}`r`n计划 ID：{1}`r`n大脑 Provider：{2}`r`n大脑状态：{3}`r`n风险等级：{4}`r`n需要文件：{5}`r`n需要写入：{6}`r`n需要测试：{7}`r`n需要 commit：{8}`r`n拒绝原因：{9}`r`n大脑结果摘要：{10}`r`n`r`n待执行步骤：`r`n{11}`r`n`r`n自动修改：NO；自动执行命令：NO；自动 commit：NO；自动 push：NO；自动部署：NO" -f $(if($plan.mode){$plan.mode}else{'PLAN_ONLY'}),$plan.plan_id,$plan.brain_provider,$plan.brain_status,$plan.risk_level,$plan.requires_files,$plan.requires_write,$plan.requires_tests,$plan.requires_commit,$(if($plan.deny_reason){$plan.deny_reason}else{'NONE'}),$brainResult,$steps)
+}
+function Get-LocalAgentTask([string]$Title = '输入任务') {
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    return [Microsoft.VisualBasic.Interaction]::InputBox('仅用于生成计划；不会自动执行任务：','小羽 Local Agent - ' + $Title,'只读检查当前项目')
+}
+function Require-LocalAgentPlan {
+    if ([string]::IsNullOrWhiteSpace($script:LocalAgentPlanId)) { [System.Windows.Forms.MessageBox]::Show('请先生成一个计划。','小羽 Local Agent'); return $false }
+    return $true
+}
+function Invoke-LocalAgentPlan([bool]$InvokeBrain = $false) {
+    $task = Get-LocalAgentTask '生成计划'; if ([string]::IsNullOrWhiteSpace($task)) { return }
+    if ($InvokeBrain -and [System.Windows.Forms.MessageBox]::Show('将把任务发送给已选择的本地大脑 Provider，仅生成分析，不会修改文件、运行命令或提交。继续？','调用大脑确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $arguments = @('agent','plan','--task',$task,'--brain-provider','local-light'); if ($InvokeBrain) { $arguments += '--invoke-brain' }
+    $raw = Invoke-RouterCli $arguments
+    try { $script:LocalAgentPlanJson = $raw | ConvertFrom-Json; $script:LocalAgentPlanId = [string]$script:LocalAgentPlanJson.plan_id; Add-LocalAgentLog ('plan=' + $script:LocalAgentPlanId + '; status=' + $script:LocalAgentPlanJson.status); Refresh-LocalAgentPanel; [System.Windows.Forms.MessageBox]::Show(('计划已生成。`r`n计划 ID：' + $script:LocalAgentPlanId + '`r`n不会自动修改文件、运行测试或提交。'),'小羽 Local Agent') } catch { throw 'LOCAL_AGENT_PLAN_RESPONSE_INVALID' }
+}
+function Invoke-LocalAgentReadonly {
+    $arguments = @('agent','readonly'); if ($script:LocalAgentPlanId) { $arguments += @('--plan',$script:LocalAgentPlanId) }
+    $raw = Invoke-RouterCli $arguments; Add-LocalAgentLog ('readonly=' + (Redact-Text $raw)); [System.Windows.Forms.MessageBox]::Show($raw,'小羽 Local Agent 只读检查')
+}
+function Invoke-LocalAgentDraft {
+    if (-not (Require-LocalAgentPlan)) { return }
+    $confirm = [System.Windows.Forms.MessageBox]::Show('只会生成候选补丁文件，不会应用到项目。继续？','补丁草案确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $raw = Invoke-RouterCli @('agent','draft-patch','--plan',$script:LocalAgentPlanId,'--confirm'); Add-LocalAgentLog ('draft-patch=' + $script:LocalAgentPlanId); [System.Windows.Forms.MessageBox]::Show($raw,'补丁草案')
+}
+function Invoke-LocalAgentApply {
+    if (-not (Require-LocalAgentPlan)) { return }
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    $patch = [Microsoft.VisualBasic.Interaction]::InputBox('输入 .patch 文件路径（必须位于当前项目或 Local Agent 草案目录）：','应用补丁','')
+    if ([string]::IsNullOrWhiteSpace($patch)) { return }
+    $first = [System.Windows.Forms.MessageBox]::Show('应用前会先执行 git apply --check，并显示结果。确认应用此补丁？','第一次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($first -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $second = [System.Windows.Forms.MessageBox]::Show('再次确认：补丁可能修改工作区文件，应用后仍需人工检查 diff。继续？','第二次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($second -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $raw = Invoke-RouterCli @('agent','apply','--plan',$script:LocalAgentPlanId,'--patch-file',$patch,'--confirm'); Add-LocalAgentLog ('apply=' + $script:LocalAgentPlanId); [System.Windows.Forms.MessageBox]::Show($raw,'应用补丁结果')
+}
+function Invoke-LocalAgentTest {
+    if (-not (Require-LocalAgentPlan)) { return }
+    $test = [Microsoft.VisualBasic.Interaction]::InputBox('输入白名单测试名：python-unittest / pytest / npm-test / npm-lint / npm-build / git-diff-check','运行测试','python-unittest')
+    if ([string]::IsNullOrWhiteSpace($test)) { return }
+    $first = [System.Windows.Forms.MessageBox]::Show(('将运行白名单测试：' + $test + '。继续？'),'第一次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($first -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $second = [System.Windows.Forms.MessageBox]::Show('再次确认运行测试？测试输出只保留脱敏摘要。','第二次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($second -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $raw = Invoke-RouterCli @('agent','test','--plan',$script:LocalAgentPlanId,'--test',$test,'--confirm'); Add-LocalAgentLog ('test=' + $test); [System.Windows.Forms.MessageBox]::Show($raw,'测试结果')
+}
+function Invoke-LocalAgentCommit {
+    if (-not (Require-LocalAgentPlan)) { return }
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    $files = [Microsoft.VisualBasic.Interaction]::InputBox('输入要提交的相对文件路径（逗号分隔）：','本地 commit 文件','')
+    $message = [Microsoft.VisualBasic.Interaction]::InputBox('输入本地 commit message（不会 push）：','本地 commit message','local agent confirmed change')
+    if ([string]::IsNullOrWhiteSpace($files) -or [string]::IsNullOrWhiteSpace($message)) { return }
+    $first = [System.Windows.Forms.MessageBox]::Show(('仅提交以下文件：' + $files + '`r`n不会 push。继续？'),'第一次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($first -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $second = [System.Windows.Forms.MessageBox]::Show('再次确认创建本地 commit？','第二次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+    if ($second -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $arguments = @('agent','commit','--plan',$script:LocalAgentPlanId,'--message',$message,'--confirm'); foreach($file in ($files -split ',' | ForEach-Object {$_.Trim()} | Where-Object {$_})){ $arguments += @('--file',$file) }
+    $raw = Invoke-RouterCli $arguments; Add-LocalAgentLog ('commit=' + $script:LocalAgentPlanId + '; files=' + (($files -split ',').Count)); [System.Windows.Forms.MessageBox]::Show($raw,'commit 结果')
+}
 function Get-ToolsPolicyRecord {
     try { return (Invoke-RouterCli @('tools-policy','show') | ConvertFrom-Json) }
     catch { return [pscustomobject]@{ codex_tools_policy = 'strict_reject'; default = 'strict_reject'; path = (Join-Path $env:USERPROFILE '.codex-ai-router\tools-policy.json') } }
@@ -318,14 +392,14 @@ if ($RouterAction) {
 
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
-    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
+    Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; exit 0
 }
 
 $uiFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
 $buttonFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
 $form = New-Object System.Windows.Forms.Form; $form.Text = '小羽 Router 控制台'; $form.Size = New-Object System.Drawing.Size(1180,780); $form.MinimumSize = New-Object System.Drawing.Size(920,620); $form.StartPosition = 'CenterScreen'; $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi; $form.Font = $uiFont
 $tabs = New-Object System.Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $form.Controls.Add($tabs)
-$homeTab = New-Object System.Windows.Forms.TabPage('首页'); $providersTab = New-Object System.Windows.Forms.TabPage('供应商'); $deepSeekTab = New-Object System.Windows.Forms.TabPage('DeepSeek 本地桥接'); $assistantTab = New-Object System.Windows.Forms.TabPage('Codex 模式与供应商白名单'); $usageTab = New-Object System.Windows.Forms.TabPage('用量保护'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('诊断'); [void]$tabs.TabPages.AddRange(@($homeTab,$providersTab,$deepSeekTab,$assistantTab,$usageTab,$diagnosticsTab))
+$homeTab = New-Object System.Windows.Forms.TabPage('首页'); $providersTab = New-Object System.Windows.Forms.TabPage('供应商'); $deepSeekTab = New-Object System.Windows.Forms.TabPage('DeepSeek 本地桥接'); $assistantTab = New-Object System.Windows.Forms.TabPage('Codex 模式与供应商白名单'); $localAgentTab = New-Object System.Windows.Forms.TabPage('小羽本地 Agent'); $usageTab = New-Object System.Windows.Forms.TabPage('用量保护'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('诊断'); [void]$tabs.TabPages.AddRange(@($homeTab,$providersTab,$deepSeekTab,$assistantTab,$localAgentTab,$usageTab,$diagnosticsTab))
 $homeLayout = New-Object System.Windows.Forms.TableLayoutPanel; $homeLayout.Dock = 'Fill'; $homeLayout.Padding = New-Object System.Windows.Forms.Padding(12); $homeLayout.RowCount = 4; $homeLayout.ColumnCount = 1; [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); $homeTab.Controls.Add($homeLayout)
 $routerGroup = New-Object System.Windows.Forms.GroupBox; $routerGroup.Text = 'Router 服务'; $routerGroup.Dock = 'Fill'; $routerGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($routerGroup,0,0)
 $homeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeButtons.Dock = 'Fill'; $homeButtons.AutoSize = $true; $routerGroup.Controls.Add($homeButtons)
@@ -370,6 +444,13 @@ $allowlistGroup = New-Object System.Windows.Forms.GroupBox; $allowlistGroup.Text
 $allowlistStatus = New-Object System.Windows.Forms.TextBox; $allowlistStatus.Multiline = $true; $allowlistStatus.ReadOnly = $true; $allowlistStatus.ScrollBars = 'Vertical'; $allowlistStatus.Dock = 'Fill'; $allowlistStatus.Font = $uiFont; $allowlistGroup.Controls.Add($allowlistStatus)
 $recordGroup = New-Object System.Windows.Forms.GroupBox; $recordGroup.Text = '本地调用记录（仅元数据，默认不保存正文）'; $recordGroup.Dock = 'Fill'; $recordGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($recordGroup,0,3)
 $recordStatus = New-Object System.Windows.Forms.TextBox; $recordStatus.Multiline = $true; $recordStatus.ReadOnly = $true; $recordStatus.ScrollBars = 'Vertical'; $recordStatus.Dock = 'Fill'; $recordStatus.Font = $uiFont; $recordGroup.Controls.Add($recordStatus)
+$localAgentLayout = New-Object System.Windows.Forms.TableLayoutPanel; $localAgentLayout.Dock = 'Fill'; $localAgentLayout.Padding = New-Object System.Windows.Forms.Padding(12); $localAgentLayout.RowCount = 3; $localAgentLayout.ColumnCount = 1; [void]$localAgentLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,62))); [void]$localAgentLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,110))); [void]$localAgentLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,38))); $localAgentTab.Controls.Add($localAgentLayout)
+$localAgentStatusGroup = New-Object System.Windows.Forms.GroupBox; $localAgentStatusGroup.Text = '小羽 Local Agent 状态（默认只读；不调用 Codex 官方 Agent）'; $localAgentStatusGroup.Dock = 'Fill'; $localAgentStatusGroup.Padding = New-Object System.Windows.Forms.Padding(8); $localAgentLayout.Controls.Add($localAgentStatusGroup,0,0)
+$localAgentStatus = New-Object System.Windows.Forms.TextBox; $localAgentStatus.Multiline = $true; $localAgentStatus.ReadOnly = $true; $localAgentStatus.ScrollBars = 'Vertical'; $localAgentStatus.Dock = 'Fill'; $localAgentStatus.Font = $uiFont; $localAgentStatusGroup.Controls.Add($localAgentStatus)
+$localAgentActionGroup = New-Object System.Windows.Forms.GroupBox; $localAgentActionGroup.Text = '受确认门控的操作'; $localAgentActionGroup.Dock = 'Fill'; $localAgentActionGroup.Padding = New-Object System.Windows.Forms.Padding(8); $localAgentLayout.Controls.Add($localAgentActionGroup,0,1)
+$localAgentButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $localAgentButtons.Dock = 'Fill'; $localAgentButtons.AutoScroll = $true; $localAgentButtons.Font = $buttonFont; $localAgentActionGroup.Controls.Add($localAgentButtons)
+$localAgentLogGroup = New-Object System.Windows.Forms.GroupBox; $localAgentLogGroup.Text = 'Local Agent 记录（仅元数据，默认不保存正文）'; $localAgentLogGroup.Dock = 'Fill'; $localAgentLogGroup.Padding = New-Object System.Windows.Forms.Padding(8); $localAgentLayout.Controls.Add($localAgentLogGroup,0,2)
+$localAgentLog = New-Object System.Windows.Forms.TextBox; $localAgentLog.Multiline = $true; $localAgentLog.ReadOnly = $true; $localAgentLog.ScrollBars = 'Vertical'; $localAgentLog.Dock = 'Fill'; $localAgentLog.Font = $uiFont; $localAgentLogGroup.Controls.Add($localAgentLog)
 $usageText = New-Object System.Windows.Forms.TextBox; $usageText.Multiline = $true; $usageText.ReadOnly = $true; $usageText.Font = $uiFont; $usageText.Dock = 'Fill'; $usageTab.Controls.Add($usageText)
 $usageButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $usageButtons.Dock = 'Top'; $usageButtons.Height = 42; $usageTab.Controls.Add($usageButtons)
 $diagnosticsLayout = New-Object System.Windows.Forms.TableLayoutPanel; $diagnosticsLayout.Dock = 'Fill'; $diagnosticsLayout.RowCount = 2; $diagnosticsLayout.ColumnCount = 1; [void]$diagnosticsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,42))); [void]$diagnosticsLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $diagnosticsTab.Controls.Add($diagnosticsLayout)
@@ -659,6 +740,7 @@ function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=15
 function Add-DeepSeekModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=30; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(3); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekModeButtons.Controls.Add($button) }
 function Add-CodexModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$codexModeButtons.Controls.Add($button) }
 function Add-ToolsPolicyButton([string]$Caption,[scriptblock]$Action,[int]$Width=180) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$toolsPolicyButtons.Controls.Add($button) }
+function Add-LocalAgentButton([string]$Caption,[scriptblock]$Action,[int]$Width=155) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=34; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$localAgentButtons.Controls.Add($button) }
 function Add-ProviderButton([string]$Caption,[scriptblock]$Action) { $button = New-Object System.Windows.Forms.Button; $button.Text = $Caption; $button.Width = 135; $button.Height = 36; $button.Font = $buttonFont; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); $target = if($Caption -in @('刷新模型','运行探测','选择模型','批量管理','解释选择','Groq 诊断')){$providerModelButtons}elseif($Caption -eq '转换为 Groq SDK'){$providerMigrationButtons}else{$providerButtons}; [void]$target.Controls.Add($button) }
 Add-HomeButton '启动 Router' { Start-Router; Start-Sleep -Milliseconds 400; Refresh-Home }
 Add-HomeButton '停止 Router' { Stop-Router; Refresh-Home }
@@ -726,6 +808,16 @@ Add-CodexModeButton '查看本地调用记录' { $path=Join-Path $env:USERPROFIL
 Add-ToolsPolicyButton '严格拒绝工具（推荐）' { [void](Set-ToolsPolicy 'strict_reject'); Refresh-CodexModePanel }
 Add-ToolsPolicyButton '文本兼容：忽略工具' { $confirm=[System.Windows.Forms.MessageBox]::Show('文本兼容模式会移除工具定义，只生成分析和计划，不会执行工具或修改文件。是否启用？','TEXT_ONLY 兼容模式',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning); if($confirm -eq [System.Windows.Forms.DialogResult]::Yes){[void](Set-ToolsPolicy 'text_only_strip');Refresh-CodexModePanel} } 190
 Add-ToolsPolicyButton '手动计划（不调用模型）' { [void](Set-ToolsPolicy 'manual_plan'); Refresh-CodexModePanel } 190
+Add-LocalAgentButton '生成计划（PLAN_ONLY）' { Invoke-LocalAgentPlan } 175
+Add-LocalAgentButton '调用大脑生成计划（需确认）' { Invoke-LocalAgentPlan $true } 205
+Add-LocalAgentButton '只读检查' { Invoke-LocalAgentReadonly } 130
+Add-LocalAgentButton '生成补丁草案（需确认）' { Invoke-LocalAgentDraft } 190
+Add-LocalAgentButton '应用补丁（双确认）' { Invoke-LocalAgentApply } 170
+Add-LocalAgentButton '运行测试（双确认）' { Invoke-LocalAgentTest } 170
+Add-LocalAgentButton '提交 commit（双确认）' { Invoke-LocalAgentCommit } 180
+Add-LocalAgentButton '复制给 Codex 的指令' { if($script:LocalAgentPlanJson -and $script:LocalAgentPlanJson.codex_instruction){Set-Clipboard -Value (Redact-Text ([string]$script:LocalAgentPlanJson.codex_instruction));[System.Windows.Forms.MessageBox]::Show('已复制脱敏 Codex 指令。','小羽 Local Agent')}else{[System.Windows.Forms.MessageBox]::Show('请先生成计划。','小羽 Local Agent')} } 190
+Add-LocalAgentButton '停止 Agent' { $arguments=@('agent','stop');if($script:LocalAgentPlanId){$arguments += @('--plan',$script:LocalAgentPlanId)};$raw=Invoke-RouterCli $arguments;Add-LocalAgentLog ('stop=' + $script:LocalAgentPlanId);[System.Windows.Forms.MessageBox]::Show($raw,'停止 Agent') } 130
+Add-LocalAgentButton '打开 Agent 记录目录' { $path=Join-Path $env:USERPROFILE '.codex-ai-router\local-agent';if(Test-Path -LiteralPath $path){Start-Process explorer.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('尚无 Local Agent 记录。','Local Agent')} } 190
 Add-ProviderButton '新增供应商' { [System.Windows.Forms.MessageBox]::Show('标准 Bearer API Key 供应商通常不需要自定义 Header。Groq（https://api.groq.com/openai/v1）使用官方 SDK，默认不配置自定义 Header。','新增供应商提示'); Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'configure-provider.ps1') + '"') }
 Add-ProviderButton '轮换 Header' { $id = Require-SelectedProvider; if($id){ Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'configure-provider-header.ps1') + '"'); Add-ProviderLog ('打开 Header 配置：' + $id) } }
 Add-ProviderButton '刷新列表' { Refresh-Providers }
@@ -764,8 +856,10 @@ if ($SelfTest) {
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
     Write-Output 'TOOLS_POLICY_UI_CONSTRUCTION=PASS'
+    Write-Output 'LOCAL_AGENT_UI_CONSTRUCTION=PASS'
+    Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=PASS'
     Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'
     exit 0
 }
-$form.Add_Shown({ Refresh-Home; Refresh-DeepSeekPanel; Refresh-CodexModePanel })
+$form.Add_Shown({ Refresh-Home; Refresh-DeepSeekPanel; Refresh-CodexModePanel; Refresh-LocalAgentPanel })
 [void]$form.ShowDialog()
