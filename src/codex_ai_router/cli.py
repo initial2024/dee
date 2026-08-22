@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 from .router import Router
 from .task import Mode
@@ -24,9 +26,41 @@ from .groq_diagnostics import diagnose as diagnose_groq, live_smoke as live_smok
 from .tools_policy import VALID_POLICIES, load_policy, policy_path, save_policy
 from .deepseek_modes import load_probe_state, probe_deepseek_modes, select_deepseek_mode
 from .local_agent import BRAIN_PROVIDERS, LocalAgent, LocalAgentError
+from .agent_api import AGENT_API_BASE
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
+
+
+def agent_api_request(path: str, payload: dict | None = None) -> dict:
+    """Call only the fixed loopback Agent API; never accept a remote URL."""
+    target = AGENT_API_BASE + path
+    body = None
+    headers = {"Accept": "application/json"}
+    method = "GET"
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        method = "POST"
+    request = Request(target, data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+            result = json.loads(raw) if raw else {}
+            return result if isinstance(result, dict) else {"status": "ERROR", "error_code": "INVALID_RESPONSE"}
+    except HTTPError as exc:
+        try:
+            raw = exc.read().decode("utf-8")
+            result = json.loads(raw) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        result.setdefault("error_code", "AGENT_API_HTTP_ERROR")
+        result["http_status"] = exc.code
+        return result
+    except (URLError, TimeoutError, OSError):
+        return {"status": "ERROR", "error_code": "AGENT_API_UNAVAILABLE", "loopback_only": "YES"}
 
 
 def provider_diagnostic(provider_id: str, entry: dict, remote_status: str) -> dict:
@@ -100,6 +134,13 @@ def main() -> None:
     agent_test = agent_sub.add_parser("test"); agent_test.add_argument("--plan", required=True); agent_test.add_argument("--test", choices=tuple(LocalAgent.SAFE_TESTS), default="python-unittest"); agent_test.add_argument("--confirm", action="store_true")
     agent_commit = agent_sub.add_parser("commit"); agent_commit.add_argument("--plan", required=True); agent_commit.add_argument("--file", action="append", default=[]); agent_commit.add_argument("--message", required=True); agent_commit.add_argument("--confirm", action="store_true")
     agent_stop = agent_sub.add_parser("stop"); agent_stop.add_argument("--plan")
+    agent_api_health = agent_sub.add_parser("api-health")
+    agent_api_plan = agent_sub.add_parser("api-plan"); agent_api_plan.add_argument("--task", required=True); agent_api_plan.add_argument("--brain-provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_api_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_api_plan.add_argument("--invoke-brain", action="store_true")
+    agent_api_readonly = agent_sub.add_parser("api-readonly"); agent_api_readonly.add_argument("--task", default=""); agent_api_readonly.add_argument("--plan-id")
+    agent_api_draft = agent_sub.add_parser("api-draft-patch"); agent_api_draft.add_argument("--plan-id", required=True); agent_api_draft.add_argument("--patch-text", default=""); agent_api_draft.add_argument("--confirm", action="store_true"); agent_api_draft.add_argument("--confirm-token")
+    agent_api_apply = agent_sub.add_parser("api-apply"); agent_api_apply.add_argument("--plan-id", required=True); agent_api_apply.add_argument("--patch-file", required=True); agent_api_apply.add_argument("--confirm", action="store_true"); agent_api_apply.add_argument("--confirm-token")
+    agent_api_test = agent_sub.add_parser("api-test"); agent_api_test.add_argument("--plan-id", required=True); agent_api_test.add_argument("--test", choices=tuple(LocalAgent.SAFE_TESTS), default="python-unittest"); agent_api_test.add_argument("--confirm", action="store_true"); agent_api_test.add_argument("--confirm-token")
+    agent_api_commit = agent_sub.add_parser("api-commit"); agent_api_commit.add_argument("--plan-id", required=True); agent_api_commit.add_argument("--file", action="append", default=[]); agent_api_commit.add_argument("--message", required=True); agent_api_commit.add_argument("--confirm", action="store_true"); agent_api_commit.add_argument("--confirm-token")
     provider = sub.add_parser("provider"); provider_sub = provider.add_subparsers(dest="provider_action", required=True)
     provider_sub.add_parser("list")
     provider_add = provider_sub.add_parser("add"); provider_add.add_argument("id", nargs="?"); provider_add.add_argument("--display-name"); provider_add.add_argument("--type"); provider_add.add_argument("--base-url", required=True); provider_add.add_argument("--wire-api"); provider_add.add_argument("--api-key-env", default=""); provider_add.add_argument("--priority", type=int, default=100); provider_add.add_argument("--advanced", action="store_true")
@@ -134,6 +175,32 @@ def main() -> None:
             state = load_probe_state()
             emit(select_deepseek_mode(args.task, codex_mode=args.codex_mode, tools_policy=args.tools_policy, user_preference=args.preference, explicit_model_alias=args.model_alias, availability=state.get("modes"), search_allowed=not args.no_search, thinking_allowed=not args.no_thinking, expert_allowed=not args.no_expert))
     elif args.command == "agent":
+        if args.agent_action == "api-health":
+            emit(agent_api_request("/agent/health"))
+            return
+        if args.agent_action == "api-plan":
+            emit(agent_api_request("/agent/plan", {"task": args.task, "brain_provider": args.brain_provider, "risk": args.risk, "invoke_brain": args.invoke_brain}))
+            return
+        if args.agent_action == "api-readonly":
+            emit(agent_api_request("/agent/readonly", {"task": args.task, "plan_id": args.plan_id} if args.plan_id else {"task": args.task}))
+            return
+        if args.agent_action in {"api-draft-patch", "api-apply", "api-test", "api-commit"}:
+            payload = {"plan_id": args.plan_id, "confirm": args.confirm}
+            if args.confirm_token:
+                payload["confirm_token"] = args.confirm_token
+            if args.agent_action == "api-draft-patch":
+                payload.update({"patch_text": args.patch_text})
+                emit(agent_api_request("/agent/draft-patch", payload))
+            elif args.agent_action == "api-apply":
+                payload.update({"patch_file": args.patch_file})
+                emit(agent_api_request("/agent/apply", payload))
+            elif args.agent_action == "api-test":
+                payload.update({"test": args.test})
+                emit(agent_api_request("/agent/test", payload))
+            else:
+                payload.update({"files": args.file, "message": args.message})
+                emit(agent_api_request("/agent/commit", payload))
+            return
         agent_runner = LocalAgent(Path.cwd())
         try:
             if args.agent_action == "plan":
@@ -284,7 +351,7 @@ def main() -> None:
             if not selected: raise SystemExit("MANAGED_GGUF_NOT_FOUND")
             managed.start(selected)
         server = RouterResponsesServer(RouterService(mode, local=LocalBackend(managed=managed), fast_local_policy=FastLocalPolicy.from_config(config_data)), args.host, args.port)
-        print(json.dumps({"ROUTER_RESPONSES_SERVER": "RUNNING", "ROUTER_LISTEN_ADDRESS": f"http://{args.host}:{args.port}/v1", "LOCALHOST_ONLY": "YES", "NETWORK_MODE": mode.value}))
+        print(json.dumps({"ROUTER_RESPONSES_SERVER": "RUNNING", "ROUTER_LISTEN_ADDRESS": f"http://{args.host}:{args.port}/v1", "AGENT_API_ENDPOINT": AGENT_API_BASE if args.host in {"127.0.0.1", "localhost", "::1"} and args.port == 18789 else "DISABLED_FOR_NON_DEFAULT_PORT", "LOCALHOST_ONLY": "YES", "NETWORK_MODE": mode.value}))
         server.serve_forever()
     elif args.command == "handoff": emit(compact_handoff(Path.cwd(), args.task, args.tests, args.blockers, args.constraints))
     elif args.command == "codex-provider":

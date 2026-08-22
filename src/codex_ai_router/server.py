@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -25,6 +26,7 @@ from .deepseek_modes import select_deepseek_mode
 from .response_compat import ResponseCompatibilityError, diagnostic_headers, extract_visible_text, iter_normalized_sse, normalize_chat_completion
 from .tools_policy import MANUAL_PLAN, STRICT_REJECT, TEXT_ONLY_STRIP, TEXT_ONLY_SYSTEM_INSTRUCTION, load_policy, request_has_tools, strip_tool_fields, normalize_policy
 from .vision import VisionProxy
+from .agent_api import AGENT_API_PORT, AgentApiController, MAX_AGENT_BODY_BYTES
 
 
 VIRTUAL_MODELS = ("xiaoyu-auto", "xiaoyu-local", "xiaoyu-api-auto", "xiaoyu-api-local", "xiaoyu-lightboat")
@@ -609,6 +611,10 @@ class _Handler(BaseHTTPRequestHandler):
     def service(self) -> RouterService:
         return self.server.service  # type: ignore[attr-defined]
 
+    @property
+    def agent_api(self) -> AgentApiController | None:
+        return self.server.agent_api  # type: ignore[attr-defined]
+
     def log_message(self, _format: str, *_args: object) -> None:
         # Never include request bodies or headers in server logs.
         return
@@ -682,8 +688,23 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(frame.encode("utf-8"))
             self.wfile.flush()
 
+    def _read_json_payload(self, maximum: int = 2_000_000) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > maximum:
+            raise RuntimeError("INVALID_REQUEST_SIZE")
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("INVALID_REQUEST")
+        return payload
+
     def do_GET(self) -> None:
-        if self.path == "/v1/models":
+        if self.path.startswith("/agent/"):
+            if self.agent_api is None:
+                self._send(404, {"error": {"code": "not_found"}})
+            else:
+                status, body = self.agent_api.get(self.path)
+                self._send(status, body)
+        elif self.path == "/v1/models":
             self._send(200, {"object": "list", "data": self.service.models()})
         elif self.path == "/health":
             self._send(200, {"status": "ok", "localhost_only": True})
@@ -691,16 +712,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"code": "not_found"}})
 
     def do_POST(self) -> None:
+        if self.path.startswith("/agent/"):
+            if self.agent_api is None:
+                self._send(404, {"error": {"code": "not_found"}})
+                return
+            try:
+                payload = self._read_json_payload(MAX_AGENT_BODY_BYTES)
+                status, body = self.agent_api.post(self.path, payload)
+                self._send(status, body)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RuntimeError):
+                self._send(400, {"status": "ERROR", "error_code": "INVALID_REQUEST"})
+            return
         if self.path not in {"/v1/responses", "/v1/chat/completions"}:
             self._send(404, {"error": {"code": "not_found"}})
             return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 2_000_000:
-                raise RuntimeError("INVALID_REQUEST_SIZE")
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise RuntimeError("INVALID_REQUEST")
+            payload = self._read_json_payload()
             if self.path == "/v1/chat/completions":
                 if payload.get("stream") is True:
                     self._send_chat_stream(payload)
@@ -725,12 +752,16 @@ class _Handler(BaseHTTPRequestHandler):
 
 class RouterResponsesServer:
     """A localhost-only server. It is intentionally never bound to 0.0.0.0."""
-    def __init__(self, service: RouterService | None = None, host: str = "127.0.0.1", port: int = 18789):
+    def __init__(self, service: RouterService | None = None, host: str = "127.0.0.1", port: int = 18789, agent_api: AgentApiController | None = None):
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("LOCALHOST_ONLY")
         self.host, self.port, self.service = host, port, service or RouterService()
         self.httpd = ThreadingHTTPServer((host, port), _Handler)
         self.httpd.service = self.service  # type: ignore[attr-defined]
+        # The public serve command only mounts Agent API on its fixed default
+        # port.  Tests may pass an explicit controller with port=0; arbitrary
+        # custom ports never gain the Agent API implicitly.
+        self.httpd.agent_api = agent_api or (AgentApiController(Path.cwd()) if port == AGENT_API_PORT else None)  # type: ignore[attr-defined]
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
