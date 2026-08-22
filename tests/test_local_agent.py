@@ -18,6 +18,29 @@ class LocalAgentTests(unittest.TestCase):
         plan = make_plan("删除所有文件", "local-light")
         self.assertEqual((plan.deny_reason, plan.requires_write, plan.requires_tests, plan.requires_commit), ("LOCAL_AGENT_HIGH_RISK_STOP", False, False, False))
 
+    def test_write_intent_respects_explicit_negation_and_patch_drafts(self):
+        readonly_tasks = (
+            "检查当前项目状态，不修改文件",
+            "只读检查项目，不改文件",
+            "搜索 local_agent，不写入",
+            "分析但不修改当前代码",
+            "生成 patch 草案但不应用",
+        )
+        for task in readonly_tasks:
+            with self.subTest(task=task):
+                plan = make_plan(task, "local-light")
+                self.assertFalse(plan.requires_write)
+
+        repair = make_plan("检查并修复 local_agent 的 bug", "local-light")
+        self.assertTrue(repair.requires_write)
+        self.assertTrue(any(step["requires_confirmation"] for step in repair.steps))
+
+        apply_patch = make_plan("应用补丁", "local-light")
+        self.assertTrue(apply_patch.requires_write)
+
+        high_risk = make_plan("删除所有文件并提交", "local-light")
+        self.assertEqual(high_risk.deny_reason, "LOCAL_AGENT_HIGH_RISK_STOP")
+
     def test_plan_is_structured_and_does_not_call_brain(self):
         with tempfile.TemporaryDirectory() as temp:
             agent = LocalAgent(Path(temp) / "repo", Path(temp) / "agent")

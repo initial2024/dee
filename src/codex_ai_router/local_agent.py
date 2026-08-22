@@ -39,8 +39,17 @@ _HIGH_RISK_PATTERNS = (
     r"删除\s*(?:所有|全部)", r"清空\s*(?:目录|文件)", r"format\s+disk", r"修改系统",
 )
 _WRITE_PATTERNS = (
-    r"\b(write|edit|modify|change|create|implement|fix|patch|apply)\b",
-    r"修改", r"编辑", r"写入", r"创建", r"实现", r"修复", r"补丁", r"应用改动",
+    r"\b(write|edit|modify|change|create|implement|fix|apply|save|delete|rename|format|update)\b",
+    r"修改", r"改(?:动|文件|代码|配置)", r"编辑", r"写入", r"保存", r"创建", r"实现", r"修复",
+    r"删除", r"重命名", r"格式化", r"更新(?:代码|文件|配置)?", r"应用(?:补丁|改动)?",
+)
+_WRITE_NEGATION_PATTERNS = (
+    # Remove explicit non-write phrases before checking positive write verbs.
+    # This keeps "检查并修复" writable while classifying "不修改文件" as read-only.
+    r"(?:不|未|无需|不要|禁止)\s*(?:修改|改(?:动)?|写入|保存|创建|删除|重命名|应用(?:补丁|改动)?|修复|更新|格式化|提交|commit|write|edit|modify|change|create|implement|fix|apply|save|delete|rename|format|update)",
+    r"(?:只读|检查(?:当前)?状态|查看|搜索|列出|读取)",
+    r"分析\s*(?:但|不过|，|,)?\s*不\s*(?:修改|改(?:动)?|写入|保存)",
+    r"(?:生成|创建)\s*(?:候选\s*)?(?:unified\s+)?(?:diff|patch|补丁)(?:\s*(?:草案|draft))?\s*(?:但\s*)?不\s*(?:应用|执行)",
 )
 _TEST_PATTERNS = (r"\btest(?:s|ing)?\b", r"pytest", r"unittest", r"npm\s+(?:run\s+)?(?:test|lint|build)", r"测试", r"验证", r"回归")
 _COMMIT_PATTERNS = (r"\bcommit\b", r"提交", r"提交\s*commit")
@@ -74,6 +83,20 @@ def _matches(task: str, patterns: Iterable[str]) -> bool:
     return any(re.search(pattern, value, flags=re.I) for pattern in patterns)
 
 
+def _write_intent_text(task: str) -> str:
+    """Return task text with explicit read-only/negated write phrases removed."""
+    value = str(task or "").lower()
+    for pattern in _WRITE_NEGATION_PATTERNS:
+        value = re.sub(pattern, " ", value, flags=re.I)
+    return value
+
+
+def _requires_write(task: str) -> bool:
+    """Classify actual write intent without treating negated verbs as writes."""
+    value = _write_intent_text(task)
+    return any(re.search(pattern, value, flags=re.I) for pattern in (*_WRITE_PATTERNS, *_COMMIT_PATTERNS))
+
+
 def classify_risk(task: str, explicit: str = "auto") -> str:
     """Return the user-facing ``low|medium|high`` risk bucket."""
     chosen = str(explicit or "auto").lower()
@@ -81,7 +104,7 @@ def classify_risk(task: str, explicit: str = "auto") -> str:
         return chosen
     if _matches(task, _HIGH_RISK_PATTERNS):
         return "high"
-    if _matches(task, _WRITE_PATTERNS) or _matches(task, _COMMIT_PATTERNS):
+    if _requires_write(task):
         return "medium"
     return "low"
 
@@ -117,7 +140,7 @@ def _manual_commands(task: str, requires_tests: bool) -> list[str]:
     commands = ["git status --short", "git diff --name-only"]
     if requires_tests:
         commands.append("python -m unittest -q")
-    if _matches(task, _WRITE_PATTERNS):
+    if _requires_write(task):
         commands.append("git diff --check")
     return commands
 
@@ -182,7 +205,7 @@ def make_plan(task: str, brain_provider: str = "local-light", risk: str = "auto"
     gate = _brain_gate(brain_provider)
     level = classify_risk(task, risk)
     denied = "LOCAL_AGENT_HIGH_RISK_STOP" if level == "high" else _high_risk_reason(task)
-    requires_write = _matches(task, _WRITE_PATTERNS)
+    requires_write = _requires_write(task)
     requires_tests = _matches(task, _TEST_PATTERNS) or requires_write
     requires_commit = _matches(task, _COMMIT_PATTERNS)
     # A high-risk plan never escalates itself into a write/test/commit action.
