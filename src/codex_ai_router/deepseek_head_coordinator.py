@@ -18,7 +18,15 @@ from typing import Any, Callable
 from .brain_providers import BrainProviderError, contains_high_risk_intent, contains_real_secret_value, invoke_brain
 from .context_collector import ContextCollector, build_llm_context_bundle
 from .local_agent import LocalAgent, classify_risk, make_plan
-from .patch_draft import PatchDraftFormatError, persist_patch_draft, validate_unified_diff
+from .patch_draft import (
+    PatchDraftFormatError,
+    PatchSynthesizerError,
+    extract_structured_patch,
+    persist_patch_draft,
+    persist_structured_patch_draft,
+    synthesize_structured_patch,
+    validate_unified_diff,
+)
 from .provider_allowlist import providers as allowlisted_providers
 
 
@@ -88,7 +96,9 @@ def _context_prompt(bundle: dict[str, Any], task: str, *, require_patch_draft: b
         patch_requirement = (
             "\n本次必须按以下顺序输出：一、问题摘要；二、修改思路；三、Unified Diff；四、风险点；五、建议测试；六、不应用补丁说明。"
             "Unified Diff 必须置于 ```diff 代码块，且包含 diff --git a/相对路径 b/相对路径、---、+++ 和 @@。"
-            "不得使用绝对路径或 ../ 路径。若无法仅凭已有上下文生成有效 unified diff，只输出 PATCH_DRAFT_UNAVAILABLE，并说明缺少哪些上下文。"
+            "不得使用绝对路径或 ../ 路径。优先输出 Unified Diff；若无法生成 diff，必须输出一个 JSON 代码块，格式为 "
+            "{\"patch_type\":\"structured_patch\",\"files\":[{\"path\":\"相对路径\",\"operations\":[{\"op\":\"replace_block\",\"find\":\"精确旧文本\",\"replace\":\"新文本\",\"reason\":\"原因\"}]}],\"suggested_tests\":[],\"risk_notes\":[]}。"
+            "structured_patch 仅允许 replace_block，find 必须在目标文件中唯一匹配，replace 不得为空。不得只输出散文；若无法仅凭已有上下文生成上述任一种草案，只输出 PATCH_DRAFT_UNAVAILABLE，并说明缺少哪些上下文。"
         )
         if format_retry:
             patch_requirement += "这是一次格式修正请求：仅基于已有脱敏上下文重新输出 unified diff；不要重新收集上下文，不要调用工具。"
@@ -110,7 +120,9 @@ def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dic
         parsed["brain_provider"] = provider
         parsed.setdefault("patch_draft", None)
         return parsed
-    if text.lstrip().startswith(("{", "[")):
+    if isinstance(parsed, dict) and parsed.get("patch_type") == "structured_patch":
+        text = "模型返回了结构化补丁草案；本地合成器会先验证路径和唯一锚点，且不会自动应用补丁。"
+    elif text.lstrip().startswith(("{", "[")):
         raise DeepSeekHeadCoordinatorError("AGENT_PLAN_SCHEMA_INVALID")
     risk = classify_risk(task)
     return {"task_summary": str(task).strip()[:1200], "brain_provider": provider, "risk_level": risk,
@@ -120,24 +132,31 @@ def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dic
             "manual_commands": [], "stop_conditions": []}
 
 
-def _patch_draft_result(text: str, *, requested: bool) -> dict[str, Any]:
+def _patch_draft_result(text: str, *, requested: bool) -> tuple[dict[str, Any], dict[str, object] | None]:
     """Classify a model reply without treating prose as a patch draft."""
     base = {
         "patch_draft_created": "NO", "unified_diff_detected": "NO",
         "patch_draft_location": None, "patch_draft_format_invalid": "NO",
         "patch_draft_unavailable": "NO", "files_targeted": [],
+        "patch_draft_source": "invalid", "structured_patch_detected": "NO",
+        "structured_patch_synthesized": "NO", "patch_synthesizer_error_code": None,
+        "patch_draft_metadata": None,
     }
     if not requested:
-        return base
+        return base, None
     if "PATCH_DRAFT_UNAVAILABLE" in text.upper():
-        base["patch_draft_unavailable"] = "YES"
-        return base
+        base.update({"patch_draft_unavailable": "YES", "patch_draft_source": "unavailable"})
+        return base, None
     valid, files = validate_unified_diff(text)
-    if not valid:
-        base["patch_draft_format_invalid"] = "YES"
-        return base
-    base.update({"patch_draft_created": "YES", "unified_diff_detected": "YES", "files_targeted": files})
-    return base
+    if valid:
+        base.update({"patch_draft_created": "YES", "unified_diff_detected": "YES", "files_targeted": files, "patch_draft_source": "unified_diff"})
+        return base, None
+    structured = extract_structured_patch(text)
+    if structured is not None:
+        base.update({"patch_draft_source": "structured_patch", "structured_patch_detected": "YES"})
+        return base, structured
+    base["patch_draft_format_invalid"] = "YES"
+    return base, None
 
 
 @dataclass
@@ -217,21 +236,40 @@ class DeepSeekHeadCoordinator:
         actions = ["context_collect_read_only" if allow_readonly else "context_collection_disabled", "plan_only"]
         if allow_patch_draft and output_plan.get("requires_write"):
             actions.append("patch_draft_only")
-        draft = _patch_draft_result(raw_brain_text, requested=patch_draft_requested)
-        if not error_code and draft["patch_draft_created"] == "YES":
+        draft, structured_patch = _patch_draft_result(raw_brain_text, requested=patch_draft_requested)
+        if not error_code and draft["patch_draft_source"] == "unified_diff" and draft["patch_draft_created"] == "YES":
             try:
-                path, _metadata, files = persist_patch_draft(
+                path, metadata_path, files = persist_patch_draft(
                     self.root, raw_brain_text, task_name="a4f10-patch-draft", brain_provider=selected,
                     context_bundle_id=bundle_id, risk_level=str(output_plan.get("risk_level", "low")),
                 )
                 location = str(path.relative_to(self.root))
-                draft.update({"patch_draft_location": location, "files_targeted": files})
+                draft.update({"patch_draft_location": location, "patch_draft_metadata": str(metadata_path.relative_to(self.root)), "files_targeted": files})
                 output_plan["patch_draft"] = location
             except PatchDraftFormatError:
                 draft.update({"patch_draft_created": "NO", "unified_diff_detected": "NO", "patch_draft_format_invalid": "YES"})
+        elif not error_code and structured_patch is not None:
+            try:
+                diff_text, files, operations_count = synthesize_structured_patch(self.root, structured_patch)
+                path, metadata_path = persist_structured_patch_draft(
+                    self.root, diff_text, task_name="a4f10-structured-patch", files_targeted=files,
+                    operations_count=operations_count, risk_level=str(output_plan.get("risk_level", "low")),
+                )
+                location = str(path.relative_to(self.root))
+                draft.update({
+                    "patch_draft_created": "YES", "unified_diff_detected": "YES",
+                    "structured_patch_synthesized": "YES", "patch_draft_location": location,
+                    "patch_draft_metadata": str(metadata_path.relative_to(self.root)), "files_targeted": files,
+                })
+                output_plan["patch_draft"] = location
+            except PatchSynthesizerError as exc:
+                draft.update({
+                    "patch_draft_source": "invalid", "patch_draft_format_invalid": "YES",
+                    "patch_synthesizer_error_code": str(exc),
+                })
         if not error_code and patch_draft_requested and draft["patch_draft_created"] == "NO":
-            error_code = "PATCH_DRAFT_UNAVAILABLE" if draft["patch_draft_unavailable"] == "YES" else "PATCH_DRAFT_FORMAT_INVALID"
-        retry_prompt = _context_prompt(bundle, task, require_patch_draft=True, format_retry=True) if error_code == "PATCH_DRAFT_FORMAT_INVALID" else None
+            error_code = "PATCH_DRAFT_UNAVAILABLE" if draft["patch_draft_unavailable"] == "YES" else (draft["patch_synthesizer_error_code"] or "PATCH_DRAFT_FORMAT_INVALID")
+        retry_prompt = _context_prompt(bundle, task, require_patch_draft=True, format_retry=True) if error_code and error_code.startswith("PATCH_") and error_code != "PATCH_DRAFT_UNAVAILABLE" else None
         return {"status": "PASS" if not error_code else "ERROR", "context_bundle_id": bundle_id,
                 "selected_brain": choice["selected_brain"], "task_difficulty": choice["task_difficulty"], "why_selected": choice["why_selected"],
                 "provider_health": choice["provider_health"], "deepseek_plan_id": plan_id if selected.startswith("deepseek") else None,

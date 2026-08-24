@@ -190,6 +190,54 @@ diff --git a/src/router.py b/src/router.py
         self.assertEqual((result["error_code"], result["patch_draft_unavailable"]), ("PATCH_DRAFT_UNAVAILABLE", "YES"))
         self.assertIsNone(result["patch_draft_retry_prompt"])
 
+    def test_structured_patch_is_synthesized_and_persisted_without_applying(self):
+        structured = json.dumps({
+            "patch_type": "structured_patch",
+            "files": [{"path": "src/router.py", "operations": [{
+                "op": "replace_block", "find": "# safe context\n", "replace": "# safer context\n", "reason": "clarify context",
+            }]}],
+            "suggested_tests": [], "risk_notes": [],
+        })
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value=structured):
+            result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual((result["patch_draft_source"], result["structured_patch_detected"], result["structured_patch_synthesized"]), ("structured_patch", "YES", "YES"))
+        self.assertEqual((result["patch_draft_created"], result["unified_diff_detected"], result["patch_draft_applied"]), ("YES", "YES", "NO"))
+        patch_path = self.root / result["patch_draft_location"]
+        metadata_path = self.root / result["patch_draft_metadata"]
+        self.assertTrue(patch_path.name.endswith("-a4f10-structured-patch.diff"))
+        self.assertTrue(patch_path.is_file())
+        self.assertTrue(metadata_path.is_file())
+        self.assertIn("diff --git a/src/router.py b/src/router.py", patch_path.read_text(encoding="utf-8"))
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["source"], "structured_patch")
+        self.assertNotIn("prompt", json.dumps(metadata).lower())
+        self.assertEqual((self.root / "src" / "router.py").read_text(encoding="utf-8"), "# safe context\nTOKEN=secret-value\n")
+
+    def test_structured_patch_reports_precise_anchor_and_path_errors(self):
+        cases = [
+            ("src/router.py", "not found", "PATCH_ANCHOR_NOT_FOUND"),
+            ("src/router.py", "\n", "PATCH_ANCHOR_NOT_UNIQUE"),
+            ("../router.py", "# safe context\n", "PATCH_PATH_TRAVERSAL"),
+            ("C:/router.py", "# safe context\n", "PATCH_PATH_INVALID"),
+            ("missing.py", "# safe context\n", "PATCH_TARGET_FILE_NOT_FOUND"),
+        ]
+        for path, find, expected in cases:
+            structured = json.dumps({"patch_type": "structured_patch", "files": [{"path": path, "operations": [{"op": "replace_block", "find": find, "replace": "x\n"}]}]})
+            coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+            with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value=structured):
+                result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+            self.assertEqual(result["error_code"], expected)
+            self.assertEqual(result["patch_synthesizer_error_code"], expected)
+            self.assertEqual(result["patch_draft_created"], "NO")
+
+    def test_patch_requirement_allows_structured_fallback_not_prose_only(self):
+        prompt = __import__("codex_ai_router.deepseek_head_coordinator", fromlist=["_context_prompt"])._context_prompt({}, "生成补丁草案", require_patch_draft=True)
+        self.assertIn("structured_patch", prompt)
+        self.assertIn("replace_block", prompt)
+        self.assertIn("PATCH_DRAFT_UNAVAILABLE", prompt)
+
     def test_high_risk_stops_before_brain_invocation(self):
         coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
         with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as invoke:
