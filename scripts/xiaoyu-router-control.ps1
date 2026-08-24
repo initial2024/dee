@@ -148,6 +148,35 @@ function Invoke-RouterGet([string]$Uri) {
         return [pscustomobject]@{ status_code = $status; body = $null }
     }
 }
+function Invoke-RouterModeSwitch([ValidateSet('quick_plain','quick_thinking','expert_plain','expert_thinking','quick_search','expert_thinking_search','vision_expert_thinking','file_extract')][string]$TargetMode) {
+    # This endpoint accepts only a mode name and verification flag.  It does not
+    # accept task text, attachments, credentials, or any chat payload.
+    $uri = 'http://127.0.0.1:18789/deepseek/mode-switch'
+    $payload = @{ target_mode = $TargetMode; verify = $true } | ConvertTo-Json -Compress
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Method Post -Uri $uri -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 10
+        $body = $response.Content | ConvertFrom-Json
+        return [pscustomobject]@{
+            status_code = [int]$response.StatusCode
+            target_mode = [string]$body.target_mode
+            before = $body.before
+            after = $body.after
+            matched = [bool]$body.matched
+            error_code = ''
+        }
+    } catch {
+        $status = 0; $code = 'DEEPSEEK_MODE_SWITCH_UNAVAILABLE'
+        try {
+            if ($_.Exception.Response) {
+                $status = [int]$_.Exception.Response.StatusCode
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $failure = $reader.ReadToEnd() | ConvertFrom-Json
+                if ($failure.error.code) { $code = [string]$failure.error.code }
+            }
+        } catch {}
+        return [pscustomobject]@{ status_code = $status; target_mode = $TargetMode; before = $null; after = $null; matched = $false; error_code = $code }
+    }
+}
 function Get-RouterIdentityProbe {
     $base = 'http://127.0.0.1:18789'
     $agent = Invoke-RouterGet ($base + '/agent/health')
@@ -725,6 +754,34 @@ function Invoke-DeepSeekModeProbe {
         throw 'UI_PROBE_RESPONSE_INVALID'
     }
 }
+function Format-DeepSeekModeSwitchSummary([object]$Result) {
+    if ($Result.error_code) {
+        return ("模式切换未完成：{0}`r`n错误说明：{1}`r`n未发送提示词、未点击发送、未上传附件。" -f $Result.error_code,(Get-UiErrorExplanation ([string]$Result.error_code)))
+    }
+    $before = $Result.before; $after = $Result.after
+    return ("目标模式：{0}`r`n切换前：base={1}；思考={2}；搜索={3}；模态={4}`r`n切换后：base={5}；思考={6}；搜索={7}；模态={8}`r`n状态匹配：{9}`r`n未发送提示词、未点击发送、未上传附件。" -f $Result.target_mode,$before.current_base_mode,$before.current_thinking,$before.current_search,$before.current_modality,$after.current_base_mode,$after.current_thinking,$after.current_search,$after.current_modality,$Result.matched)
+}
+function Invoke-DeepSeekModeSwitch([ValidateSet('quick_plain','quick_thinking','expert_plain','expert_thinking','quick_search','expert_thinking_search','vision_expert_thinking','file_extract')][string]$TargetMode) {
+    $result = Invoke-RouterModeSwitch $TargetMode
+    $errorType = if ($result.error_code) { [string]$result.error_code } elseif ($result.matched) { 'PASS' } else { 'MODE_SWITCH_VERIFY_FAILED' }
+    Add-DeepSeekLog 'mode-switch' ([pscustomobject]@{ exit_code = if($result.matched){0}else{1}; error_type = $errorType })
+    if ($result.after) {
+        $script:DeepSeekModeProbe = [pscustomobject]@{
+            status = if($result.matched){'PASS'}else{'MODE_SWITCH_VERIFY_FAILED'}
+            error_code = $result.error_code
+            promptSent = $false
+            clickSend = $false
+            uploadAttempted = $false
+            current_base_mode = $result.after.current_base_mode
+            current_thinking = $result.after.current_thinking
+            current_search = $result.after.current_search
+            current_modality = $result.after.current_modality
+            modes = @{}
+        }
+        Refresh-DeepSeekModePanel
+    }
+    [System.Windows.Forms.MessageBox]::Show((Format-DeepSeekModeSwitchSummary $result),'DeepSeek 仅模式切换') | Out-Null
+}
 function Set-DeepSeekModePreference([ValidateSet('auto','quick_plain','quick_thinking','quick_search','expert_plain','expert_thinking','expert_thinking_search','vision_expert_thinking','file_extract')][string]$Preference) {
     $script:DeepSeekModePreference = $Preference
     Refresh-DeepSeekModePanel
@@ -1090,6 +1147,14 @@ Add-DeepSeekModeButton '固定专家+深度思考' { Set-DeepSeekModePreference 
 Add-DeepSeekModeButton '固定专家+深度思考+搜索' { Set-DeepSeekModePreference 'expert_thinking_search' } 220
 Add-DeepSeekModeButton '固定视觉+专家+深度思考' { Set-DeepSeekModePreference 'vision_expert_thinking' } 225
 Add-DeepSeekModeButton '固定文件提取' { Set-DeepSeekModePreference 'file_extract' }
+Add-DeepSeekModeButton '仅切换：快速' { Invoke-DeepSeekModeSwitch 'quick_plain' } 145
+Add-DeepSeekModeButton '仅切换：快速+思考' { Invoke-DeepSeekModeSwitch 'quick_thinking' } 165
+Add-DeepSeekModeButton '仅切换：专家' { Invoke-DeepSeekModeSwitch 'expert_plain' } 145
+Add-DeepSeekModeButton '仅切换：专家+深度思考' { Invoke-DeepSeekModeSwitch 'expert_thinking' } 190
+Add-DeepSeekModeButton '仅切换：快速+搜索' { Invoke-DeepSeekModeSwitch 'quick_search' } 165
+Add-DeepSeekModeButton '仅切换：专家+深度思考+搜索' { Invoke-DeepSeekModeSwitch 'expert_thinking_search' } 220
+Add-DeepSeekModeButton '仅预检：视觉+专家+思考' { Invoke-DeepSeekModeSwitch 'vision_expert_thinking' } 210
+Add-DeepSeekModeButton '仅预检：文件提取' { Invoke-DeepSeekModeSwitch 'file_extract' } 165
 Add-DeepSeekModeButton '探测 DeepSeek 模式' { Invoke-DeepSeekModeProbe } 165
 Add-DeepSeekModeButton '查看模式选择原因' { Explain-DeepSeekModeSelection } 165
 Add-DeepSeekHeadButton '自动选择辅助脑' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只读分类和健康门控，不发送 DeepSeek prompt。'

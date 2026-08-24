@@ -97,6 +97,7 @@ Assert-True ($source -match '允许模型' -and $source -match '拒绝模型' -a
 Assert-True ($source -match 'DeepSeek 本地桥接' -and $source -match 'LOCAL_DIRECT' -and $source -match 'http://127.0.0.1:8792/v1') 'deepseek_local_bridge_status_panel_present'
 Assert-True ($source -match 'DeepSeek 网页模式策略（只读探测）' -and $source -match '探测 DeepSeek 模式' -and $source -match 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES') 'deepseek_read_only_mode_probe_ui_present'
 Assert-True ($source -match '自动选择模式' -and $source -match '省时模式' -and $source -match '平衡模式' -and $source -match '严谨模式' -and $source -match '固定快速\+思考' -and $source -match '固定专家\+深度思考' -and $source -match '固定视觉\+专家\+深度思考' -and $source -match '固定文件提取') 'deepseek_mode_selector_buttons_present'
+Assert-True ($source -match 'function Invoke-RouterModeSwitch' -and $source -match '/deepseek/mode-switch' -and $source -match '仅切换：快速' -and $source -match '仅预检：视觉\+专家\+思考' -and $source -match '仅预检：文件提取') 'deepseek_mode_switch_controls_are_loopback_only'
 Assert-True ($source -match '最近推荐模式' -and $source -match 'Format-DeepSeekSelectionSummary') 'deepseek_mode_recommendation_is_shown_in_chinese'
 Assert-True ($source -match 'mode-probe' -and $source -match 'promptSent' -and $source -match 'clickSend') 'deepseek_mode_probe_reports_no_prompt_or_send'
 Assert-True ($source -match 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO' -and $source -match '原始 JSON：已折叠') 'codex_mode_switch_shows_chinese_summary_by_default'

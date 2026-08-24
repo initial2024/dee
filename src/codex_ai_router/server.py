@@ -23,6 +23,7 @@ from .providers.runtime_models import RuntimeModelState, text_candidates
 from .call_records import append as append_call_record
 from .provider_allowlist import BRIDGE_API_KEY_ENV, model_catalog, providers as allowlisted_providers, resolve as resolve_allowlisted
 from .deepseek_modes import select_deepseek_mode
+from .deepseek_mode_switch import ModeSwitchProxyError, proxy_mode_switch
 from .response_compat import ResponseCompatibilityError, diagnostic_headers, extract_visible_text, iter_normalized_sse, normalize_chat_completion
 from .tools_policy import MANUAL_PLAN, STRICT_REJECT, TEXT_ONLY_STRIP, TEXT_ONLY_SYSTEM_INSTRUCTION, load_policy, request_has_tools, strip_tool_fields, normalize_policy
 from .vision import VisionProxy
@@ -712,6 +713,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"code": "not_found"}})
 
     def do_POST(self) -> None:
+        if self.path == "/deepseek/mode-switch":
+            try:
+                payload = self._read_json_payload(8_192)
+                status, body = proxy_mode_switch(payload)
+                self._send(status, body)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RuntimeError, ModeSwitchProxyError) as exc:
+                code = exc.code if isinstance(exc, ModeSwitchProxyError) else "MODE_SWITCH_PAYLOAD_REJECTED"
+                self._send(400, {"status": "ERROR", "error_code": code})
+            return
         if self.path.startswith("/agent/") or self.path in {"/assist/coordinate", "/deepseek-head/coordinate", "/deepseek-head/context", "/deepseek-head/plan", "/deepseek-head/plan-from-context"}:
             if self.agent_api is None:
                 self._send(404, {"error": {"code": "not_found"}})
