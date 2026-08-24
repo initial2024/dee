@@ -940,8 +940,26 @@ function Invoke-ModelsOnlyDiagnostic {
         $result=Invoke-WebRequest -UseBasicParsing -Uri ($DeepSeekLocalApiAddress + '/models') -Headers $headers -TimeoutSec 4
         $record.upstream_status=[string]$result.StatusCode; $record.content_type=[string]$result.Headers['Content-Type']; $record.stream_support='NOT_TESTED_NO_PROMPT'; $record.normalized=[string]$result.Headers['X-Xiaoyu-Normalized']; $record.content_detected=[string]$result.Headers['X-Xiaoyu-Content-Detected']
     } catch { $record.last_error='MODELS_TEST_FAILED' }
-    $allowlistStatus.Text=(Redact-Text ((& py.exe -3 -m codex_ai_router.provider_allowlist 2>&1)|Out-String))
+    $allowlistStatus.Text=(Redact-Text ((Get-ProviderAllowlistJson)|Out-String)+"`r`n"+(Get-DeepSeekBridgeDirectAllowlistSummary))
     $recordStatus.Text=(Redact-Text (($record|ConvertTo-Json -Compress))+"`r`n记录文件："+(Join-Path $env:USERPROFILE '.codex-ai-router\call-ledger.jsonl')+"`r`n默认保存正文：NO`r`nAPI Key/Cookie/Token/Authorization：NO")
+}
+function Get-ProviderAllowlistJson {
+    try {
+        $spec = Get-RouterLaunchSpec
+        return (& $spec.path -m codex_ai_router.provider_allowlist 2>&1 | Out-String)
+    } catch {
+        return ((& py.exe -3 -m codex_ai_router.provider_allowlist 2>&1) | Out-String)
+    }
+}
+function Get-DeepSeekBridgeDirectAllowlistSummary {
+    $raw = Get-ProviderAllowlistJson
+    try {
+        $catalog = $raw | ConvertFrom-Json
+        $direct = @($catalog.providers | Where-Object { $_.id -eq 'deepseek-bridge-direct' }) | Select-Object -First 1
+        if ($null -eq $direct) { return 'DeepSeek Bridge Direct：未允许；仅本地 loopback：YES；API-only 暴露：NO；fallback：NO；阻断原因：未找到内部记录。' }
+        $allowed = if ($direct.enabled -eq $true) { '已允许' } else { '未允许' }
+        return ('DeepSeek Bridge Direct：{0}`r`n仅本地 loopback：YES`r`nAPI-only 暴露：NO`r`nfallback：NO`r`n当前状态：{1}`r`n当前阻断原因：{2}' -f $allowed,$direct.status,($(if($direct.status -eq 'ENABLED'){'NONE'}else{$direct.status})))
+    } catch { return 'DeepSeek Bridge Direct：状态读取失败；未向网页发送请求。' }
 }
 function Invoke-LocalCli([string[]]$Arguments) { try { return (Redact-Text (& xiaoyu-router local @Arguments 2>&1 | Out-String)) } catch { return (Redact-Text $_.Exception.Message) } }
 function Format-GroqDiagnostic([object]$Record) {
@@ -1197,7 +1215,7 @@ Add-CodexModeButton '混合助手文本兼容' { Invoke-CodexTextOnlyMode 'custo
 Add-CodexModeButton '恢复上一次配置' { Invoke-CodexModeAction 'restore' }
 Add-CodexModeButton '打开备份目录' { $path=(Get-CodexModeState).backup_directory;if(Test-Path -LiteralPath $path){Start-Process explorer.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('尚未创建备份目录。','Codex 连接模式')} }
 Add-CodexModeButton '仅检查模型列表' { Invoke-ModelsOnlyDiagnostic } 150
-Add-CodexModeButton '刷新供应商白名单' { $allowlistStatus.Text=(Redact-Text ((& py.exe -3 -m codex_ai_router.provider_allowlist 2>&1)|Out-String)) } 180
+Add-CodexModeButton '刷新供应商白名单' { $allowlistStatus.Text=(Redact-Text ((Get-ProviderAllowlistJson)|Out-String)+"`r`n"+(Get-DeepSeekBridgeDirectAllowlistSummary)) } 180
 Add-CodexModeButton '查看本地调用记录' { $path=Join-Path $env:USERPROFILE '.codex-ai-router\call-ledger.jsonl';if(Test-Path -LiteralPath $path){Start-Process notepad.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('尚无本地调用记录。','调用记录')} } 175
 Add-ToolsPolicyButton '严格拒绝工具（推荐）' { [void](Set-ToolsPolicy 'strict_reject'); Refresh-CodexModePanel }
 Add-ToolsPolicyButton '文本兼容：忽略工具' { $confirm=[System.Windows.Forms.MessageBox]::Show('文本兼容模式会移除工具定义，只生成分析和计划，不会执行工具或修改文件。是否启用？','TEXT_ONLY 兼容模式',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning); if($confirm -eq [System.Windows.Forms.DialogResult]::Yes){[void](Set-ToolsPolicy 'text_only_strip');Refresh-CodexModePanel} } 190

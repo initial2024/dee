@@ -38,7 +38,7 @@ class DirectBridgeTests(unittest.TestCase):
         return {"quick_available": True, "expert_available": True, "thinking_available": True, "search_available": True, "vision_available": False, "file_upload_available": False, "current_base_mode": "quick", "current_thinking": False, "current_search": False, "current_modality": "text", "ui_changed": False, "modes": {name: {"status": "AVAILABLE" if name in {"quick", "expert", "thinking", "search"} else "UNAVAILABLE", "controllable": name in {"quick", "expert", "thinking", "search"}} for name in ("quick", "expert", "thinking", "search", "vision", "file")}}
 
     def test_non_loopback_endpoints_are_rejected(self):
-        for url in ("https://127.0.0.1:8791/v1", "http://localhost:8791/v1", "http://192.168.137.1:8791/v1", "http://127.0.0.1:8792/v1"):
+        for url in ("https://127.0.0.1:8791/v1", "http://192.168.137.1:8791/v1", "http://127.0.0.1:8792/v1"):
             with self.subTest(url=url):
                 result = run_deepseek_bridge_direct("plan", api_base=url)
                 self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_DIRECT_URL_NOT_CONFIGURED")
@@ -51,7 +51,7 @@ class DirectBridgeTests(unittest.TestCase):
             raise OSError("offline")
 
         result = run_deepseek_bridge_direct("plan", opener=offline)
-        self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_OFFLINE")
+        self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE")
         self.assertEqual(len(calls), 1)
 
     def test_health_gates_login_busy_and_mode(self):

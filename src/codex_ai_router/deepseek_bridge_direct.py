@@ -42,7 +42,7 @@ def _strict_loopback(url: str, *, path: str | None = None) -> bool:
         port = parsed.port
     except ValueError:
         return False
-    if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or port != 8791:
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"} or port != 8791:
         return False
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return False
@@ -195,11 +195,11 @@ def run_deepseek_bridge_direct(
             "MODE_SWITCH_FAILED": "DEEPSEEK_MODE_UNAVAILABLE",
             "UI_CHANGED": "DEEPSEEK_MODE_UNAVAILABLE",
             "INPUT_NOT_FOUND": "DEEPSEEK_MODE_UNAVAILABLE",
-            "BROWSER_NOT_CONNECTED": "DEEPSEEK_BRIDGE_OFFLINE",
+            "BROWSER_NOT_CONNECTED": "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE",
         }.get(code)
-        return _bridge_error(mapped or ("DEEPSEEK_LOGIN_REQUIRED" if exc.code == 401 else "DEEPSEEK_BRIDGE_OFFLINE"), request_id, started)
+        return _bridge_error(mapped or ("DEEPSEEK_LOGIN_REQUIRED" if exc.code == 401 else "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE"), request_id, started)
     except (URLError, TimeoutError, OSError, json.JSONDecodeError):
-        return _bridge_error("DEEPSEEK_BRIDGE_OFFLINE", request_id, started)
+        return _bridge_error("DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE", request_id, started)
     ui_send_attempt_count = _ui_send_attempt_count(health)
     health_error = _health_error(health)
     if health_error:
@@ -241,18 +241,18 @@ def run_deepseek_bridge_direct(
             code = _error_from_body(exc.read())
         except OSError:
             code = ""
-        mapped = {"LOGIN_REQUIRED": "DEEPSEEK_LOGIN_REQUIRED", "BRIDGE_BUSY": "DEEPSEEK_BRIDGE_BUSY", "MODE_NOT_AVAILABLE": "DEEPSEEK_MODE_UNAVAILABLE", "MODE_SWITCH_FAILED": "DEEPSEEK_MODE_UNAVAILABLE", "UI_CHANGED": "DEEPSEEK_MODE_UNAVAILABLE", "INPUT_NOT_FOUND": "DEEPSEEK_MODE_UNAVAILABLE", "BROWSER_NOT_CONNECTED": "DEEPSEEK_BRIDGE_OFFLINE"}.get(code)
+        mapped = {"LOGIN_REQUIRED": "DEEPSEEK_LOGIN_REQUIRED", "BRIDGE_BUSY": "DEEPSEEK_BRIDGE_BUSY", "MODE_NOT_AVAILABLE": "DEEPSEEK_MODE_UNAVAILABLE", "MODE_SWITCH_FAILED": "DEEPSEEK_MODE_UNAVAILABLE", "UI_CHANGED": "DEEPSEEK_MODE_UNAVAILABLE", "INPUT_NOT_FOUND": "DEEPSEEK_MODE_UNAVAILABLE", "BROWSER_NOT_CONNECTED": "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE"}.get(code)
         if mapped:
             return _bridge_error(mapped, request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
         if exc.code == 429:
             return _bridge_error("DEEPSEEK_BRIDGE_BUSY", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
         if exc.code in {401, 503}:
-            return _bridge_error("DEEPSEEK_LOGIN_REQUIRED" if exc.code == 401 else "DEEPSEEK_BRIDGE_OFFLINE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
+            return _bridge_error("DEEPSEEK_LOGIN_REQUIRED" if exc.code == 401 else "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
         return _bridge_error("DEEPSEEK_MODE_UNAVAILABLE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
     except ResponseCompatibilityError:
         return _bridge_error("DEEPSEEK_EMPTY_RESPONSE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
     except (URLError, TimeoutError, OSError, json.JSONDecodeError):
-        return _bridge_error("DEEPSEEK_BRIDGE_OFFLINE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
+        return _bridge_error("DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
 
 
 __all__ = ["BRIDGE_DIRECT_BASE", "BRIDGE_DIRECT_HEALTH", "run_deepseek_bridge_direct"]

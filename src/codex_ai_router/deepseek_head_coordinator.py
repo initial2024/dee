@@ -59,9 +59,19 @@ def _provider_health(snapshot: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         if not isinstance(item, dict):
             continue
         provider_type = str(item.get("type") or "")
-        name = {"DEEPSEEK_WEB_BRIDGE": "deepseek-bridge-direct", "LOCAL_MODEL": "local-light", "EXTERNAL_API_ALLOWED": "external-allowed"}.get(provider_type, str(item.get("id") or ""))
+        provider_id = str(item.get("id") or "")
+        name = (
+            "deepseek-bridge-direct" if provider_id == "deepseek-bridge-direct"
+            else {"DEEPSEEK_WEB_BRIDGE": "deepseek-bridge-direct", "LOCAL_MODEL": "local-light", "EXTERNAL_API_ALLOWED": "external-allowed"}.get(provider_type, provider_id)
+        )
         if name:
-            result[name] = {"status": item.get("status", "UNKNOWN"), "enabled": item.get("enabled") is True, "type": provider_type}
+            result[name] = {
+                "status": item.get("status", "UNKNOWN"),
+                "enabled": item.get("enabled") is True,
+                "type": provider_type,
+                "scope": item.get("scope"),
+                "fallback_eligible": item.get("fallback_eligible", True),
+            }
     return result
 
 
@@ -231,10 +241,7 @@ class DeepSeekHeadCoordinator:
             error_code = "LOCAL_AGENT_HIGH_RISK_STOP"
             provider_error_stage = "before_bridge_send"
             provider_error_code = "SANITIZER_BLOCKED_BEFORE_SEND"
-        elif invoke and selected in {"deepseek-bridge-direct", "deepseek-head"} and not (
-            choice["provider_health"].get("deepseek-bridge-direct", {}).get("enabled")
-            and choice["provider_health"].get("deepseek-bridge-direct", {}).get("status") == "ENABLED"
-        ):
+        elif invoke and selected in {"deepseek-bridge-direct", "deepseek-head"} and not choice["provider_health"].get("deepseek-bridge-direct", {}).get("enabled"):
             error_code = "DEEPSEEK_BRIDGE_DIRECT_ALLOWLIST_BLOCKED"
             provider_error_stage = "before_bridge_send"
             provider_error_code = error_code

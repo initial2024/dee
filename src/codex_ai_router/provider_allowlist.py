@@ -13,6 +13,8 @@ from .deepseek_modes import load_probe_state
 
 DEEPSEEK_BASE = "http://127.0.0.1:8792/v1"
 DEEPSEEK_HEALTH = "http://127.0.0.1:8791/health"
+DEEPSEEK_DIRECT_BASE = "http://127.0.0.1:8791"
+DEEPSEEK_DIRECT_HEALTH = DEEPSEEK_DIRECT_BASE + "/health"
 LOCAL_BASE = "http://127.0.0.1:1234/v1"
 BRIDGE_API_KEY_ENV = "XIAOYU_ROUTER_BRIDGE_API_KEY"
 DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", "deepseek-web-search", "deepseek-web-thinking", "deepseek-web-quick-thinking", "deepseek-web-expert", "deepseek-web-auto"}
@@ -20,6 +22,17 @@ DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", 
 
 def _loopback(value: str) -> bool:
     return value.startswith("http://127.0.0.1:") or value.startswith("http://localhost:")
+
+
+def deepseek_bridge_direct_allowed(endpoint: str = DEEPSEEK_DIRECT_BASE) -> bool:
+    """Allow the direct brain only on its fixed local Browser Bridge socket.
+
+    This is deliberately separate from the Worker-backed bridge provider: it
+    carries no Worker API key, advertises no public models, and is used only by
+    the local coordinator/agent paths.
+    """
+    normalized = str(endpoint).rstrip("/")
+    return normalized in {"http://127.0.0.1:8791", "http://localhost:8791"}
 
 
 def bridge_api_key_present() -> bool:
@@ -91,6 +104,18 @@ def providers() -> list[dict[str, Any]]:
         "api_key_env": BRIDGE_API_KEY_ENV, "api_key_present": bridge_key_present,
         "mode_probe": probe_state.get("status", "UNKNOWN"), "mode_availability": probe_state.get("modes", {}),
     }]
+    direct_state, _ = _health(DEEPSEEK_DIRECT_HEALTH)
+    records.append({
+        "id": "deepseek-bridge-direct",
+        "type": "DEEPSEEK_BRIDGE_DIRECT_INTERNAL",
+        "endpoint": DEEPSEEK_DIRECT_BASE,
+        "models": [],
+        "enabled": deepseek_bridge_direct_allowed(),
+        "status": direct_state,
+        "scope": "LOCAL_COORDINATOR_ONLY",
+        "api_only_exposed": False,
+        "fallback_eligible": False,
+    })
     local_state, _ = _health(os.getenv("XIAOYU_LOCAL_MODEL_HEALTH", LOCAL_BASE + "/models"))
     records.append({"id": "local-model", "type": "LOCAL_MODEL", "endpoint": os.getenv("XIAOYU_LOCAL_MODEL_BASE", LOCAL_BASE), "models": ["local-light"], "enabled": True, "status": local_state})
     for provider_id, entry in (_configured().get("providers", {}) or {}).items():

@@ -58,6 +58,8 @@ def _map_deepseek_error(original: str) -> str:
     code = original.upper()
     if code in {"BRIDGE_OFFLINE", "BRIDGE_UNREACHABLE", "BRIDGE_NOT_LISTENING", "DEEPSEEK_BRIDGE_OFFLINE"}:
         return "DEEPSEEK_BRIDGE_OFFLINE"
+    if code == "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE":
+        return code
     if code in {"LOGIN_REQUIRED", "DEEPSEEK_LOGIN_REQUIRED", "UPSTREAM_HTTP_401"}:
         return "DEEPSEEK_LOGIN_REQUIRED"
     if code in {"BRIDGE_BUSY", "DEEPSEEK_BRIDGE_BUSY"}:
@@ -205,7 +207,15 @@ def invoke_brain(
                 raise _provider_error(_map_deepseek_error(original), original)
             text = _text(result.get("analysis") or result)
         elif provider == "deepseek-bridge-direct":
-            result = deepseek_direct_runner(prompt, task_type="AUTO", selected_mode=selected_mode, search=search)
+            try:
+                result = deepseek_direct_runner(prompt, task_type="AUTO", selected_mode=selected_mode, search=search)
+            except TypeError as exc:
+                # Preserve compatibility with injected/test runners that use
+                # the original two-argument callable contract.  The built-in
+                # adapter still receives selected_mode/search above.
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                result = deepseek_direct_runner(prompt, task_type="AUTO")
             if str(result.get("status")) != "PASS":
                 original = str(result.get("error_code") or result.get("status") or "DEEPSEEK_BRIDGE_OFFLINE")
                 raise _provider_error(
