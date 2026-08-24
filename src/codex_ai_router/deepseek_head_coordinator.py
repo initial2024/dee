@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .brain_providers import BrainProviderError, contains_high_risk_intent, contains_real_secret_value, invoke_brain
-from .context_collector import ContextCollector, build_llm_context_bundle
+from .context_collector import ContextCollector, build_llm_context_bundle, sanitize_llm_or_response_text
 from .local_agent import LocalAgent, classify_risk, make_plan
 from .patch_draft import (
     PatchDraftFormatError,
@@ -89,16 +89,16 @@ def choose_brain(task: str, requested: str = "auto", snapshot: list[dict[str, An
 
 def _context_prompt(bundle: dict[str, Any], task: str, *, require_patch_draft: bool = False, format_retry: bool = False) -> str:
     compact = build_llm_context_bundle(bundle)
-    safe_task = str(task).strip()
-    safe_task = re.sub(r"(?i)(?:\b(api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password)\b|\bsk-(?![A-Za-z0-9_-]))", "credential_field_redacted", safe_task)
+    safe_task = sanitize_llm_or_response_text(task).strip()
     patch_requirement = ""
     if require_patch_draft:
         patch_requirement = (
-            "\n本次必须按以下顺序输出：一、问题摘要；二、修改思路；三、Unified Diff；四、风险点；五、建议测试；六、不应用补丁说明。"
-            "Unified Diff 必须置于 ```diff 代码块，且包含 diff --git a/相对路径 b/相对路径、---、+++ 和 @@。"
-            "不得使用绝对路径或 ../ 路径。优先输出 Unified Diff；若无法生成 diff，必须输出一个 JSON 代码块，格式为 "
-            "{\"patch_type\":\"structured_patch\",\"files\":[{\"path\":\"相对路径\",\"operations\":[{\"op\":\"replace_block\",\"find\":\"精确旧文本\",\"replace\":\"新文本\",\"reason\":\"原因\"}]}],\"suggested_tests\":[],\"risk_notes\":[]}。"
-            "structured_patch 仅允许 replace_block，find 必须在目标文件中唯一匹配，replace 不得为空。不得只输出散文；若无法仅凭已有上下文生成上述任一种草案，只输出 PATCH_DRAFT_UNAVAILABLE，并说明缺少哪些上下文。"
+            "\n本次输出必须且只能是以下三者之一；不要输出分析散文、标题、复制按钮文字或解释："
+            "(A) 一个 ```diff 代码块，包含 diff --git a/相对路径 b/相对路径、---、+++ 和 @@；"
+            "(B) 一个 ```json 代码块，内容严格为 {\"patch_type\":\"structured_patch\",\"files\":[{\"path\":\"relative/path\",\"operations\":[{\"op\":\"replace_block\",\"find\":\"exact old block\",\"replace\":\"new block\",\"reason\":\"...\"}]}],\"suggested_tests\":[],\"risk_notes\":[]}；"
+            "(C) 仅输出 PATCH_DRAFT_UNAVAILABLE，下一行使用 missing_context: 列出缺少的上下文。"
+            "优先 A；无法生成 A 时使用 B。B 仅允许 replace_block，路径必须相对且位于项目内，find 必须唯一匹配，replace 不得为空。"
+            "不得使用绝对路径、../、delete_file、rename_file、chmod 或 binary。"
         )
         if format_retry:
             patch_requirement += "这是一次格式修正请求：仅基于已有脱敏上下文重新输出 unified diff；不要重新收集上下文，不要调用工具。"
@@ -108,7 +108,7 @@ def _context_prompt(bundle: dict[str, Any], task: str, *, require_patch_draft: b
             safe_task + patch_requirement + "\n只读上下文（已泛化）：\n" + json.dumps(compact, ensure_ascii=False))
 
 
-def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dict[str, Any]:
+def _plan_from_text(text: str, provider: str, task: str, difficulty: str, *, suppress_model_text: bool = False) -> dict[str, Any]:
     if not text.strip():
         raise DeepSeekHeadCoordinatorError("DEEPSEEK_EMPTY_RESPONSE")
     try:
@@ -125,9 +125,10 @@ def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dic
     elif text.lstrip().startswith(("{", "[")):
         raise DeepSeekHeadCoordinatorError("AGENT_PLAN_SCHEMA_INVALID")
     risk = classify_risk(task)
+    description = "模型返回了补丁协议草案；本地验证器将决定是否保存 review-only unified diff，且不会自动应用。" if suppress_model_text else sanitize_llm_or_response_text(text)[:4000]
     return {"task_summary": str(task).strip()[:1200], "brain_provider": provider, "risk_level": risk,
             "requires_files": difficulty != "simple", "requires_write": False, "requires_tests": False, "requires_commit": False,
-            "steps": [{"type": "analysis", "description": text.strip()[:4000], "requires_confirmation": False, "risk": risk}],
+            "steps": [{"type": "analysis", "description": description, "requires_confirmation": False, "risk": risk}],
             "patch_draft": None, "codex_instruction": "请在 Codex 中审查以下建议，任何写入、测试或提交均需人工确认。",
             "manual_commands": [], "stop_conditions": []}
 
@@ -157,6 +158,17 @@ def _patch_draft_result(text: str, *, requested: bool) -> tuple[dict[str, Any], 
         return base, structured
     base["patch_draft_format_invalid"] = "YES"
     return base, None
+
+
+def _sanitize_api_response(value: Any) -> Any:
+    """Keep API/CLI/UI diagnostic output free of model text and credential labels."""
+    if isinstance(value, str):
+        return sanitize_llm_or_response_text(value)
+    if isinstance(value, list):
+        return [_sanitize_api_response(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_api_response(item) for key, item in value.items()}
+    return value
 
 
 @dataclass
@@ -212,7 +224,7 @@ class DeepSeekHeadCoordinator:
                 selected = "deepseek-bridge-direct"
             try:
                 raw_brain_text = invoke_brain(selected, _context_prompt(bundle, task, require_patch_draft=patch_draft_requested))
-                output_plan = _plan_from_text(raw_brain_text, selected, task, choice["task_difficulty"])
+                output_plan = _plan_from_text(raw_brain_text, selected, task, choice["task_difficulty"], suppress_model_text=patch_draft_requested)
             except BrainProviderError as exc:
                 error_code = exc.code
             except DeepSeekHeadCoordinatorError as exc:
@@ -269,8 +281,8 @@ class DeepSeekHeadCoordinator:
                 })
         if not error_code and patch_draft_requested and draft["patch_draft_created"] == "NO":
             error_code = "PATCH_DRAFT_UNAVAILABLE" if draft["patch_draft_unavailable"] == "YES" else (draft["patch_synthesizer_error_code"] or "PATCH_DRAFT_FORMAT_INVALID")
-        retry_prompt = _context_prompt(bundle, task, require_patch_draft=True, format_retry=True) if error_code and error_code.startswith("PATCH_") and error_code != "PATCH_DRAFT_UNAVAILABLE" else None
-        return {"status": "PASS" if not error_code else "ERROR", "context_bundle_id": bundle_id,
+        retry_available = bool(error_code and error_code.startswith("PATCH_") and error_code != "PATCH_DRAFT_UNAVAILABLE")
+        result = {"status": "PASS" if not error_code else "ERROR", "context_bundle_id": bundle_id,
                 "selected_brain": choice["selected_brain"], "task_difficulty": choice["task_difficulty"], "why_selected": choice["why_selected"],
                 "provider_health": choice["provider_health"], "deepseek_plan_id": plan_id if selected.startswith("deepseek") else None,
                 "agent_plan": output_plan, "local_agent_actions": actions,
@@ -278,16 +290,18 @@ class DeepSeekHeadCoordinator:
                 "allow_apply": allow_apply, "allow_test": allow_test, "allow_commit": allow_commit,
                 "risk_level": output_plan.get("risk_level", "low"), "fallback_reason": error_code or choice.get("fallback_reason"),
                 "brain_invoked": "YES" if invoke and raw_brain_text else "NO", "error_code": error_code,
-                **draft, "patch_draft_retry_prompt": retry_prompt, "patch_draft_applied": "NO",
+                **draft, "retry_available": retry_available, "retry_reason": "NO_UNIFIED_DIFF" if retry_available else None,
+                "retry_policy": "FORMAT_ONLY_RETRY" if retry_available else None, "retry_prompt_exposed": "NO", "patch_draft_applied": "NO",
                 "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "commit_created": "NO",
                 "loopback_only": "YES", "worker_required": "NO", "wrangler_required": "NO", "tools_forwarded": "NO",
-                "prompt_response_logged": "NO", "secrets_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO"}
+                "prompt_response_logged": "NO", "sensitive_data_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO"}
+        return _sanitize_api_response(result)
 
     def context(self, context_id: str) -> dict[str, Any]:
         bundle = self._bundles.get(context_id)
         if bundle is None:
             raise DeepSeekHeadCoordinatorError("CONTEXT_BUNDLE_NOT_FOUND")
-        return {"context_bundle_id": context_id, "context_bundle": bundle}
+        return _sanitize_api_response({"context_bundle_id": context_id, "context_bundle": build_llm_context_bundle(bundle)})
 
     def plan_from_context(self, context_id: str, *, invoke: bool = False) -> dict[str, Any]:
         bundle = self._bundles.get(context_id)
@@ -309,8 +323,9 @@ class DeepSeekHeadCoordinator:
         plan["plan_id"] = plan_id
         plan["context_bundle_id"] = context_id
         self._plans[plan_id] = plan
-        return {"status": "PASS", "context_bundle_id": context_id, "plan_id": plan_id, "agent_plan": plan,
+        return _sanitize_api_response({"status": "PASS", "context_bundle_id": context_id, "plan_id": plan_id, "agent_plan": plan,
                 "brain_invoked": "YES" if invoke else "NO", "files_modified": "NO", "tests_executed": "NO", "commit_created": "NO"}
+        )
 
     def plan(self, plan_id: str) -> dict[str, Any]:
         value = self._plans.get(plan_id)

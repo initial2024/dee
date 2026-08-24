@@ -188,7 +188,8 @@ diff --git a/src/router.py b/src/router.py
         with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="PATCH_DRAFT_UNAVAILABLE\n缺少文件上下文"):
             result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
         self.assertEqual((result["error_code"], result["patch_draft_unavailable"]), ("PATCH_DRAFT_UNAVAILABLE", "YES"))
-        self.assertIsNone(result["patch_draft_retry_prompt"])
+        self.assertEqual((result["retry_available"], result["retry_prompt_exposed"]), (False, "NO"))
+        self.assertNotIn("patch_draft_retry_prompt", result)
 
     def test_structured_patch_is_synthesized_and_persisted_without_applying(self):
         structured = json.dumps({
@@ -237,6 +238,31 @@ diff --git a/src/router.py b/src/router.py
         self.assertIn("structured_patch", prompt)
         self.assertIn("replace_block", prompt)
         self.assertIn("PATCH_DRAFT_UNAVAILABLE", prompt)
+
+    def test_invalid_patch_returns_only_retry_metadata_not_internal_prompt(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="只是一段分析文本"):
+            result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertEqual((result["error_code"], result["retry_available"], result["retry_reason"], result["retry_policy"], result["retry_prompt_exposed"]), ("PATCH_DRAFT_FORMAT_INVALID", True, "NO_UNIFIED_DIFF", "FORMAT_ONLY_RETRY", "NO"))
+        self.assertNotIn("patch_draft_retry_prompt", result)
+        self.assertNotIn("只是一段分析文本", encoded)
+        self.assertNotIn("只读上下文", encoded)
+
+    def test_embedded_sensitive_field_names_are_generalized_in_prompt_and_api_response(self):
+        bundle = {"project_root": str(self.root), "git_status": "", "changed_files": [], "relevant_files": [],
+                  "file_snippets": [{"path": "src/config.py", "content": "XIAOYU_CODER_API_KEY=[REDACTED] TOKEN=[REDACTED]"}],
+                  "diff_summary": "", "risk_flags": [], "loopback_ports": {}}
+        prompt = __import__("codex_ai_router.deepseek_head_coordinator", fromlist=["_context_prompt"])._context_prompt(bundle, "分析 XIAOYU_CODER_API_KEY，不泄露")
+        lowered = prompt.lower()
+        for forbidden in ("api_key", "token", "cookie", "authorization", "storagestate", "storage_state", "secret", "password", "sk-", "bearer"):
+            self.assertNotIn(forbidden, lowered)
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch.object(coordinator.collector, "collect", return_value={**bundle, "task_difficulty": "medium", "redaction_applied": True, "collection_mode": "read_only", "selected_brain": "deepseek-bridge-direct", "recent_agent_metadata": [], "commands_executed": [], "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "secrets_logged": "NO", "prompt_response_logged": "NO"}), patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="分析 XIAOYU_CODER_API_KEY"):
+            result = coordinator.coordinate({"task": "分析 XIAOYU_CODER_API_KEY", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        response = json.dumps(result, ensure_ascii=False).lower()
+        for forbidden in ("api_key", "token", "cookie", "authorization", "storagestate", "storage_state", "secret", "password", "sk-", "bearer"):
+            self.assertNotIn(forbidden, response)
 
     def test_high_risk_stops_before_brain_invocation(self):
         coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)

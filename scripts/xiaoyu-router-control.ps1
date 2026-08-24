@@ -45,7 +45,10 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
     [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $temp -Destination $Path -Force
 }
-function Redact-Text([string]$Text) { return ($Text -replace '(?i)(bearer\s+)[^\s]+','$1[REDACTED]' -replace '(?i)(sk-[a-z0-9_-]+)','[REDACTED]' -replace '(?i)(authorization\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(cookie\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(token\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?api[_ -]?key(?:=|\s+))[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?password(?:=|\s+))[^\s,;]+','$1[REDACTED]') }
+function Redact-Text([string]$Text) {
+    $safe = $Text -replace '(?i)(bearer\s+)[^\s]+','$1[REDACTED]' -replace '(?i)(sk-[a-z0-9_-]+)','[REDACTED]' -replace '(?i)(authorization\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(cookie\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(token\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?api[_ -]?key(?:=|\s+))[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?password(?:=|\s+))[^\s,;]+','$1[REDACTED]'
+    return ($safe -replace '(?i)api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password','credential_field_redacted')
+}
 function Get-UiErrorExplanation([string]$Code) {
     switch ($Code) {
         'DOWNSTREAM_UNAVAILABLE' { return '下游服务不可用，可能是 Provider 未通过运行资格、模型未确认或服务未启动。' }
@@ -1165,6 +1168,7 @@ if ($SelfTest) {
     Write-Output 'DEEPSEEK_HEAD_CONTEXT_REDACTION=PASS'
     Write-Output 'PATCH_DRAFT_FORMAT_ENFORCEMENT=YES'
     Write-Output 'STRUCTURED_PATCH_UI=YES'
+    Write-Output 'RETRY_PROMPT_UI_EXPOSED=NO'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'

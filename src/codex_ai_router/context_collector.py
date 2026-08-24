@@ -15,7 +15,7 @@ MAX_FILE_SEARCH = 40
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".codex", ".agents"}
 SENSITIVE_NAMES = re.compile(r"(?i)(\.env|secret|credential|password|token|cookie|storage(state)?|\.pem$|\.key$)")
 SECRET_VALUE = re.compile(r"(?i)(authorization|bearer|cookie|token|api[_ -]?key|password|secret)\s*[:=]\s*[^\s,;]+")
-SENSITIVE_FIELD_NAME = re.compile(r"(?i)(?:\b(api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password)\b|\bsk-(?![A-Za-z0-9_-]))")
+SENSITIVE_FIELD_NAME = re.compile(r"(?i)(?:api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password|sk-(?![A-Za-z0-9_-]))")
 REAL_SECRET_VALUE = re.compile(
     r"(?ix)(?:\bsk-[a-z0-9_-]{12,}\b|\bbearer\s+[a-z0-9._~-]{12,}\b|"
     r"\beyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\b|"
@@ -37,8 +37,14 @@ def contains_real_secret_value(value: object) -> bool:
 def _llm_safe_text(value: object) -> str:
     """Generalize sensitive field names before any model receives context."""
     text = _redact(value)
+    text = REAL_SECRET_VALUE.sub("[VALUE_REDACTED]", text)
     text = SENSITIVE_FIELD_NAME.sub("credential_field_redacted", text)
     return text
+
+
+def sanitize_llm_or_response_text(value: object) -> str:
+    """Remove credential-like values and field names from model-facing text."""
+    return _llm_safe_text(value)
 
 
 def build_llm_context_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -212,5 +218,5 @@ class ContextCollector:
 
 __all__ = [
     "ContextCollector", "MAX_SNIPPETS", "MAX_SNIPPET_CHARS",
-    "build_llm_context_bundle", "contains_real_secret_value",
+    "build_llm_context_bundle", "contains_real_secret_value", "sanitize_llm_or_response_text",
 ]

@@ -24,6 +24,7 @@ Assert-True ($text -match 'CONTROL_PANEL_LAYOUT_POLISH=YES' -and $text -match 'L
 Assert-True ($text -match 'DEEPSEEK_HEAD_COLLABORATION_PANEL_VISIBLE=YES' -and $text -match 'DEEPSEEK_HEAD_CONTEXT_READONLY=YES' -and $text -match 'DEEPSEEK_HEAD_AUTO_BRAIN_SELECTION=YES') 'deepseek_head_collaboration_panel_flags'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'PATCH_DRAFT_FORMAT_ENFORCEMENT=YES') 'deepseek_head_patch_draft_format_flags'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'STRUCTURED_PATCH_UI=YES' -and (Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match '已由结构化补丁草案生成 unified diff，尚未应用。') 'structured_patch_ui_status_visible'
+Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'RETRY_PROMPT_UI_EXPOSED=NO' -and (Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'credential_field_redacted') 'retry_prompt_and_sensitive_field_ui_sanitization_visible'
 Assert-True ($text -match 'BUTTON_TEXT_VISIBLE=YES' -and $text -match 'WINDOW_RESIZE_SUPPORTED=YES' -and $text -match 'VERTICAL_SCROLL_SUPPORTED=YES') 'desktop_control_resize_and_scroll_flags'
 Assert-True ($text -match 'DANGEROUS_ACTIONS_STILL_CONFIRM=YES' -and $text -match 'DANGEROUS_ACTION_TOOLTIPS=YES' -and $text -match 'RAW_JSON_COLLAPSED=YES') 'desktop_control_danger_and_json_flags'
   $ui = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest 2>&1
