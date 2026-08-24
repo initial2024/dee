@@ -23,13 +23,13 @@ from .response_compat import extract_visible_text
 class BrainProviderError(RuntimeError):
     """Stable error returned to the UI without exposing provider details."""
 
-    def __init__(self, code: str, *, original_error_code: str | None = None):
+    def __init__(self, code: str, *, original_error_code: str | None = None, metadata: dict[str, Any] | None = None):
         safe_code = _safe_error_code(code)
         original = _safe_error_code(original_error_code or safe_code)
         super().__init__(safe_code)
         self.code = safe_code
         self.original_error_code = original
-        self.metadata = {"original_error_code": original}
+        self.metadata = {"original_error_code": original, **(metadata or {})}
 
 
 def _safe_error_code(value: object) -> str:
@@ -37,8 +37,8 @@ def _safe_error_code(value: object) -> str:
     return code if re.fullmatch(r"[A-Z0-9][A-Z0-9_.:-]{0,127}", code) else "BRAIN_PROVIDER_ERROR"
 
 
-def _provider_error(code: str, original: str | None = None) -> BrainProviderError:
-    return BrainProviderError(code, original_error_code=original or code)
+def _provider_error(code: str, original: str | None = None, **metadata: Any) -> BrainProviderError:
+    return BrainProviderError(code, original_error_code=original or code, metadata=metadata)
 
 
 def _map_local_error(original: str) -> str:
@@ -64,7 +64,18 @@ def _map_deepseek_error(original: str) -> str:
         return "DEEPSEEK_BRIDGE_BUSY"
     if code in {"UPSTREAM_CONTENT_EMPTY", "DEEPSEEK_EMPTY_RESPONSE"}:
         return "DEEPSEEK_EMPTY_RESPONSE"
-    if code == "DEEPSEEK_MODE_UNAVAILABLE":
+    if code in {
+        "DEEPSEEK_MODE_UNAVAILABLE",
+        "PROVIDER_PRE_SEND_ERROR",
+        "DEEPSEEK_BRIDGE_DIRECT_PAYLOAD_INVALID",
+        "DEEPSEEK_BRIDGE_DIRECT_MODE_PARAM_INVALID",
+        "DEEPSEEK_BRIDGE_DIRECT_CONTEXT_BUILD_FAILED",
+        "DEEPSEEK_BRIDGE_DIRECT_ALLOWLIST_BLOCKED",
+        "DEEPSEEK_BRIDGE_DIRECT_URL_NOT_CONFIGURED",
+        "DEEPSEEK_BRIDGE_DIRECT_REQUEST_NOT_SENT",
+        "LLM_CONTEXT_BUNDLE_BUILD_FAILED",
+        "SANITIZER_BLOCKED_BEFORE_SEND",
+    }:
         return code
     if code == "BRIDGE_REQUEST_FAILED":
         return "DEEPSEEK_BRIDGE_ERROR"
@@ -172,6 +183,8 @@ def invoke_brain(
     deepseek_runner: Callable[..., dict[str, Any]] = run_deepseek_head,
     deepseek_direct_runner: Callable[..., dict[str, Any]] = run_deepseek_bridge_direct,
     external_factory: Callable[[], OpenAICompatibleProvider] = _external_provider,
+    selected_mode: str | None = None,
+    search: bool | None = None,
 ) -> str:
     """Invoke one explicitly selected brain and return advisory text.
 
@@ -192,10 +205,17 @@ def invoke_brain(
                 raise _provider_error(_map_deepseek_error(original), original)
             text = _text(result.get("analysis") or result)
         elif provider == "deepseek-bridge-direct":
-            result = deepseek_direct_runner(prompt, task_type="AUTO")
+            result = deepseek_direct_runner(prompt, task_type="AUTO", selected_mode=selected_mode, search=search)
             if str(result.get("status")) != "PASS":
                 original = str(result.get("error_code") or result.get("status") or "DEEPSEEK_BRIDGE_OFFLINE")
-                raise _provider_error(_map_deepseek_error(original), original)
+                raise _provider_error(
+                    _map_deepseek_error(original),
+                    original,
+                    provider_error_stage=str(result.get("provider_error_stage") or "before_bridge_send"),
+                    bridge_send_attempted=str(result.get("bridge_send_attempted") or "NO"),
+                    bridge_ui_send_attempt_count=int(result.get("bridge_ui_send_attempt_count") or 0),
+                    model_output_available=str(result.get("model_output_available") or "NO"),
+                )
             text = _text(result.get("analysis") or result)
         elif provider == "external-allowed":
             text = _text(external_factory().ask(prompt))
@@ -207,11 +227,11 @@ def invoke_brain(
                 if isinstance(item, dict) and item.get("enabled") is True and item.get("status") == "ENABLED"
             }
             if "LOCAL_MODEL" in healthy:
-                text = invoke_brain("local-light", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory)
+                text = invoke_brain("local-light", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory, selected_mode=selected_mode, search=search)
             elif "DEEPSEEK_WEB_BRIDGE" in healthy:
-                text = invoke_brain("deepseek-head", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory)
+                text = invoke_brain("deepseek-head", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory, selected_mode=selected_mode, search=search)
             elif "EXTERNAL_API_ALLOWED" in healthy:
-                text = invoke_brain("external-allowed", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory)
+                text = invoke_brain("external-allowed", task, local_backend=local_backend, deepseek_runner=deepseek_runner, deepseek_direct_runner=deepseek_direct_runner, external_factory=external_factory, selected_mode=selected_mode, search=search)
             else:
                 raise _provider_error("NO_HEALTHY_BRAIN_PROVIDER")
         else:
@@ -228,6 +248,15 @@ def invoke_brain(
             raise _provider_error(_map_external_error(code), code) from exc
         raise _provider_error("BRAIN_PROVIDER_ERROR", code) from exc
     except Exception as exc:
+        if provider in {"deepseek-head", "deepseek-bridge-direct"}:
+            raise _provider_error(
+                "PROVIDER_PRE_SEND_ERROR",
+                "DEEPSEEK_BRIDGE_DIRECT_REQUEST_NOT_SENT",
+                provider_error_stage="before_bridge_send",
+                bridge_send_attempted="NO",
+                bridge_ui_send_attempt_count=0,
+                model_output_available="NO",
+            ) from exc
         raise _provider_error("BRAIN_PROVIDER_ERROR", type(exc).__name__) from exc
     if not text:
         if provider == "local-light":

@@ -35,13 +35,13 @@ class DirectBridgeTests(unittest.TestCase):
 
     @staticmethod
     def ready_mode_probe():
-        return {"quick_available": True, "expert_available": True, "thinking_available": True, "search_available": True, "vision_available": False, "file_upload_available": False, "ui_changed": False, "modes": {name: {"status": "AVAILABLE" if name in {"quick", "expert", "thinking", "search"} else "UNAVAILABLE", "controllable": name in {"quick", "expert", "thinking", "search"}} for name in ("quick", "expert", "thinking", "search", "vision", "file")}}
+        return {"quick_available": True, "expert_available": True, "thinking_available": True, "search_available": True, "vision_available": False, "file_upload_available": False, "current_base_mode": "quick", "current_thinking": False, "current_search": False, "current_modality": "text", "ui_changed": False, "modes": {name: {"status": "AVAILABLE" if name in {"quick", "expert", "thinking", "search"} else "UNAVAILABLE", "controllable": name in {"quick", "expert", "thinking", "search"}} for name in ("quick", "expert", "thinking", "search", "vision", "file")}}
 
     def test_non_loopback_endpoints_are_rejected(self):
         for url in ("https://127.0.0.1:8791/v1", "http://localhost:8791/v1", "http://192.168.137.1:8791/v1", "http://127.0.0.1:8792/v1"):
             with self.subTest(url=url):
                 result = run_deepseek_bridge_direct("plan", api_base=url)
-                self.assertEqual(result["error_code"], "DEEPSEEK_MODE_UNAVAILABLE")
+                self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_DIRECT_URL_NOT_CONFIGURED")
 
     def test_offline_bridge_is_reported_without_post(self):
         calls = []
@@ -90,6 +90,48 @@ class DirectBridgeTests(unittest.TestCase):
         responses = iter((FakeResponse(self.ready_health()), FakeResponse(self.ready_mode_probe()), FakeResponse({"choices": [{"message": {"content": ""}}]})))
         result = run_deepseek_bridge_direct("plan", opener=lambda *_args, **_kwargs: next(responses))
         self.assertEqual(result["error_code"], "DEEPSEEK_EMPTY_RESPONSE")
+
+    def test_invalid_explicit_mode_is_pre_send_error_without_chat_post(self):
+        calls = []
+
+        def opener(request, **_kwargs):
+            calls.append(request)
+            raise AssertionError("a pre-send validation must not call the bridge")
+
+        result = run_deepseek_bridge_direct("plan", selected_mode="not-a-mode", opener=opener)
+        self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_DIRECT_MODE_PARAM_INVALID")
+        self.assertEqual((result["provider_error_stage"], result["bridge_send_attempted"], result["model_output_available"]), ("before_bridge_send", "NO", "NO"))
+        self.assertEqual(calls, [])
+
+    def test_explicit_expert_thinking_requires_matching_probe_before_post(self):
+        requests = []
+        probe = self.ready_mode_probe()
+        probe.update({"current_base_mode": "expert", "current_thinking": True, "current_search": False})
+        responses = iter((FakeResponse(self.ready_health()), FakeResponse(probe), FakeResponse({"choices": [{"message": {"content": "PLAN_OK"}}]})))
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return next(responses)
+
+        result = run_deepseek_bridge_direct("只生成计划", selected_mode="expert_thinking", search=False, opener=opener)
+        self.assertEqual((result["status"], result["selected_mode"], result["bridge_send_attempted"]), ("PASS", "expert_thinking", "YES"))
+        payload = json.loads(requests[2].data.decode("utf-8"))
+        self.assertEqual(payload["model"], "deepseek-web-expert-thinking")
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+
+    def test_mode_mismatch_is_pre_send_error_without_chat_post(self):
+        requests = []
+        responses = iter((FakeResponse(self.ready_health()), FakeResponse(self.ready_mode_probe())))
+
+        def opener(request, **_kwargs):
+            requests.append(request)
+            return next(responses)
+
+        result = run_deepseek_bridge_direct("plan", selected_mode="expert_thinking", search=False, opener=opener)
+        self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_DIRECT_MODE_PARAM_INVALID")
+        self.assertEqual((result["provider_error_stage"], result["bridge_send_attempted"], result["bridge_ui_send_attempt_count"]), ("before_bridge_send", "NO", 0))
+        self.assertEqual(len(requests), 2)
 
 
 if __name__ == "__main__":

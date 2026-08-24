@@ -114,6 +114,7 @@ Assert-True ($source -match '小羽本地 Agent' -and $source -match '生成计�
 Assert-True ($source -match 'Brain Provider' -and $source -match '只读与计划' -and $source -match '需确认执行' -and $source -match "Text = '记录'") 'local_agent_actions_are_grouped'
 Assert-True ($source -match '官方辅助协调' -and $source -match '辅助分析' -and $source -match '辅助脑') 'official_assisted_actions_are_grouped'
 Assert-True ($source -match 'DeepSeek 首脑协作' -and $source -match '自动选择辅助脑' -and $source -match '收集项目上下文' -and $source -match '发送给 DeepSeek 首脑分析') 'deepseek_head_collaboration_actions_present'
+Assert-True ($source -match 'DeepSeek 首脑在发送前被阻断' -and $source -match '网页发送计数' -and $source -match '补丁草案：未尝试') 'pre_send_provider_error_is_shown_in_chinese'
 Assert-True ($source -match 'DEEPSEEK_HEAD_CONTEXT_REDACTION=YES' -and $source -match '127\.0\.0\.1:8791' -and $source -match '不会发送密钥、Cookie、Token 或 Authorization') 'deepseek_head_context_redaction_and_loopback_notice_present'
 Assert-True ($source -match 'AutoScroll = \$true' -and $source -match 'WrapContents = \$true' -and $source -match 'AutoEllipsis=\$false') 'grouped_actions_support_scroll_and_full_text'
 Assert-True ($source -match '需要确认，不自动执行' -and $source -match '需要确认；只运行白名单测试' -and $source -match '需要确认，不 push' -and $source -match '只停止本地 Agent，不影响系统') 'dangerous_actions_have_chinese_tooltips'

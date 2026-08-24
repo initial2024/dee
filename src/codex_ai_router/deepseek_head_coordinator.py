@@ -139,11 +139,14 @@ def _patch_draft_result(text: str, *, requested: bool) -> tuple[dict[str, Any], 
         "patch_draft_created": "NO", "unified_diff_detected": "NO",
         "patch_draft_location": None, "patch_draft_format_invalid": "NO",
         "patch_draft_unavailable": "NO", "files_targeted": [],
-        "patch_draft_source": "invalid", "structured_patch_detected": "NO",
+        "patch_draft_source": "not_requested" if not requested else "not_attempted", "structured_patch_detected": "NO",
         "structured_patch_synthesized": "NO", "patch_synthesizer_error_code": None,
         "patch_draft_metadata": None,
     }
     if not requested:
+        return base, None
+    if not text.strip():
+        base.update({"patch_draft_location": "NONE", "patch_draft_metadata": "NONE"})
         return base, None
     if "PATCH_DRAFT_UNAVAILABLE" in text.upper():
         base.update({"patch_draft_unavailable": "YES", "patch_draft_source": "unavailable"})
@@ -214,21 +217,51 @@ class DeepSeekHeadCoordinator:
         selected = choice["selected_brain"]
         invoke = payload.get("invoke_brain") is True
         patch_draft_requested = payload.get("allow_patch_draft") is True
+        selected_mode = payload.get("selected_mode")
+        search = payload.get("search")
         output_plan: dict[str, Any] | None = None
         raw_brain_text = ""
         error_code = None
+        provider_error_stage: str | None = None
+        provider_error_code: str | None = None
+        bridge_send_attempted = "NO"
+        bridge_ui_send_attempt_count = 0
+        model_output_available = "NO"
         if invoke and (classify_risk(task) == "high" or contains_high_risk_intent(task) or contains_real_secret_value(task) or bool(bundle.get("secret_value_detected"))):
             error_code = "LOCAL_AGENT_HIGH_RISK_STOP"
+            provider_error_stage = "before_bridge_send"
+            provider_error_code = "SANITIZER_BLOCKED_BEFORE_SEND"
+        elif invoke and selected in {"deepseek-bridge-direct", "deepseek-head"} and not (
+            choice["provider_health"].get("deepseek-bridge-direct", {}).get("enabled")
+            and choice["provider_health"].get("deepseek-bridge-direct", {}).get("status") == "ENABLED"
+        ):
+            error_code = "DEEPSEEK_BRIDGE_DIRECT_ALLOWLIST_BLOCKED"
+            provider_error_stage = "before_bridge_send"
+            provider_error_code = error_code
         elif invoke and selected in {"deepseek-bridge-direct", "deepseek-head", "local-light"}:
             if selected == "deepseek-head":
                 selected = "deepseek-bridge-direct"
             try:
-                raw_brain_text = invoke_brain(selected, _context_prompt(bundle, task, require_patch_draft=patch_draft_requested))
+                try:
+                    prompt = _context_prompt(bundle, task, require_patch_draft=patch_draft_requested)
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    raise DeepSeekHeadCoordinatorError("LLM_CONTEXT_BUNDLE_BUILD_FAILED")
+                raw_brain_text = invoke_brain(selected, prompt, selected_mode=str(selected_mode) if selected_mode is not None else None, search=search if isinstance(search, bool) else None)
+                model_output_available = "YES" if raw_brain_text else "NO"
+                bridge_send_attempted = "YES" if selected == "deepseek-bridge-direct" and raw_brain_text else "NO"
+                bridge_ui_send_attempt_count = 1 if bridge_send_attempted == "YES" else 0
                 output_plan = _plan_from_text(raw_brain_text, selected, task, choice["task_difficulty"], suppress_model_text=patch_draft_requested)
             except BrainProviderError as exc:
                 error_code = exc.code
+                provider_error_stage = str(exc.metadata.get("provider_error_stage") or "before_bridge_send")
+                provider_error_code = str(exc.code)
+                bridge_send_attempted = str(exc.metadata.get("bridge_send_attempted") or "NO")
+                bridge_ui_send_attempt_count = int(exc.metadata.get("bridge_ui_send_attempt_count") or 0)
+                model_output_available = str(exc.metadata.get("model_output_available") or "NO")
             except DeepSeekHeadCoordinatorError as exc:
                 error_code = exc.code
+                provider_error_stage = "before_bridge_send"
+                provider_error_code = exc.code
         elif invoke and selected == "external-allowed":
             error_code = "EXTERNAL_CONTEXT_FORWARDING_NOT_AUTHORIZED"
         if output_plan is None:
@@ -281,7 +314,7 @@ class DeepSeekHeadCoordinator:
                 })
         if not error_code and patch_draft_requested and draft["patch_draft_created"] == "NO":
             error_code = "PATCH_DRAFT_UNAVAILABLE" if draft["patch_draft_unavailable"] == "YES" else (draft["patch_synthesizer_error_code"] or "PATCH_DRAFT_FORMAT_INVALID")
-        retry_available = bool(error_code and error_code.startswith("PATCH_") and error_code != "PATCH_DRAFT_UNAVAILABLE")
+        retry_available = bool(model_output_available == "YES" and error_code and error_code.startswith("PATCH_") and error_code != "PATCH_DRAFT_UNAVAILABLE")
         result = {"status": "PASS" if not error_code else "ERROR", "context_bundle_id": bundle_id,
                 "selected_brain": choice["selected_brain"], "task_difficulty": choice["task_difficulty"], "why_selected": choice["why_selected"],
                 "provider_health": choice["provider_health"], "deepseek_plan_id": plan_id if selected.startswith("deepseek") else None,
@@ -290,6 +323,12 @@ class DeepSeekHeadCoordinator:
                 "allow_apply": allow_apply, "allow_test": allow_test, "allow_commit": allow_commit,
                 "risk_level": output_plan.get("risk_level", "low"), "fallback_reason": error_code or choice.get("fallback_reason"),
                 "brain_invoked": "YES" if invoke and raw_brain_text else "NO", "error_code": error_code,
+                "provider_error_stage": provider_error_stage, "provider_error_code": provider_error_code,
+                "provider_error_sanitized": "YES", "bridge_send_attempted": bridge_send_attempted,
+                "bridge_ui_send_attempt_count": bridge_ui_send_attempt_count,
+                "model_output_available": model_output_available,
+                "deepseek_request_sent": bridge_send_attempted if selected == "deepseek-bridge-direct" else "NO",
+                "patch_draft_retry_sent": "NO",
                 **draft, "retry_available": retry_available, "retry_reason": "NO_UNIFIED_DIFF" if retry_available else None,
                 "retry_policy": "FORMAT_ONLY_RETRY" if retry_available else None, "retry_prompt_exposed": "NO", "patch_draft_applied": "NO",
                 "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "commit_created": "NO",

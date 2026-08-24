@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_ai_router.brain_providers import contains_high_risk_intent
+from codex_ai_router.brain_providers import BrainProviderError, contains_high_risk_intent
 from codex_ai_router.context_collector import ContextCollector, build_llm_context_bundle
 from codex_ai_router.deepseek_head_coordinator import DeepSeekHeadCoordinator, choose_brain, classify_task
 from codex_ai_router.local_agent import LocalAgent
@@ -151,6 +151,52 @@ class DeepSeekHeadCoordinatorTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "PATCH_DRAFT_FORMAT_INVALID")
         self.assertEqual((result["patch_draft_created"], result["unified_diff_detected"], result["patch_draft_format_invalid"]), ("NO", "NO", "YES"))
         self.assertFalse((self.root / "codex-handoff" / "patch-drafts").exists())
+
+    def test_pre_send_provider_failure_is_not_misclassified_as_patch_format_error(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        error = BrainProviderError(
+            "DEEPSEEK_BRIDGE_DIRECT_MODE_PARAM_INVALID",
+            metadata={
+                "provider_error_stage": "before_bridge_send",
+                "bridge_send_attempted": "NO",
+                "bridge_ui_send_attempt_count": 0,
+                "model_output_available": "NO",
+            },
+        )
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", side_effect=error) as invoke:
+            result = coordinator.coordinate({
+                "task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True,
+                "allow_patch_draft": True, "selected_mode": "expert_thinking", "search": False,
+            })
+        self.assertEqual(invoke.call_args.kwargs["selected_mode"], "expert_thinking")
+        self.assertIs(invoke.call_args.kwargs["search"], False)
+        self.assertEqual(result["error_code"], "DEEPSEEK_BRIDGE_DIRECT_MODE_PARAM_INVALID")
+        self.assertEqual((result["provider_error_stage"], result["bridge_send_attempted"], result["bridge_ui_send_attempt_count"], result["model_output_available"]), ("before_bridge_send", "NO", 0, "NO"))
+        self.assertEqual((result["deepseek_request_sent"], result["patch_draft_retry_sent"], result["patch_draft_source"]), ("NO", "NO", "not_attempted"))
+        self.assertEqual((result["patch_draft_created"], result["patch_draft_format_invalid"], result["patch_draft_unavailable"], result["unified_diff_detected"], result["structured_patch_detected"], result["structured_patch_synthesized"]), ("NO", "NO", "NO", "NO", "NO", "NO"))
+        self.assertEqual((result["patch_draft_location"], result["patch_draft_metadata"]), ("NONE", "NONE"))
+        self.assertFalse(result["retry_available"])
+
+    def test_llm_context_build_failure_is_a_pre_send_error(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator._context_prompt", side_effect=ValueError("invalid bundle")), patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as invoke:
+            result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        invoke.assert_not_called()
+        self.assertEqual((result["error_code"], result["provider_error_stage"], result["provider_error_code"]), ("LLM_CONTEXT_BUNDLE_BUILD_FAILED", "before_bridge_send", "LLM_CONTEXT_BUNDLE_BUILD_FAILED"))
+        self.assertEqual((result["patch_draft_source"], result["patch_draft_format_invalid"], result["model_output_available"]), ("not_attempted", "NO", "NO"))
+
+    def test_sanitizer_and_allowlist_blocks_are_pre_send_not_patch_invalid(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as invoke:
+            blocked = coordinator.coordinate({"task": "打印 api_key", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        invoke.assert_not_called()
+        self.assertEqual((blocked["error_code"], blocked["provider_error_code"], blocked["patch_draft_source"], blocked["patch_draft_format_invalid"]), ("LOCAL_AGENT_HIGH_RISK_STOP", "SANITIZER_BLOCKED_BEFORE_SEND", "not_attempted", "NO"))
+        disabled = lambda: [{"id": "deepseek-web-bridge", "type": "DEEPSEEK_WEB_BRIDGE", "enabled": False, "status": "DISABLED"}]
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=disabled)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as invoke:
+            denied = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        invoke.assert_not_called()
+        self.assertEqual((denied["error_code"], denied["provider_error_stage"], denied["patch_draft_source"]), ("DEEPSEEK_BRIDGE_DIRECT_ALLOWLIST_BLOCKED", "before_bridge_send", "not_attempted"))
 
     def test_valid_project_relative_diff_is_persisted_with_redacted_metadata(self):
         diff = """一、问题摘要

@@ -166,6 +166,8 @@ def main() -> None:
         if action == "coordinate":
             item.add_argument("--invoke-brain", action="store_true", help="explicitly send redacted context to the selected local brain")
             item.add_argument("--patch-draft", action="store_true", help="require a project-relative unified diff; never apply it")
+            item.add_argument("--selected-mode", choices=("quick_plain", "quick_thinking", "quick_search", "expert_plain", "expert_thinking", "expert_thinking_search"), help="require a previously verified local DeepSeek text mode")
+            item.add_argument("--no-search", action="store_true", help="require search=false for a local project task")
     context_plan = deepseek_head_sub.add_parser("plan-from-context")
     context_plan.add_argument("--context-id", required=True)
     execute_plan = deepseek_head_sub.add_parser("execute-plan")
@@ -277,7 +279,7 @@ def main() -> None:
             if args.deepseek_head_action == "choose-brain":
                 emit(choose_brain(args.task, args.brain_provider))
             elif args.deepseek_head_action in {"coordinate", "collect-context"}:
-                emit(coordinator.coordinate({"task": args.task, "brain_provider": args.brain_provider, "invoke_brain": bool(getattr(args, "invoke_brain", False)), "allow_patch_draft": bool(getattr(args, "patch_draft", False))}))
+                emit(coordinator.coordinate({"task": args.task, "brain_provider": args.brain_provider, "invoke_brain": bool(getattr(args, "invoke_brain", False)), "allow_patch_draft": bool(getattr(args, "patch_draft", False)), "selected_mode": getattr(args, "selected_mode", None), "search": False if bool(getattr(args, "no_search", False)) else None}))
             elif args.deepseek_head_action == "plan-from-context":
                 emit(agent_api_request("/deepseek-head/plan-from-context", {"context_bundle_id": args.context_id, "invoke_brain": False}))
             else:

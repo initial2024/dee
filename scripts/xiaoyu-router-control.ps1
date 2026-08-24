@@ -687,7 +687,12 @@ function Add-DeepSeekLog([string]$Action,[object]$Result) {
 }
 function Format-DeepSeekHeadSummary([object]$Record) {
     if (-not $Record) { return '尚未收集上下文。默认只读，不会修改文件。' }
-    if ($Record.error_code) { return ("DeepSeek 首脑协作失败`r`n错误码：{0}`r`n回退原因：{1}`r`n已修改文件：否`r`n已发送工具：否" -f $Record.error_code,$Record.fallback_reason) }
+    if ($Record.error_code) {
+        if ($Record.provider_error_stage -eq 'before_bridge_send') {
+            return ("DeepSeek 首脑在发送前被阻断`r`n错误码：{0}`r`n发送尝试：否；网页发送计数：{1}`r`n模型输出：否；补丁草案：未尝试`r`n已修改文件：否`r`n请检查本地模式参数或 Provider 状态。" -f $Record.provider_error_code,$Record.bridge_ui_send_attempt_count)
+        }
+        return ("DeepSeek 首脑协作失败`r`n错误码：{0}`r`n回退原因：{1}`r`n已修改文件：否`r`n已发送工具：否" -f $Record.error_code,$Record.fallback_reason)
+    }
     $health = if ($Record.provider_health) { (@($Record.provider_health.psobject.Properties | ForEach-Object { '{0}={1}' -f $_.Name,$_.Value.status }) -join '；') } else { '未知' }
     $draft = if($Record.patch_draft_created -eq 'YES' -and $Record.patch_draft_source -eq 'structured_patch'){'已由结构化补丁草案生成 unified diff，尚未应用。位置：' + $Record.patch_draft_location}elseif($Record.patch_draft_created -eq 'YES'){'已生成 direct unified diff：' + $Record.patch_draft_location}elseif($Record.patch_draft_unavailable -eq 'YES'){'上下文不足：DeepSeek 表示无法生成'}elseif($Record.patch_synthesizer_error_code){'结构化补丁转换失败：' + $Record.patch_synthesizer_error_code}elseif($Record.patch_draft_format_invalid -eq 'YES'){'格式无效：未生成可审查 unified diff'}else{'未生成'}
     return ("任务难度：{0}`r`n选定辅助脑：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`nContext Bundle：{4}`r`nAgent Plan：{5}`r`nPatch Draft 状态：{6}`r`nProvider 状态：{7}`r`n默认模式：PLAN_ONLY / READ_ONLY`r`n文件修改：否；测试：否；commit：否`r`nDeepSeek 工具转发：否" -f $Record.task_difficulty,$Record.selected_brain,$Record.why_selected,$Record.fallback_reason,$Record.context_bundle_id,$Record.deepseek_plan_id,$draft,$health)
