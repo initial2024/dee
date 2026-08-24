@@ -28,6 +28,7 @@ $CodexModeScript = Join-Path $PSScriptRoot 'codex-mode-manager.ps1'
 $script:DeepSeekLastHealth = '未运行'
 $script:DeepSeekModeProbe = $null
 $script:DeepSeekModePreference = 'auto'
+$script:DeepSeekPerformanceMode = 'balanced'
 $script:DeepSeekLastSelection = $null
 $script:LastModeDebugJson = ''
 $script:UiDebugEntries = [System.Collections.Generic.List[string]]::new()
@@ -590,7 +591,7 @@ $deepSeekStatusGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekStatus
 $deepSeekStatus = New-Object System.Windows.Forms.TextBox; $deepSeekStatus.Multiline = $true; $deepSeekStatus.ReadOnly = $true; $deepSeekStatus.ScrollBars = 'Vertical'; $deepSeekStatus.Font = $uiFont; $deepSeekStatus.Dock = 'Fill'; $deepSeekStatusGroup.Controls.Add($deepSeekStatus)
 $deepSeekModeGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekModeGroup.Text = 'DeepSeek 网页模式策略（只读探测）'; $deepSeekModeGroup.Dock = 'Fill'; $deepSeekModeGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekModeGroup,0,1)
 $deepSeekModeStatus = New-Object System.Windows.Forms.TextBox; $deepSeekModeStatus.Multiline = $true; $deepSeekModeStatus.ReadOnly = $true; $deepSeekModeStatus.Dock = 'Fill'; $deepSeekModeStatus.Font = $uiFont; $deepSeekModeGroup.Controls.Add($deepSeekModeStatus)
-$deepSeekModeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekModeButtons.Dock = 'Bottom'; $deepSeekModeButtons.Height = 38; $deepSeekModeButtons.Font = $buttonFont; $deepSeekModeGroup.Controls.Add($deepSeekModeButtons)
+$deepSeekModeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekModeButtons.Dock = 'Bottom'; $deepSeekModeButtons.Height = 82; $deepSeekModeButtons.AutoScroll = $true; $deepSeekModeButtons.Font = $buttonFont; $deepSeekModeGroup.Controls.Add($deepSeekModeButtons)
 $deepSeekActionsGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekActionsGroup.Text = '本地操作'; $deepSeekActionsGroup.Dock = 'Fill'; $deepSeekActionsGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekActionsGroup,0,2)
 $deepSeekButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekButtons.Dock = 'Fill'; $deepSeekButtons.AutoScroll = $true; $deepSeekButtons.Font = $buttonFont; $deepSeekActionsGroup.Controls.Add($deepSeekButtons)
 $deepSeekLogGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekLogGroup.Text = '最近本地操作日志（已脱敏）'; $deepSeekLogGroup.Dock = 'Fill'; $deepSeekLogGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekLayout.Controls.Add($deepSeekLogGroup,0,3)
@@ -693,8 +694,9 @@ function Add-DeepSeekHeadButton([string]$Caption,[scriptblock]$Action,[int]$Widt
 }
 function Get-DeepSeekModeStatusText([object]$Probe) {
     if (-not $Probe) { return ("模式策略：自动选择（尚未运行只读探测）`r`n请点击探测 DeepSeek 模式；该操作只读取页面控件，不发送提示词、不点击发送。") }
-    $labels = [ordered]@{ normal = '普通'; search = '搜索'; thinking = '思考'; expert = '专家' }
-    $lines = @("模式策略：$script:DeepSeekModePreference",("探测：{0}；promptSent={1}；clickSend={2}" -f $Probe.status,$Probe.promptSent,$Probe.clickSend))
+    $labels = [ordered]@{ quick = '快速'; expert = '专家'; thinking = '深度思考'; search = '智能搜索'; vision = '视觉识图'; file = '文件上传' }
+    $performanceLabel = @{ economy='省时'; balanced='平衡'; accuracy='严谨' }[$script:DeepSeekPerformanceMode]
+    $lines = @("模式策略：$script:DeepSeekModePreference；性能策略：$performanceLabel",("探测：{0}；promptSent={1}；clickSend={2}；uploadAttempted={3}" -f $Probe.status,$Probe.promptSent,$Probe.clickSend,$Probe.uploadAttempted))
     foreach ($mode in $labels.Keys) {
         $item = $Probe.modes.$mode
         $state = if ($item.status -eq 'AVAILABLE' -and $item.controllable) { '可用' } elseif ($item.status) { [string]$item.status } else { 'UNKNOWN' }
@@ -702,7 +704,8 @@ function Get-DeepSeekModeStatusText([object]$Probe) {
     }
     if ($Probe.error_code) { $lines += ("错误码：{0}；说明：{1}" -f $Probe.error_code,(Get-UiErrorExplanation ([string]$Probe.error_code))) }
     if ($script:DeepSeekLastSelection) { $lines += ("最近推荐模式：{0}（{1}）" -f $script:DeepSeekLastSelection.selected_mode,$script:DeepSeekLastSelection.selected_model_alias) }
-    $lines += '自动选择顺序：搜索 → 思考 → 专家 → 普通；手动固定或显式模型别名优先。'
+    $lines += ("当前网页模式：base={0}；深度思考={1}；智能搜索={2}；输入模态={3}" -f $Probe.current_base_mode,$Probe.current_thinking,$Probe.current_search,$Probe.current_modality)
+    $lines += '本地项目任务默认“专家 + 深度思考 + 不联网搜索”；截图任务默认“视觉 + 专家 + 深度思考”；仅最新资料、官网、价格、新闻才开启搜索。'
     return ($lines -join "`r`n")
 }
 function Refresh-DeepSeekModePanel {
@@ -722,19 +725,24 @@ function Invoke-DeepSeekModeProbe {
         throw 'UI_PROBE_RESPONSE_INVALID'
     }
 }
-function Set-DeepSeekModePreference([ValidateSet('auto','normal','search','thinking','expert')][string]$Preference) {
+function Set-DeepSeekModePreference([ValidateSet('auto','quick_plain','quick_thinking','quick_search','expert_plain','expert_thinking','expert_thinking_search','vision_expert_thinking','file_extract')][string]$Preference) {
     $script:DeepSeekModePreference = $Preference
     Refresh-DeepSeekModePanel
     [System.Windows.Forms.MessageBox]::Show(("已设置 DeepSeek 模式策略：{0}`r`n这只影响本地选择说明，不会发送请求，也不会修改 Codex 配置。" -f $Preference),'DeepSeek 模式策略') | Out-Null
 }
+function Set-DeepSeekPerformanceMode([ValidateSet('economy','balanced','accuracy')][string]$Performance) {
+    $script:DeepSeekPerformanceMode = $Performance
+    Refresh-DeepSeekModePanel
+    [System.Windows.Forms.MessageBox]::Show("已设置性能策略：$Performance。仅影响自动选择，不会发送请求。",'DeepSeek 模式策略') | Out-Null
+}
 function Format-DeepSeekSelectionSummary([object]$Record) {
-    $labels = @{ normal = '普通'; search = '搜索'; thinking = '思考'; expert = '专家'; auto = '自动' }
+    $labels = @{ quick_plain = '快速'; quick_thinking = '快速 + 深度思考'; quick_search = '快速 + 搜索'; expert_plain = '专家'; expert_thinking = '专家 + 深度思考'; expert_thinking_search = '专家 + 深度思考 + 搜索'; vision_expert_thinking = '视觉 + 专家 + 深度思考'; file_extract = '文件提取' }
     $mode = if ($labels.ContainsKey([string]$Record.selected_mode)) { $labels[[string]$Record.selected_mode] } else { [string]$Record.selected_mode }
     $fallback = if ($Record.fallback_reason) { [string]$Record.fallback_reason } else { '无' }
     return ("推荐模式：{0}`r`n模型别名：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`n模式可用：{4}" -f $mode,$Record.selected_model_alias,$Record.why_selected,$fallback,$Record.mode_available)
 }
 function Explain-DeepSeekModeSelection {
-    $raw = Invoke-RouterCli @('deepseek','explain-mode','当前 Codex 请求未提供任务文本')
+    $raw = Invoke-RouterCli @('deepseek','explain-mode','当前 Codex 请求未提供任务文本','--preference',$script:DeepSeekModePreference,'--performance-mode',$script:DeepSeekPerformanceMode)
     try {
         $script:DeepSeekLastSelection = $raw | ConvertFrom-Json
         Refresh-DeepSeekModePanel
@@ -1071,10 +1079,17 @@ Add-DeepSeekButton '手动 Smoke（双确认）' { Invoke-DeepSeekManualSmoke } 
 Add-DeepSeekButton '停止服务' { Invoke-DeepSeekPanelAction 'stop' }
 Add-DeepSeekButton '打开日志目录' { if(Test-Path -LiteralPath $DeepSeekRuntimeDir){Start-Process explorer.exe -ArgumentList ('"' + $DeepSeekRuntimeDir + '"');$result=[pscustomobject]@{exit_code=0;error_type='OPENED'}}else{$result=[pscustomobject]@{exit_code=1;error_type='LOG_DIRECTORY_NOT_FOUND'}};Add-DeepSeekLog 'open-log-directory' $result;[System.Windows.Forms.MessageBox]::Show(('日志目录：{0}`r`n状态：{1}' -f $DeepSeekRuntimeDir,$result.error_type),'DeepSeek 本地桥接') }
 Add-DeepSeekModeButton '自动选择模式' { Set-DeepSeekModePreference 'auto' }
-Add-DeepSeekModeButton '固定普通模式' { Set-DeepSeekModePreference 'normal' }
-Add-DeepSeekModeButton '固定搜索模式' { Set-DeepSeekModePreference 'search' }
-Add-DeepSeekModeButton '固定思考模式' { Set-DeepSeekModePreference 'thinking' }
-Add-DeepSeekModeButton '固定专家模式' { Set-DeepSeekModePreference 'expert' }
+Add-DeepSeekModeButton '省时模式' { Set-DeepSeekPerformanceMode 'economy' }
+Add-DeepSeekModeButton '平衡模式' { Set-DeepSeekPerformanceMode 'balanced' }
+Add-DeepSeekModeButton '严谨模式' { Set-DeepSeekPerformanceMode 'accuracy' }
+Add-DeepSeekModeButton '固定快速' { Set-DeepSeekModePreference 'quick_plain' }
+Add-DeepSeekModeButton '固定快速+思考' { Set-DeepSeekModePreference 'quick_thinking' }
+Add-DeepSeekModeButton '固定快速+搜索' { Set-DeepSeekModePreference 'quick_search' }
+Add-DeepSeekModeButton '固定专家' { Set-DeepSeekModePreference 'expert_plain' }
+Add-DeepSeekModeButton '固定专家+深度思考' { Set-DeepSeekModePreference 'expert_thinking' } 190
+Add-DeepSeekModeButton '固定专家+深度思考+搜索' { Set-DeepSeekModePreference 'expert_thinking_search' } 220
+Add-DeepSeekModeButton '固定视觉+专家+深度思考' { Set-DeepSeekModePreference 'vision_expert_thinking' } 225
+Add-DeepSeekModeButton '固定文件提取' { Set-DeepSeekModePreference 'file_extract' }
 Add-DeepSeekModeButton '探测 DeepSeek 模式' { Invoke-DeepSeekModeProbe } 165
 Add-DeepSeekModeButton '查看模式选择原因' { Explain-DeepSeekModeSelection } 165
 Add-DeepSeekHeadButton '自动选择辅助脑' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只读分类和健康门控，不发送 DeepSeek prompt。'

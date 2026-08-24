@@ -8,14 +8,14 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .deepseek_modes import MODE_ALIASES, MODE_ORDER, load_probe_state
+from .deepseek_modes import load_probe_state
 
 
 DEEPSEEK_BASE = "http://127.0.0.1:8792/v1"
 DEEPSEEK_HEALTH = "http://127.0.0.1:8791/health"
 LOCAL_BASE = "http://127.0.0.1:1234/v1"
 BRIDGE_API_KEY_ENV = "XIAOYU_ROUTER_BRIDGE_API_KEY"
-DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", "deepseek-web-search", "deepseek-web-thinking", "deepseek-web-expert", "deepseek-web-auto"}
+DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", "deepseek-web-search", "deepseek-web-thinking", "deepseek-web-quick-thinking", "deepseek-web-expert", "deepseek-web-auto"}
 
 
 def _loopback(value: str) -> bool:
@@ -51,17 +51,23 @@ def _deepseek_ready_models() -> list[str]:
     state = load_probe_state()
     modes = state.get("modes") if isinstance(state.get("modes"), dict) else {}
     ready: list[str] = []
-    for mode in MODE_ORDER:
-        item = modes.get(mode)
-        if not isinstance(item, dict) or item.get("status") != "AVAILABLE":
-            continue
-        ready.append(MODE_ALIASES[mode])
-        if mode == "normal":
-            ready.append("deepseek-web-fast")
-        if mode == "expert":
-            ready.append("deepseek-head")
+    available = lambda name: isinstance(modes.get(name), dict) and modes[name].get("status") == "AVAILABLE" and modes[name].get("controllable", True) is not False
+    if available("quick"):
+        ready.extend(["deepseek-web", "deepseek-web-fast", "deepseek-web-auto"])
+    if available("expert"):
+        ready.extend(["deepseek-web-expert", "deepseek-head"])
+    if available("expert") and available("thinking"):
+        ready.extend(["deepseek-web-thinking", "deepseek-web-quick-thinking", "deepseek-web-expert-thinking"])
+    if available("quick") and available("search"):
+        ready.append("deepseek-web-search")
+    if available("expert") and available("thinking") and available("search"):
+        ready.append("deepseek-web-expert-thinking-search")
+    if available("vision") and available("expert") and available("thinking"):
+        ready.append("deepseek-web-vision-expert-thinking")
+    if available("file") and available("expert") and available("thinking"):
+        ready.append("deepseek-web-file-extract")
     if ready:
-        ready.append(MODE_ALIASES["auto"])
+        ready.append("deepseek-web-auto")
     return list(dict.fromkeys(ready))
 
 

@@ -126,7 +126,7 @@ def main() -> None:
     deepseek = sub.add_parser("deepseek")
     deepseek_sub = deepseek.add_subparsers(dest="deepseek_action", required=True)
     deepseek_sub.add_parser("mode-probe")
-    explain_mode = deepseek_sub.add_parser("explain-mode"); explain_mode.add_argument("task"); explain_mode.add_argument("--preference", choices=("auto", "normal", "search", "thinking", "expert"), default="auto"); explain_mode.add_argument("--model-alias"); explain_mode.add_argument("--codex-mode", default="CUSTOM_DEEPSEEK_TEXT_ONLY"); explain_mode.add_argument("--tools-policy", default="strict_reject"); explain_mode.add_argument("--no-search", action="store_true"); explain_mode.add_argument("--no-thinking", action="store_true"); explain_mode.add_argument("--no-expert", action="store_true")
+    explain_mode = deepseek_sub.add_parser("explain-mode"); explain_mode.add_argument("task"); explain_mode.add_argument("--preference", default="auto"); explain_mode.add_argument("--model-alias"); explain_mode.add_argument("--image-path"); explain_mode.add_argument("--file-path"); explain_mode.add_argument("--attachment-id"); explain_mode.add_argument("--performance-mode", choices=("economy", "balanced", "accuracy"), default="balanced"); explain_mode.add_argument("--failure-reason"); explain_mode.add_argument("--codex-mode", default="CUSTOM_DEEPSEEK_TEXT_ONLY"); explain_mode.add_argument("--tools-policy", default="strict_reject"); explain_mode.add_argument("--no-search", action="store_true"); explain_mode.add_argument("--no-thinking", action="store_true"); explain_mode.add_argument("--no-expert", action="store_true")
     agent = sub.add_parser("agent", help="confirmation-gated Xiaoyu Local Agent")
     agent_sub = agent.add_subparsers(dest="agent_action", required=True)
     agent_plan = agent_sub.add_parser("plan"); agent_plan.add_argument("--task", required=True); agent_plan.add_argument("--brain-provider", "--brain", dest="brain_provider", choices=BRAIN_PROVIDERS, default="local-light"); agent_plan.add_argument("--risk", choices=("auto", "low", "medium", "high"), default="auto"); agent_plan.add_argument("--invoke-brain", action="store_true", help="explicitly invoke the selected advisory brain; never enabled by default")
@@ -203,7 +203,7 @@ def main() -> None:
             emit(probe_deepseek_modes())
         else:
             state = load_probe_state()
-            emit(select_deepseek_mode(args.task, codex_mode=args.codex_mode, tools_policy=args.tools_policy, user_preference=args.preference, explicit_model_alias=args.model_alias, availability=state.get("modes"), search_allowed=not args.no_search, thinking_allowed=not args.no_thinking, expert_allowed=not args.no_expert))
+            emit(select_deepseek_mode(args.task, codex_mode=args.codex_mode, tools_policy=args.tools_policy, user_preference=args.preference, explicit_model_alias=args.model_alias, availability=state.get("modes"), image_path=args.image_path, file_path=args.file_path, attachment_id=args.attachment_id, performance_mode=args.performance_mode, failure_reason=args.failure_reason, search_allowed=not args.no_search, thinking_allowed=not args.no_thinking, expert_allowed=not args.no_expert))
     elif args.command == "agent":
         if args.agent_action == "api-health":
             emit(agent_api_request("/agent/health"))

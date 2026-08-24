@@ -33,6 +33,10 @@ class DirectBridgeTests(unittest.TestCase):
         health.update(overrides)
         return health
 
+    @staticmethod
+    def ready_mode_probe():
+        return {"quick_available": True, "expert_available": True, "thinking_available": True, "search_available": True, "vision_available": False, "file_upload_available": False, "ui_changed": False, "modes": {name: {"status": "AVAILABLE" if name in {"quick", "expert", "thinking", "search"} else "UNAVAILABLE", "controllable": name in {"quick", "expert", "thinking", "search"}} for name in ("quick", "expert", "thinking", "search", "vision", "file")}}
+
     def test_non_loopback_endpoints_are_rejected(self):
         for url in ("https://127.0.0.1:8791/v1", "http://localhost:8791/v1", "http://192.168.137.1:8791/v1", "http://127.0.0.1:8792/v1"):
             with self.subTest(url=url):
@@ -62,7 +66,7 @@ class DirectBridgeTests(unittest.TestCase):
 
     def test_direct_post_is_text_only_and_loopback(self):
         requests: list[Request | str] = []
-        responses = iter((FakeResponse(self.ready_health()), FakeResponse({"choices": [{"message": {"content": "PLAN_OK"}}]})))
+        responses = iter((FakeResponse(self.ready_health()), FakeResponse(self.ready_mode_probe()), FakeResponse({"choices": [{"message": {"content": "PLAN_OK"}}]})))
 
         def opener(request, **_kwargs):
             requests.append(request)
@@ -70,8 +74,9 @@ class DirectBridgeTests(unittest.TestCase):
 
         result = run_deepseek_bridge_direct("只生成计划", opener=opener)
         self.assertEqual((result["status"], result["analysis"]), ("PASS", "PLAN_OK"))
-        self.assertEqual(requests[1].full_url, "http://127.0.0.1:8791/v1/chat/completions")
-        payload = json.loads(requests[1].data.decode("utf-8"))
+        self.assertEqual(requests[1], "http://127.0.0.1:8791/mode-probe")
+        self.assertEqual(requests[2].full_url, "http://127.0.0.1:8791/v1/chat/completions")
+        payload = json.loads(requests[2].data.decode("utf-8"))
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
         self.assertNotIn("function_call", payload)
@@ -82,7 +87,7 @@ class DirectBridgeTests(unittest.TestCase):
         self.assertEqual(result["secrets_logged"], "NO")
 
     def test_empty_response_is_not_success(self):
-        responses = iter((FakeResponse(self.ready_health()), FakeResponse({"choices": [{"message": {"content": ""}}]})))
+        responses = iter((FakeResponse(self.ready_health()), FakeResponse(self.ready_mode_probe()), FakeResponse({"choices": [{"message": {"content": ""}}]})))
         result = run_deepseek_bridge_direct("plan", opener=lambda *_args, **_kwargs: next(responses))
         self.assertEqual(result["error_code"], "DEEPSEEK_EMPTY_RESPONSE")
 

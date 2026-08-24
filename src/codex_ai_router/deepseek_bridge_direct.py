@@ -17,11 +17,13 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .deepseek_head import advisory_result
+from .deepseek_modes import select_deepseek_mode
 from .response_compat import ResponseCompatibilityError, normalize_chat_completion
 
 
 BRIDGE_DIRECT_BASE = "http://127.0.0.1:8791/v1"
 BRIDGE_DIRECT_HEALTH = "http://127.0.0.1:8791/health"
+BRIDGE_DIRECT_MODE_PROBE = "http://127.0.0.1:8791/mode-probe"
 BRIDGE_DIRECT_MODEL = "deepseek-web"
 TEXT_ONLY_SYSTEM = (
     "当前为 TEXT_ONLY 计划模式。你不能调用工具，也不能声称已经读取、修改、运行、提交或部署。"
@@ -109,6 +111,7 @@ def run_deepseek_bridge_direct(
     *,
     api_base: str = BRIDGE_DIRECT_BASE,
     health_url: str = BRIDGE_DIRECT_HEALTH,
+    mode_probe_url: str = BRIDGE_DIRECT_MODE_PROBE,
     timeout: int = 90,
     opener: Callable[..., Any] = urlopen,
 ) -> dict[str, Any]:
@@ -117,7 +120,7 @@ def run_deepseek_bridge_direct(
     started = time.monotonic()
     base = api_base.rstrip("/")
     completion_url = base + "/chat/completions"
-    if not str(task).strip() or not _strict_loopback(health_url, path="/health") or not _strict_loopback(completion_url, path="/v1/chat/completions"):
+    if not str(task).strip() or not _strict_loopback(health_url, path="/health") or not _strict_loopback(mode_probe_url, path="/mode-probe") or not _strict_loopback(completion_url, path="/v1/chat/completions"):
         return _bridge_error("DEEPSEEK_MODE_UNAVAILABLE", request_id, started)
     try:
         _status, health = _read_json(health_url, min(timeout, 5), opener)
@@ -141,18 +144,28 @@ def run_deepseek_bridge_direct(
     health_error = _health_error(health)
     if health_error:
         return _bridge_error(health_error, request_id, started)
+    try:
+        probe_status, probe = _read_json(mode_probe_url, min(timeout, 5), opener)
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return _bridge_error("DEEPSEEK_MODE_UNAVAILABLE", request_id, started)
+    if probe_status != 200 or probe.get("ui_changed") is True:
+        return _bridge_error("DEEPSEEK_MODE_UNAVAILABLE", request_id, started)
+    selected = select_deepseek_mode(str(task), availability=probe.get("modes") if isinstance(probe.get("modes"), dict) else {})
+    if not selected["mode_available"]:
+        return _bridge_error(str(selected.get("fallback_reason") or "DEEPSEEK_MODE_UNAVAILABLE"), request_id, started)
+    selected_model = str(selected["selected_model_alias"])
     payload = {
-        "model": BRIDGE_DIRECT_MODEL,
+        "model": selected_model,
         "messages": [{"role": "system", "content": TEXT_ONLY_SYSTEM}, {"role": "user", "content": str(task).strip()}],
         "stream": False,
     }
     request = Request(completion_url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
     try:
         _status, upstream = _read_json(request, timeout, opener)
-        normalized = normalize_chat_completion(upstream, model=BRIDGE_DIRECT_MODEL)
+        normalized = normalize_chat_completion(upstream, model=selected_model)
         text = normalized["choices"][0]["message"]["content"]
         result = advisory_result(text, task_type)
-        return {"request_id": request_id, "status": "PASS", "model": BRIDGE_DIRECT_MODEL, "stream_mode": "non_stream", "endpoint_mode": "DEEPSEEK_BRIDGE_DIRECT", "loopback_only": "YES", "duration_ms": round((time.monotonic() - started) * 1000), "prompt_response_logged": "NO", "secrets_logged": "NO", **result}
+        return {"request_id": request_id, "status": "PASS", "model": selected_model, "selected_mode": selected["selected_mode"], "task_difficulty": selected["task_difficulty"], "performance_mode": selected["performance_mode"], "stream_mode": "non_stream", "endpoint_mode": "DEEPSEEK_BRIDGE_DIRECT", "loopback_only": "YES", "duration_ms": round((time.monotonic() - started) * 1000), "prompt_response_logged": "NO", "secrets_logged": "NO", **result}
     except HTTPError as exc:
         try:
             code = _error_from_body(exc.read())
