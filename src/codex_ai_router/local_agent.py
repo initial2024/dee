@@ -32,11 +32,17 @@ PLAN_MODES = ("READ_ONLY", "PLAN_ONLY", "PATCH_DRAFT", "APPLY_WITH_CONFIRM", "SA
 _HIGH_RISK_PATTERNS = (
     r"\bgit\s+push\b", r"\bpush\b", r"deploy", r"production", r"生产", r"部署",
     r"firewall", r"防火墙", r"公网", r"开放\s*(?:lan|局域网)", r"\bLAN\b",
-    r"\.ssh", r"ssh\s*key", r"密钥", r"private\s+key", r"私钥",
-    r"password", r"密码", r"cookie", r"token", r"authorization", r"api[_ -]?key", r"secret", r"凭据",
+    r"\.ssh", r"ssh\s*key", r"private\s+key", r"私钥",
     r"captcha", r"验证码", r"风控", r"绕过", r"bypass", r"pow\s*solver",
     r"curl[_-]?cffi", r"remote\s+script", r"远程脚本", r"rm\s+-rf", r"del\s+/s",
     r"删除\s*(?:所有|全部)", r"清空\s*(?:目录|文件)", r"format\s+disk", r"修改系统",
+)
+_CREDENTIAL_EXFILTRATION_PATTERNS = (
+    r"(?:print|display|show|export|leak|reveal|copy|dump|output)\s*(?:(?:this|that|the)\s*)?(?:api[_ -]?key|authorization|token|cookie|password|secret|credential)",
+    r"(?:读取|打印|显示|导出|泄露|复制|输出)\s*(?:(?:这个|该)\s*)?(?:密钥|凭据|密码|令牌|cookie|token|api[_ -]?key|authorization)",
+    r"(?:bypass|绕过).{0,24}(?:captcha|验证码|风控)",
+    r"(?:replay|重放).{0,32}(?:private\s*api|私有\s*api)",
+    r"(?:export|导出).{0,24}(?:storage[_ -]?state|存储状态)",
 )
 _WRITE_PATTERNS = (
     r"\b(write|edit|modify|change|create|implement|fix|apply|save|delete|rename|format|update)\b",
@@ -83,6 +89,12 @@ def _matches(task: str, patterns: Iterable[str]) -> bool:
     return any(re.search(pattern, value, flags=re.I) for pattern in patterns)
 
 
+def _is_high_risk(task: str) -> bool:
+    value = str(task or "")
+    value = re.sub(r"(?i)(?:不|不要|禁止|无需|未|not|do\s+not)\s*(?:print|display|show|export|leak|reveal|copy|dump|output|读取|打印|显示|导出|泄露|复制|输出)", "", value)
+    return _matches(task, _HIGH_RISK_PATTERNS) or _matches(value, _CREDENTIAL_EXFILTRATION_PATTERNS)
+
+
 def _write_intent_text(task: str) -> str:
     """Return task text with explicit read-only/negated write phrases removed."""
     value = str(task or "").lower()
@@ -102,7 +114,7 @@ def classify_risk(task: str, explicit: str = "auto") -> str:
     chosen = str(explicit or "auto").lower()
     if chosen in {"low", "medium", "high"}:
         return chosen
-    if _matches(task, _HIGH_RISK_PATTERNS):
+    if _is_high_risk(task):
         return "high"
     if _requires_write(task):
         return "medium"
@@ -131,7 +143,7 @@ def _brain_gate(provider: str) -> dict[str, Any]:
 
 
 def _high_risk_reason(task: str) -> str | None:
-    if _matches(task, _HIGH_RISK_PATTERNS):
+    if _is_high_risk(task):
         return "LOCAL_AGENT_HIGH_RISK_STOP"
     return None
 

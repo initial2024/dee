@@ -15,12 +15,53 @@ MAX_FILE_SEARCH = 40
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".codex", ".agents"}
 SENSITIVE_NAMES = re.compile(r"(?i)(\.env|secret|credential|password|token|cookie|storage(state)?|\.pem$|\.key$)")
 SECRET_VALUE = re.compile(r"(?i)(authorization|bearer|cookie|token|api[_ -]?key|password|secret)\s*[:=]\s*[^\s,;]+")
+SENSITIVE_FIELD_NAME = re.compile(r"(?i)(?:\b(api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password)\b|\bsk-(?![A-Za-z0-9_-]))")
+REAL_SECRET_VALUE = re.compile(
+    r"(?ix)(?:\bsk-[a-z0-9_-]{12,}\b|\bbearer\s+[a-z0-9._~-]{12,}\b|"
+    r"\beyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\b|"
+    r"\b(?:api[_ -]?key|authorization|token|cookie|password|secret)\s*[:=]\s*(?!\[(?:REDACTED|VALUE_REDACTED)\])[^\s,;]{16,})"
+)
 
 
 def _redact(value: object, limit: int = 4000) -> str:
     text = str(value or "")
     text = SECRET_VALUE.sub(lambda m: m.group(1) + "=[REDACTED]", text)
     return text[:limit]
+
+
+def contains_real_secret_value(value: object) -> bool:
+    """Detect credential-shaped values, not harmless configuration field names."""
+    return bool(REAL_SECRET_VALUE.search(str(value or "")))
+
+
+def _llm_safe_text(value: object) -> str:
+    """Generalize sensitive field names before any model receives context."""
+    text = _redact(value)
+    text = SENSITIVE_FIELD_NAME.sub("credential_field_redacted", text)
+    return text
+
+
+def build_llm_context_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Return the model-safe projection of a local, already-redacted bundle.
+
+    Local callers may need neutral structural information.  Models receive a
+    separate copy with credential-related field names generalized as well.
+    """
+    allowed = ("project_root", "git_status", "changed_files", "relevant_files", "file_snippets", "diff_summary", "risk_flags", "loopback_ports")
+
+    def sanitize(value: Any) -> Any:
+        if isinstance(value, str):
+            return _llm_safe_text(value)
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        if isinstance(value, dict):
+            return {_llm_safe_text(key): sanitize(item) for key, item in value.items()}
+        return value
+
+    result = {key: sanitize(bundle.get(key)) for key in allowed}
+    result["sensitive_config_fields"] = "credential_field_redacted"
+    result["llm_context_sanitized"] = True
+    return result
 
 
 def _safe_path(path: Path, root: Path) -> bool:
@@ -91,8 +132,9 @@ class ContextCollector:
             pass
         return list(dict.fromkeys(item[1] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))))[:MAX_FILE_SEARCH]
 
-    def _snippets(self, files: Iterable[str]) -> list[dict[str, str]]:
+    def _snippets(self, files: Iterable[str]) -> tuple[list[dict[str, str]], bool]:
         snippets: list[dict[str, str]] = []
+        secret_value_detected = False
         for rel in files:
             if len(snippets) >= MAX_SNIPPETS:
                 break
@@ -103,8 +145,9 @@ class ContextCollector:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
+            secret_value_detected = secret_value_detected or contains_real_secret_value(text)
             snippets.append({"path": rel, "content": _redact(text, MAX_SNIPPET_CHARS)})
-        return snippets
+        return snippets, secret_value_detected
 
     def _recent_records(self) -> list[dict[str, Any]]:
         target = self.ledger or (Path.home() / ".codex-ai-router" / "local-agent" / "ledger.jsonl")
@@ -139,6 +182,7 @@ class ContextCollector:
     def collect(self, task: str, *, selected_brain: str = "auto") -> dict[str, Any]:
         changed = self._changed_files()
         relevant = self._relevant_files(task, changed)
+        snippets, secret_value_detected = self._snippets(relevant)
         git_status = _run_readonly(("git", "status", "--short"), self.root)
         diff_stat = _run_readonly(("git", "diff", "--stat"), self.root)
         return {
@@ -147,7 +191,7 @@ class ContextCollector:
             "git_status": _redact_git_output(git_status["output"], self.root),
             "changed_files": changed,
             "relevant_files": relevant,
-            "file_snippets": self._snippets(relevant),
+            "file_snippets": snippets,
             "diff_summary": _redact_git_output(diff_stat["output"], self.root),
             "risk_flags": [],
             "redaction_applied": True,
@@ -162,7 +206,11 @@ class ContextCollector:
             "tests_executed": "NO",
             "secrets_logged": "NO",
             "prompt_response_logged": "NO",
+            "secret_value_detected": secret_value_detected or contains_real_secret_value(task),
         }
 
 
-__all__ = ["ContextCollector", "MAX_SNIPPETS", "MAX_SNIPPET_CHARS"]
+__all__ = [
+    "ContextCollector", "MAX_SNIPPETS", "MAX_SNIPPET_CHARS",
+    "build_llm_context_bundle", "contains_real_secret_value",
+]

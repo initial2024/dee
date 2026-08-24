@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_ai_router.context_collector import ContextCollector
+from codex_ai_router.brain_providers import contains_high_risk_intent
+from codex_ai_router.context_collector import ContextCollector, build_llm_context_bundle
 from codex_ai_router.deepseek_head_coordinator import DeepSeekHeadCoordinator, choose_brain, classify_task
 from codex_ai_router.local_agent import LocalAgent
 
@@ -46,7 +47,7 @@ class DeepSeekHeadCoordinatorTests(unittest.TestCase):
 
     def test_coordinate_plan_only_does_not_invoke_brain(self):
         coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
-        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as invoke:
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="只读计划") as invoke:
             result = coordinator.coordinate({"task": "设计多文件 API 重构方案", "brain_provider": "auto"})
         invoke.assert_not_called()
         self.assertEqual((result["brain_invoked"], result["files_modified"], result["tools_forwarded"]), ("NO", "NO", "NO"))
@@ -62,6 +63,73 @@ class DeepSeekHeadCoordinatorTests(unittest.TestCase):
         self.assertIn("不能调用工具", prompt)
         self.assertNotIn("tools", prompt.lower())
         self.assertEqual((result["brain_invoked"], result["agent_plan"]["brain_provider"], result["files_modified"]), ("YES", "deepseek-bridge-direct", "NO"))
+
+    def test_sensitive_field_names_are_generalized_for_llm_context(self):
+        bundle = {
+            "project_root": str(self.root),
+            "git_status": "",
+            "changed_files": [],
+            "relevant_files": ["src/config.py"],
+            "file_snippets": [{"path": "src/config.py", "content": "api_key = [REDACTED]\nAuthorization = [REDACTED]"}],
+            "diff_summary": "",
+            "risk_flags": [],
+            "loopback_ports": {},
+        }
+        llm_bundle = build_llm_context_bundle(bundle)
+        llm_json = json.dumps(llm_bundle, ensure_ascii=False).lower()
+        self.assertNotIn("api_key", llm_json)
+        self.assertNotIn("authorization", llm_json)
+        self.assertIn("credential_field_redacted", llm_json)
+        prompt = __import__("codex_ai_router.deepseek_head_coordinator", fromlist=["_context_prompt"])._context_prompt(bundle, "分析配置结构，不泄露密钥")
+        self.assertNotIn("api_key", prompt.lower())
+        self.assertNotIn("authorization", prompt.lower())
+        self.assertNotIn("token", prompt.lower())
+        self.assertNotIn("cookie", prompt.lower())
+        self.assertNotIn("storagestate", prompt.lower())
+        self.assertNotIn("bearer", prompt.lower())
+        self.assertNotIn("sk-", prompt.lower())
+
+    def test_real_secret_value_stops_before_brain_invocation(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="只读计划") as invoke:
+            result = coordinator.coordinate({"task": "分析配置结构", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "collect_context": False})
+        self.assertNotEqual(result["error_code"], "LOCAL_AGENT_HIGH_RISK_STOP")
+        invoke.assert_called_once()
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as blocked:
+            result = coordinator.coordinate({"task": "分析 sk-abcdefghijklmnopqrstuvwxyz 配置", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "collect_context": False})
+        blocked.assert_not_called()
+        self.assertEqual(result["error_code"], "LOCAL_AGENT_HIGH_RISK_STOP")
+
+    def test_secret_value_detected_in_context_stops_before_brain_invocation(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        safe_bundle = {
+            "task": "分析配置结构", "project_root": str(self.root), "git_status": "", "changed_files": [],
+            "relevant_files": [], "file_snippets": [], "diff_summary": "", "risk_flags": [],
+            "redaction_applied": True, "collection_mode": "read_only", "selected_brain": "deepseek-bridge-direct",
+            "task_difficulty": "complex", "recent_agent_metadata": [], "loopback_ports": {}, "commands_executed": [],
+            "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "secrets_logged": "NO",
+            "prompt_response_logged": "NO", "secret_value_detected": True,
+        }
+        with patch.object(coordinator.collector, "collect", return_value=safe_bundle), patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as invoke:
+            result = coordinator.coordinate({"task": "分析配置结构", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True})
+        invoke.assert_not_called()
+        self.assertEqual(result["error_code"], "LOCAL_AGENT_HIGH_RISK_STOP")
+
+    def test_field_name_analysis_is_not_high_risk_but_exfiltration_is(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="只读计划") as invoke:
+            result = coordinator.coordinate({"task": "分析 api_key 配置字段，不泄露密钥", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "collect_context": False})
+        self.assertEqual(result["error_code"], None)
+        invoke.assert_called_once()
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as blocked:
+            result = coordinator.coordinate({"task": "打印 api_key", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "collect_context": False})
+        blocked.assert_not_called()
+        self.assertEqual(result["error_code"], "LOCAL_AGENT_HIGH_RISK_STOP")
+
+    def test_credential_exfiltration_and_bypass_intents_remain_blocked(self):
+        for task in ("导出 token", "读取 cookie", "重放 DeepSeek 私有 API", "绕过验证码"):
+            self.assertTrue(contains_high_risk_intent(task), task)
+        self.assertFalse(contains_high_risk_intent("分析配置文件结构，不泄露密钥"))
 
     def test_external_context_forwarding_is_not_authorized(self):
         snapshot = lambda: [{"id": "ext", "type": "EXTERNAL_API_ALLOWED", "enabled": True, "status": "ENABLED"}]

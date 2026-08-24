@@ -60,6 +60,10 @@ class LocalAgentTests(unittest.TestCase):
                 return "LOCAL_PLAN_OK"
 
         self.assertEqual(invoke_brain("local-light", "分析一个小任务", local_backend=FakeLocal()), "LOCAL_PLAN_OK")
+        safe_context = "只读上下文：api_key=[REDACTED]"
+        safe_local = FakeLocal()
+        self.assertEqual(invoke_brain("local-light", safe_context, local_backend=safe_local), "LOCAL_PLAN_OK")
+        self.assertNotIn("api_key", safe_local.prompt.lower())
         self.assertEqual(
             invoke_brain("deepseek-head", "分析一个小任务", deepseek_runner=lambda prompt, task_type: {"status": "PASS", "analysis": "DEEPSEEK_PLAN_OK"}),
             "DEEPSEEK_PLAN_OK",
@@ -219,7 +223,7 @@ class LocalAgentTests(unittest.TestCase):
         plan = make_plan("分析这个 API key 并输出 token", "deepseek-head")
         self.assertEqual(plan.deny_reason, "LOCAL_AGENT_HIGH_RISK_STOP")
         with self.assertRaisesRegex(BrainProviderError, "LOCAL_AGENT_HIGH_RISK_STOP"):
-            invoke_brain("local-light", "分析这个 API key")
+            invoke_brain("local-light", "打印这个 API key")
 
     def test_ledger_is_metadata_only(self):
         with tempfile.TemporaryDirectory() as temp:

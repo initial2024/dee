@@ -15,8 +15,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .brain_providers import BrainProviderError, invoke_brain
-from .context_collector import ContextCollector
+from .brain_providers import BrainProviderError, contains_high_risk_intent, contains_real_secret_value, invoke_brain
+from .context_collector import ContextCollector, build_llm_context_bundle
 from .local_agent import LocalAgent, classify_risk, make_plan
 from .provider_allowlist import providers as allowlisted_providers
 
@@ -79,10 +79,13 @@ def choose_brain(task: str, requested: str = "auto", snapshot: list[dict[str, An
 
 
 def _context_prompt(bundle: dict[str, Any], task: str) -> str:
-    compact = {key: bundle.get(key) for key in ("project_root", "git_status", "changed_files", "relevant_files", "file_snippets", "diff_summary", "risk_flags", "loopback_ports")}
+    compact = build_llm_context_bundle(bundle)
+    safe_task = str(task).strip()
+    safe_task = re.sub(r"(?i)(?:\b(api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password)\b|\bsk-(?![A-Za-z0-9_-]))", "credential_field_redacted", safe_task)
     return ("当前为 TEXT_ONLY 计划模式。不能调用工具，不能声称已经读取、修改、运行、提交或部署。"
-            "请只输出 Agent Plan、补丁建议、Codex 指令、手动命令建议和风险检查。\n用户任务：" +
-            str(task).strip() + "\n只读上下文（已脱敏）：\n" + json.dumps(compact, ensure_ascii=False))
+            "请只输出 Agent Plan、补丁建议、Codex 指令、手动命令建议和风险检查。"
+            "敏感配置字段和值已泛化，不要尝试恢复或索要它们。\n用户任务：" +
+            safe_task + "\n只读上下文（已泛化）：\n" + json.dumps(compact, ensure_ascii=False))
 
 
 def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dict[str, Any]:
@@ -151,7 +154,7 @@ class DeepSeekHeadCoordinator:
         invoke = payload.get("invoke_brain") is True
         output_plan: dict[str, Any] | None = None
         error_code = None
-        if invoke and classify_risk(task) == "high":
+        if invoke and (classify_risk(task) == "high" or contains_high_risk_intent(task) or contains_real_secret_value(task) or bool(bundle.get("secret_value_detected"))):
             error_code = "LOCAL_AGENT_HIGH_RISK_STOP"
         elif invoke and selected in {"deepseek-bridge-direct", "deepseek-head", "local-light"}:
             if selected == "deepseek-head":
@@ -207,6 +210,8 @@ class DeepSeekHeadCoordinator:
         selected = str(bundle.get("selected_brain") or "local-light")
         if selected == "local-agent-readonly":
             selected = "local-light"
+        if invoke and (contains_high_risk_intent(task) or contains_real_secret_value(task) or bool(bundle.get("secret_value_detected"))):
+            raise DeepSeekHeadCoordinatorError("LOCAL_AGENT_HIGH_RISK_STOP")
         if invoke and selected in {"deepseek-bridge-direct", "local-light"}:
             raw = invoke_brain(selected, _context_prompt(bundle, task))
             plan = _plan_from_text(raw, selected, task, str(bundle.get("task_difficulty") or "unknown"))

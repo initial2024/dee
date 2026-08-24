@@ -80,19 +80,47 @@ def _map_external_error(original: str) -> str:
     return "BRAIN_PROVIDER_ERROR"
 
 
-_SENSITIVE_TASK = re.compile(
-    r"api[_ -]?key|authorization|bearer|cookie|token|password|secret|密钥|凭据|密码|令牌|绕过|captcha|验证码|风控",
-    re.IGNORECASE,
+_REAL_SECRET_VALUE = re.compile(
+    r"(?ix)(?:\bsk-[a-z0-9_-]{12,}\b|\bbearer\s+[a-z0-9._~-]{12,}\b|"
+    r"\beyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\b|"
+    r"\b(?:api[_ -]?key|authorization|token|cookie|password|secret)\s*[:=]\s*(?!\[(?:REDACTED|VALUE_REDACTED)\])[^\s,;]{16,})"
 )
+_HIGH_RISK_INTENT = re.compile(
+    r"(?ix)(?:"
+    r"(?:print|display|show|export|leak|reveal|copy|dump|读取|打印|显示|导出|泄露|复制)\s*(?:(?:this|that|the|这个|该)\s*)?(?:api[_ -]?key|authorization|token|cookie|password|secret|密钥|凭据|密码|令牌|存储状态)|"
+    r"(?:bypass|绕过).{0,24}(?:captcha|验证码|风控)|"
+    r"(?:replay|重放).{0,32}(?:private\s*api|私有\s*api)|"
+    r"(?:export|导出).{0,24}(?:storage[_ -]?state|存储状态)"
+    r")"
+)
+_SENSITIVE_FIELD_NAME = re.compile(r"(?i)(?:\b(api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password)\b|\bsk-(?![A-Za-z0-9_-]))")
+
+
+def contains_high_risk_intent(task: str) -> bool:
+    """Block dangerous requests, while allowing sanitized structure analysis."""
+    value = str(task or "")
+    # A statement such as “不泄露密钥” is a safety constraint, not an
+    # exfiltration request.  Remove only explicit negated actions before the
+    # intent test; concrete secret values remain independently blocked.
+    value = re.sub(r"(?i)(?:不|不要|禁止|无需|未|not|do\s+not)\s*(?:print|display|show|export|leak|reveal|copy|dump|读取|打印|显示|导出|泄露|复制|输出)", "", value)
+    return bool(_HIGH_RISK_INTENT.search(value))
+
+
+def contains_real_secret_value(task: str) -> bool:
+    return bool(_REAL_SECRET_VALUE.search(task or ""))
+
+
+def _sanitize_llm_task(task: str) -> str:
+    return _SENSITIVE_FIELD_NAME.sub("credential_field_redacted", str(task or "").strip())
 
 
 def _prompt(task: str) -> str:
     """Build a bounded advisory prompt without asking the brain to execute."""
     return (
         "你是小羽 Local Agent 的计划大脑。只能输出分析和候选计划，不能调用工具，"
-        "不能声称已读取、修改、运行、提交或部署。不要输出或索要密码、token、cookie、"
-        "Authorization、API key 或其他凭据。所有写入、测试和 commit 都必须等待人工确认。\n\n"
-        "用户任务：\n" + task.strip()
+        "不能声称已读取、修改、运行、提交或部署。不要输出或索要任何凭据或敏感配置。"
+        "所有写入、测试和 commit 都必须等待人工确认。\n\n"
+        "用户任务：\n" + _sanitize_llm_task(task)
     )
 
 
@@ -150,7 +178,7 @@ def invoke_brain(
     This function is deliberately dependency-injectable for tests.  The
     default LocalAgent path does not call it; a caller must opt in.
     """
-    if _SENSITIVE_TASK.search(task or ""):
+    if contains_real_secret_value(task) or contains_high_risk_intent(task):
         raise _provider_error("LOCAL_AGENT_HIGH_RISK_STOP")
     prompt = _prompt(task)
     try:
