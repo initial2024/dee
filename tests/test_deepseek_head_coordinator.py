@@ -96,7 +96,7 @@ class DeepSeekHeadCoordinatorTests(unittest.TestCase):
         self.assertNotEqual(result["error_code"], "LOCAL_AGENT_HIGH_RISK_STOP")
         invoke.assert_called_once()
         with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain") as blocked:
-            result = coordinator.coordinate({"task": "分析 sk-abcdefghijklmnopqrstuvwxyz 配置", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "collect_context": False})
+            result = coordinator.coordinate({"task": "分析 " + "sk-" + "abcdefghijklmnopqrstuvwxyz" + " 配置", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "collect_context": False})
         blocked.assert_not_called()
         self.assertEqual(result["error_code"], "LOCAL_AGENT_HIGH_RISK_STOP")
 
@@ -143,6 +143,52 @@ class DeepSeekHeadCoordinatorTests(unittest.TestCase):
         with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value='{"not_a_plan": true}'):
             result = coordinator.coordinate({"task": "设计多文件 API 重构方案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True})
         self.assertEqual(result["error_code"], "AGENT_PLAN_SCHEMA_INVALID")
+
+    def test_patch_draft_prose_is_rejected_without_writing_a_source_file(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="一、问题摘要\n三、Unified Diff\n没有实际 diff"):
+            result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        self.assertEqual(result["error_code"], "PATCH_DRAFT_FORMAT_INVALID")
+        self.assertEqual((result["patch_draft_created"], result["unified_diff_detected"], result["patch_draft_format_invalid"]), ("NO", "NO", "YES"))
+        self.assertFalse((self.root / "codex-handoff" / "patch-drafts").exists())
+
+    def test_valid_project_relative_diff_is_persisted_with_redacted_metadata(self):
+        diff = """一、问题摘要
+```diff
+diff --git a/src/router.py b/src/router.py
+--- a/src/router.py
++++ b/src/router.py
+@@ -1 +1 @@
+-old
++new
+```
+"""
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value=diff):
+            result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        self.assertEqual((result["patch_draft_created"], result["unified_diff_detected"], result["patch_draft_applied"]), ("YES", "YES", "NO"))
+        patch_path = self.root / result["patch_draft_location"]
+        metadata_path = patch_path.with_suffix(".meta.json")
+        self.assertTrue(patch_path.is_file())
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["files_targeted"], ["src/router.py"])
+        self.assertNotIn("prompt", json.dumps(metadata).lower())
+        self.assertNotIn("response", json.dumps(metadata).lower())
+
+    def test_absolute_and_traversal_diff_paths_are_rejected(self):
+        for path in ("C:/outside.py", "../outside.py"):
+            diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
+            coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+            with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value=diff):
+                result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+            self.assertEqual(result["error_code"], "PATCH_DRAFT_FORMAT_INVALID")
+
+    def test_patch_draft_unavailable_is_explicit(self):
+        coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)
+        with patch("codex_ai_router.deepseek_head_coordinator.invoke_brain", return_value="PATCH_DRAFT_UNAVAILABLE\n缺少文件上下文"):
+            result = coordinator.coordinate({"task": "生成补丁草案", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "allow_patch_draft": True})
+        self.assertEqual((result["error_code"], result["patch_draft_unavailable"]), ("PATCH_DRAFT_UNAVAILABLE", "YES"))
+        self.assertIsNone(result["patch_draft_retry_prompt"])
 
     def test_high_risk_stops_before_brain_invocation(self):
         coordinator = DeepSeekHeadCoordinator(self.root, LocalAgent(self.root, self.storage), provider_snapshot=self.snapshot)

@@ -18,6 +18,7 @@ from typing import Any, Callable
 from .brain_providers import BrainProviderError, contains_high_risk_intent, contains_real_secret_value, invoke_brain
 from .context_collector import ContextCollector, build_llm_context_bundle
 from .local_agent import LocalAgent, classify_risk, make_plan
+from .patch_draft import PatchDraftFormatError, persist_patch_draft, validate_unified_diff
 from .provider_allowlist import providers as allowlisted_providers
 
 
@@ -78,14 +79,23 @@ def choose_brain(task: str, requested: str = "auto", snapshot: list[dict[str, An
     return {"selected_brain": "local-light", "task_difficulty": difficulty, "why_selected": "简单任务优先本地模型", "fallback_reason": None, "provider_health": health}
 
 
-def _context_prompt(bundle: dict[str, Any], task: str) -> str:
+def _context_prompt(bundle: dict[str, Any], task: str, *, require_patch_draft: bool = False, format_retry: bool = False) -> str:
     compact = build_llm_context_bundle(bundle)
     safe_task = str(task).strip()
     safe_task = re.sub(r"(?i)(?:\b(api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password)\b|\bsk-(?![A-Za-z0-9_-]))", "credential_field_redacted", safe_task)
+    patch_requirement = ""
+    if require_patch_draft:
+        patch_requirement = (
+            "\n本次必须按以下顺序输出：一、问题摘要；二、修改思路；三、Unified Diff；四、风险点；五、建议测试；六、不应用补丁说明。"
+            "Unified Diff 必须置于 ```diff 代码块，且包含 diff --git a/相对路径 b/相对路径、---、+++ 和 @@。"
+            "不得使用绝对路径或 ../ 路径。若无法仅凭已有上下文生成有效 unified diff，只输出 PATCH_DRAFT_UNAVAILABLE，并说明缺少哪些上下文。"
+        )
+        if format_retry:
+            patch_requirement += "这是一次格式修正请求：仅基于已有脱敏上下文重新输出 unified diff；不要重新收集上下文，不要调用工具。"
     return ("当前为 TEXT_ONLY 计划模式。不能调用工具，不能声称已经读取、修改、运行、提交或部署。"
             "请只输出 Agent Plan、补丁建议、Codex 指令、手动命令建议和风险检查。"
             "敏感配置字段和值已泛化，不要尝试恢复或索要它们。\n用户任务：" +
-            safe_task + "\n只读上下文（已泛化）：\n" + json.dumps(compact, ensure_ascii=False))
+            safe_task + patch_requirement + "\n只读上下文（已泛化）：\n" + json.dumps(compact, ensure_ascii=False))
 
 
 def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dict[str, Any]:
@@ -108,6 +118,26 @@ def _plan_from_text(text: str, provider: str, task: str, difficulty: str) -> dic
             "steps": [{"type": "analysis", "description": text.strip()[:4000], "requires_confirmation": False, "risk": risk}],
             "patch_draft": None, "codex_instruction": "请在 Codex 中审查以下建议，任何写入、测试或提交均需人工确认。",
             "manual_commands": [], "stop_conditions": []}
+
+
+def _patch_draft_result(text: str, *, requested: bool) -> dict[str, Any]:
+    """Classify a model reply without treating prose as a patch draft."""
+    base = {
+        "patch_draft_created": "NO", "unified_diff_detected": "NO",
+        "patch_draft_location": None, "patch_draft_format_invalid": "NO",
+        "patch_draft_unavailable": "NO", "files_targeted": [],
+    }
+    if not requested:
+        return base
+    if "PATCH_DRAFT_UNAVAILABLE" in text.upper():
+        base["patch_draft_unavailable"] = "YES"
+        return base
+    valid, files = validate_unified_diff(text)
+    if not valid:
+        base["patch_draft_format_invalid"] = "YES"
+        return base
+    base.update({"patch_draft_created": "YES", "unified_diff_detected": "YES", "files_targeted": files})
+    return base
 
 
 @dataclass
@@ -152,7 +182,9 @@ class DeepSeekHeadCoordinator:
         self._bundles[bundle_id] = bundle
         selected = choice["selected_brain"]
         invoke = payload.get("invoke_brain") is True
+        patch_draft_requested = payload.get("allow_patch_draft") is True
         output_plan: dict[str, Any] | None = None
+        raw_brain_text = ""
         error_code = None
         if invoke and (classify_risk(task) == "high" or contains_high_risk_intent(task) or contains_real_secret_value(task) or bool(bundle.get("secret_value_detected"))):
             error_code = "LOCAL_AGENT_HIGH_RISK_STOP"
@@ -160,7 +192,8 @@ class DeepSeekHeadCoordinator:
             if selected == "deepseek-head":
                 selected = "deepseek-bridge-direct"
             try:
-                output_plan = _plan_from_text(invoke_brain(selected, _context_prompt(bundle, task)), selected, task, choice["task_difficulty"])
+                raw_brain_text = invoke_brain(selected, _context_prompt(bundle, task, require_patch_draft=patch_draft_requested))
+                output_plan = _plan_from_text(raw_brain_text, selected, task, choice["task_difficulty"])
             except BrainProviderError as exc:
                 error_code = exc.code
             except DeepSeekHeadCoordinatorError as exc:
@@ -177,13 +210,28 @@ class DeepSeekHeadCoordinator:
         output_plan["plan_id"] = plan_id
         self._plans[plan_id] = output_plan
         allow_readonly = payload.get("allow_readonly", True) is not False
-        allow_patch_draft = payload.get("allow_patch_draft", True) is not False
+        allow_patch_draft = patch_draft_requested
         allow_apply = payload.get("allow_apply", False) is True
         allow_test = payload.get("allow_test", False) is True
         allow_commit = payload.get("allow_commit", False) is True
         actions = ["context_collect_read_only" if allow_readonly else "context_collection_disabled", "plan_only"]
         if allow_patch_draft and output_plan.get("requires_write"):
             actions.append("patch_draft_only")
+        draft = _patch_draft_result(raw_brain_text, requested=patch_draft_requested)
+        if not error_code and draft["patch_draft_created"] == "YES":
+            try:
+                path, _metadata, files = persist_patch_draft(
+                    self.root, raw_brain_text, task_name="a4f10-patch-draft", brain_provider=selected,
+                    context_bundle_id=bundle_id, risk_level=str(output_plan.get("risk_level", "low")),
+                )
+                location = str(path.relative_to(self.root))
+                draft.update({"patch_draft_location": location, "files_targeted": files})
+                output_plan["patch_draft"] = location
+            except PatchDraftFormatError:
+                draft.update({"patch_draft_created": "NO", "unified_diff_detected": "NO", "patch_draft_format_invalid": "YES"})
+        if not error_code and patch_draft_requested and draft["patch_draft_created"] == "NO":
+            error_code = "PATCH_DRAFT_UNAVAILABLE" if draft["patch_draft_unavailable"] == "YES" else "PATCH_DRAFT_FORMAT_INVALID"
+        retry_prompt = _context_prompt(bundle, task, require_patch_draft=True, format_retry=True) if error_code == "PATCH_DRAFT_FORMAT_INVALID" else None
         return {"status": "PASS" if not error_code else "ERROR", "context_bundle_id": bundle_id,
                 "selected_brain": choice["selected_brain"], "task_difficulty": choice["task_difficulty"], "why_selected": choice["why_selected"],
                 "provider_health": choice["provider_health"], "deepseek_plan_id": plan_id if selected.startswith("deepseek") else None,
@@ -191,7 +239,8 @@ class DeepSeekHeadCoordinator:
                 "requires_confirmation": bool(output_plan.get("requires_write") or output_plan.get("requires_tests") or output_plan.get("requires_commit")),
                 "allow_apply": allow_apply, "allow_test": allow_test, "allow_commit": allow_commit,
                 "risk_level": output_plan.get("risk_level", "low"), "fallback_reason": error_code or choice.get("fallback_reason"),
-                "brain_invoked": "YES" if invoke and error_code is None else "NO", "error_code": error_code,
+                "brain_invoked": "YES" if invoke and raw_brain_text else "NO", "error_code": error_code,
+                **draft, "patch_draft_retry_prompt": retry_prompt, "patch_draft_applied": "NO",
                 "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "commit_created": "NO",
                 "loopback_only": "YES", "worker_required": "NO", "wrangler_required": "NO", "tools_forwarded": "NO",
                 "prompt_response_logged": "NO", "secrets_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO"}

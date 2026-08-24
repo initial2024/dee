@@ -22,6 +22,7 @@ Assert-True ($text -match 'CONTROL_PANEL_EXCEPTION_GUARD=YES' -and $text -match 
 Assert-True ($text -match 'SECRET_VALUES_VISIBLE=NO') 'desktop_control_hides_secret_values'
 Assert-True ($text -match 'CONTROL_PANEL_LAYOUT_POLISH=YES' -and $text -match 'LOCAL_AGENT_GROUPS=YES' -and $text -match 'OFFICIAL_ASSISTED_GROUPS=YES') 'desktop_control_grouped_layout_flags'
 Assert-True ($text -match 'DEEPSEEK_HEAD_COLLABORATION_PANEL_VISIBLE=YES' -and $text -match 'DEEPSEEK_HEAD_CONTEXT_READONLY=YES' -and $text -match 'DEEPSEEK_HEAD_AUTO_BRAIN_SELECTION=YES') 'deepseek_head_collaboration_panel_flags'
+Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'PATCH_DRAFT_FORMAT_ENFORCEMENT=YES') 'deepseek_head_patch_draft_format_flags'
 Assert-True ($text -match 'BUTTON_TEXT_VISIBLE=YES' -and $text -match 'WINDOW_RESIZE_SUPPORTED=YES' -and $text -match 'VERTICAL_SCROLL_SUPPORTED=YES') 'desktop_control_resize_and_scroll_flags'
 Assert-True ($text -match 'DANGEROUS_ACTIONS_STILL_CONFIRM=YES' -and $text -match 'DANGEROUS_ACTION_TOOLTIPS=YES' -and $text -match 'RAW_JSON_COLLAPSED=YES') 'desktop_control_danger_and_json_flags'
   $ui = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest 2>&1
@@ -44,6 +45,7 @@ Assert-True ($source -match "'/agent/health'" -and $source -match "'/health'" -a
 Assert-True ($source -match 'function Invoke-RouterDirectSmoke' -and $source -match 'preflight' -and $source -match "post_sent = 'NO'") 'router_smoke_blocks_unknown_listener_before_post'
 Assert-True ($source -match '停止旧小羽 Router（需确认）') 'stop_old_router_button_is_visible'
 Assert-True ($source -match 'Get-RouterLaunchSpec' -and $source -match 'codex_ai_router\.cli' -and $source -match 'ROUTER_START_TIMEOUT') 'router_one_click_start_has_python_fallback_and_timeout'
+Assert-True ($source -match "'--patch-draft'" -and $source -match 'patch_draft_created' -and $source -match 'DeepSeekHeadApplyButton.Visible') 'patch_draft_ui_requires_valid_diff_before_apply'
 Assert-True ($source -match '检查 18789' -and $source -match '查看 /v1/models' -and $source -match '工具策略') 'router_status_and_models_buttons_are_visible'
 Assert-True ($source -notmatch '(?i)api[_ -]?key\s*=' -and $source -notmatch '(?i)authorization\s*=') 'ui_does_not_embed_secret_values'
 

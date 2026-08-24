@@ -656,9 +656,10 @@ function Format-DeepSeekHeadSummary([object]$Record) {
     if (-not $Record) { return '尚未收集上下文。默认只读，不会修改文件。' }
     if ($Record.error_code) { return ("DeepSeek 首脑协作失败`r`n错误码：{0}`r`n回退原因：{1}`r`n已修改文件：否`r`n已发送工具：否" -f $Record.error_code,$Record.fallback_reason) }
     $health = if ($Record.provider_health) { (@($Record.provider_health.psobject.Properties | ForEach-Object { '{0}={1}' -f $_.Name,$_.Value.status }) -join '；') } else { '未知' }
-    return ("任务难度：{0}`r`n选定辅助脑：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`nContext Bundle：{4}`r`nAgent Plan：{5}`r`nProvider 状态：{6}`r`n默认模式：PLAN_ONLY / READ_ONLY`r`n文件修改：否；测试：否；commit：否`r`nDeepSeek 工具转发：否" -f $Record.task_difficulty,$Record.selected_brain,$Record.why_selected,$Record.fallback_reason,$Record.context_bundle_id,$Record.deepseek_plan_id,$health)
+    $draft = if($Record.patch_draft_created -eq 'YES'){'已生成 unified diff：' + $Record.patch_draft_location}elseif($Record.patch_draft_unavailable -eq 'YES'){'DeepSeek 表示无法生成'}elseif($Record.patch_draft_format_invalid -eq 'YES'){'格式无效：未生成可审查 unified diff'}else{'未生成'}
+    return ("任务难度：{0}`r`n选定辅助脑：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`nContext Bundle：{4}`r`nAgent Plan：{5}`r`nPatch Draft 状态：{6}`r`nProvider 状态：{7}`r`n默认模式：PLAN_ONLY / READ_ONLY`r`n文件修改：否；测试：否；commit：否`r`nDeepSeek 工具转发：否" -f $Record.task_difficulty,$Record.selected_brain,$Record.why_selected,$Record.fallback_reason,$Record.context_bundle_id,$Record.deepseek_plan_id,$draft,$health)
 }
-function Invoke-DeepSeekHeadCoordinate([bool]$InvokeBrain = $false,[string]$Brain = 'auto') {
+function Invoke-DeepSeekHeadCoordinate([bool]$InvokeBrain = $false,[string]$Brain = 'auto',[bool]$PatchDraft = $false) {
     $arguments = @('deepseek-head','coordinate','--task','当前任务由 Codex 提供；只读收集项目上下文并生成 Agent Plan，不修改文件')
     if ($Brain -and $Brain -ne 'auto') { $arguments += @('--brain',$Brain) } else { $arguments += @('--brain','auto') }
     if ($InvokeBrain) {
@@ -666,12 +667,14 @@ function Invoke-DeepSeekHeadCoordinate([bool]$InvokeBrain = $false,[string]$Brai
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         $arguments += '--invoke-brain'
     }
+    if ($PatchDraft) { $arguments += '--patch-draft' }
     $raw = Invoke-RouterCli $arguments
     try { $record = $raw | ConvertFrom-Json } catch { throw 'DEEPSEEK_HEAD_RESPONSE_INVALID' }
     $script:DeepSeekHeadLastRecord = $record
     $deepSeekHeadStatus.Text = Format-DeepSeekHeadSummary $record
     $deepSeekHeadRaw.Text = Redact-Text $raw
     $deepSeekHeadRaw.Visible = $false
+    if ($script:DeepSeekHeadApplyButton) { $script:DeepSeekHeadApplyButton.Visible = ($record.patch_draft_created -eq 'YES') }
     if ($record.context_bundle_id) { $script:DeepSeekHeadContextId = [string]$record.context_bundle_id }
     if ($record.deepseek_plan_id) { $script:DeepSeekHeadPlanId = [string]$record.deepseek_plan_id }
     [System.Windows.Forms.MessageBox]::Show((Format-DeepSeekHeadSummary $record),'DeepSeek 首脑协作') | Out-Null
@@ -681,7 +684,10 @@ function Show-DeepSeekHeadContext {
     $raw = Invoke-RouterCli @('deepseek-head','plan-from-context','--context-id',$script:DeepSeekHeadContextId)
     $deepSeekHeadRaw.Text = Redact-Text $raw; $deepSeekHeadRaw.Visible = $true
 }
-function Add-DeepSeekHeadButton([string]$Caption,[scriptblock]$Action,[int]$Width=220,[string]$TooltipText='') { Add-UiLayoutButton $deepSeekHeadButtons $Caption $Action $Width $TooltipText }
+function Add-DeepSeekHeadButton([string]$Caption,[scriptblock]$Action,[int]$Width=220,[string]$TooltipText='',[bool]$ReturnControl=$false) {
+    Add-UiLayoutButton $deepSeekHeadButtons $Caption $Action $Width $TooltipText
+    if($ReturnControl){ return $deepSeekHeadButtons.Controls[$deepSeekHeadButtons.Controls.Count - 1] }
+}
 function Get-DeepSeekModeStatusText([object]$Probe) {
     if (-not $Probe) { return ("模式策略：自动选择（尚未运行只读探测）`r`n请点击探测 DeepSeek 模式；该操作只读取页面控件，不发送提示词、不点击发送。") }
     $labels = [ordered]@{ normal = '普通'; search = '搜索'; thinking = '思考'; expert = '专家' }
@@ -1072,8 +1078,9 @@ Add-DeepSeekHeadButton '自动选择辅助脑' { Invoke-DeepSeekHeadCoordinate $
 Add-DeepSeekHeadButton '收集项目上下文' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只运行固定只读检查，不修改文件、不运行测试。'
 Add-DeepSeekHeadButton '发送给 DeepSeek 首脑分析' { Invoke-DeepSeekHeadCoordinate $true 'deepseek-bridge-direct' } 230 '需确认；仅发送脱敏、限长只读上下文到本机 127.0.0.1:8791。'
 Add-DeepSeekHeadButton '生成 Agent Plan' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 190
-Add-DeepSeekHeadButton '生成补丁草案（需确认）' { [System.Windows.Forms.MessageBox]::Show('补丁草案只生成建议，不自动应用；应用补丁仍需 Local Agent 双确认。','DeepSeek 首脑协作') | Out-Null } 220 '需要确认，不自动应用。'
-Add-DeepSeekHeadButton '应用补丁（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动修改文件；请在 Local Agent 面板核对 diff 后双确认。','DeepSeek 首脑协作') | Out-Null } 200 '需要确认，不自动执行。'
+Add-DeepSeekHeadButton '生成补丁草案（需确认）' { Invoke-DeepSeekHeadCoordinate $true 'deepseek-bridge-direct' $true } 220 '需要确认；仅有效 unified diff 会保存到 handoff，绝不自动应用。'
+$script:DeepSeekHeadApplyButton = Add-DeepSeekHeadButton '申请应用补丁（需确认）' { if($script:DeepSeekHeadLastRecord.patch_draft_created -eq 'YES'){[System.Windows.Forms.MessageBox]::Show('请在 Local Agent 面板核对草案后双确认；本按钮不会应用补丁。','DeepSeek 首脑协作') | Out-Null}else{[System.Windows.Forms.MessageBox]::Show('尚无有效 unified diff，不能申请应用。','DeepSeek 首脑协作') | Out-Null} } 200 '仅有效 unified diff 可进入人工审查。' $true
+$script:DeepSeekHeadApplyButton.Visible = $false
 Add-DeepSeekHeadButton '运行测试（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动运行测试；请在 Local Agent 面板选择白名单测试并确认。','DeepSeek 首脑协作') | Out-Null } 200 '需要确认，仅白名单测试。'
 Add-DeepSeekHeadButton '提交 commit（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动提交；需在 Local Agent 面板确认，且禁止 push。','DeepSeek 首脑协作') | Out-Null } 210 '需要确认，不 push。'
 Add-DeepSeekHeadButton '查看 Context Bundle' { Show-DeepSeekHeadContext } 190
@@ -1156,6 +1163,7 @@ if ($SelfTest) {
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_HEAD_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_HEAD_CONTEXT_REDACTION=PASS'
+    Write-Output 'PATCH_DRAFT_FORMAT_ENFORCEMENT=YES'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'
