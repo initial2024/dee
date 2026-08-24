@@ -722,7 +722,7 @@ class _Handler(BaseHTTPRequestHandler):
                 code = exc.code if isinstance(exc, ModeSwitchProxyError) else "MODE_SWITCH_PAYLOAD_REJECTED"
                 self._send(400, {"status": "ERROR", "error_code": code})
             return
-        if self.path.startswith("/agent/") or self.path in {"/assist/coordinate", "/deepseek-head/coordinate", "/deepseek-head/context", "/deepseek-head/plan", "/deepseek-head/plan-from-context"}:
+        if self.path.startswith("/agent/") or self.path.startswith("/session/") or self.path in {"/assist/coordinate", "/deepseek-head/coordinate", "/deepseek-head/context", "/deepseek-head/plan", "/deepseek-head/plan-from-context"}:
             if self.agent_api is None:
                 self._send(404, {"error": {"code": "not_found"}})
                 return

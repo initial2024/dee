@@ -680,6 +680,15 @@ $deepSeekHeadActionGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekHe
 $deepSeekHeadButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $deepSeekHeadButtons.Dock = 'Fill'; $deepSeekHeadButtons.AutoScroll = $true; $deepSeekHeadButtons.WrapContents = $true; $deepSeekHeadButtons.Font = $buttonFont; $deepSeekHeadActionGroup.Controls.Add($deepSeekHeadButtons)
 $deepSeekHeadRawGroup = New-Object System.Windows.Forms.GroupBox; $deepSeekHeadRawGroup.Text = 'Context Bundle / 原始 JSON（默认折叠）'; $deepSeekHeadRawGroup.Dock = 'Fill'; $deepSeekHeadRawGroup.Padding = New-Object System.Windows.Forms.Padding(8); $deepSeekHeadLayout.Controls.Add($deepSeekHeadRawGroup,0,2)
 $deepSeekHeadRaw = New-Object System.Windows.Forms.TextBox; $deepSeekHeadRaw.Multiline = $true; $deepSeekHeadRaw.ReadOnly = $true; $deepSeekHeadRaw.ScrollBars = 'Vertical'; $deepSeekHeadRaw.Dock = 'Fill'; $deepSeekHeadRaw.Visible = $false; $deepSeekHeadRaw.Font = $uiFont; $deepSeekHeadRawGroup.Controls.Add($deepSeekHeadRaw)
+$sessionBindingTab = New-Object System.Windows.Forms.TabPage('会话绑定'); [void]$tabs.TabPages.Add($sessionBindingTab)
+$sessionBindingLayout = New-Object System.Windows.Forms.TableLayoutPanel; $sessionBindingLayout.Dock = 'Fill'; $sessionBindingLayout.AutoScroll = $true; $sessionBindingLayout.Padding = New-Object System.Windows.Forms.Padding(12); $sessionBindingLayout.RowCount = 3; $sessionBindingLayout.ColumnCount = 1; [void]$sessionBindingLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,120))); [void]$sessionBindingLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,115))); [void]$sessionBindingLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $sessionBindingTab.Controls.Add($sessionBindingLayout)
+$sessionBindingNotice = New-Object System.Windows.Forms.GroupBox; $sessionBindingNotice.Text = '本地会话绑定'; $sessionBindingNotice.Dock = 'Fill'; $sessionBindingNotice.Padding = New-Object System.Windows.Forms.Padding(8); $sessionBindingLayout.Controls.Add($sessionBindingNotice,0,0)
+$sessionBindingStatus = New-Object System.Windows.Forms.TextBox; $sessionBindingStatus.Multiline = $true; $sessionBindingStatus.ReadOnly = $true; $sessionBindingStatus.Dock = 'Fill'; $sessionBindingStatus.Font = $uiFont; $sessionBindingStatus.Text = '这是本地上下文绑定，不读取 Codex 或 DeepSeek 网页私有数据。`r`n当前 task_session_id：未载入`r`nCodex 状态：未同步；DeepSeek 状态：未分析；Patch Draft：未请求。'; $sessionBindingNotice.Controls.Add($sessionBindingStatus)
+$sessionBindingActions = New-Object System.Windows.Forms.GroupBox; $sessionBindingActions.Text = '会话操作（仅脱敏摘要）'; $sessionBindingActions.Dock = 'Fill'; $sessionBindingActions.Padding = New-Object System.Windows.Forms.Padding(8); $sessionBindingLayout.Controls.Add($sessionBindingActions,0,1)
+$sessionBindingButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $sessionBindingButtons.Dock = 'Fill'; $sessionBindingButtons.AutoScroll = $true; $sessionBindingButtons.WrapContents = $true; $sessionBindingButtons.Font = $buttonFont; $sessionBindingActions.Controls.Add($sessionBindingButtons)
+$sessionBindingRawGroup = New-Object System.Windows.Forms.GroupBox; $sessionBindingRawGroup.Text = '会话状态 / 脱敏上下文（默认折叠）'; $sessionBindingRawGroup.Dock = 'Fill'; $sessionBindingRawGroup.Padding = New-Object System.Windows.Forms.Padding(8); $sessionBindingLayout.Controls.Add($sessionBindingRawGroup,0,2)
+$sessionBindingRaw = New-Object System.Windows.Forms.TextBox; $sessionBindingRaw.Multiline = $true; $sessionBindingRaw.ReadOnly = $true; $sessionBindingRaw.ScrollBars = 'Vertical'; $sessionBindingRaw.Dock = 'Fill'; $sessionBindingRaw.Visible = $false; $sessionBindingRaw.Font = $uiFont; $sessionBindingRawGroup.Controls.Add($sessionBindingRaw)
+$script:TaskSessionId = ''
 function Add-ProviderLog([string]$Message) { $line = ('[{0}] {1}' -f (Get-Date).ToString('HH:mm:ss'), (Redact-Text $Message)); $providerLog.AppendText($line + "`r`n") }
 function Add-DeepSeekLog([string]$Action,[object]$Result) {
     $line = ('[{0}] action={1}; exit_code={2}; status={3}' -f (Get-Date).ToString('HH:mm:ss'),$Action,$Result.exit_code,$Result.error_type)
@@ -721,6 +730,44 @@ function Show-DeepSeekHeadContext {
     if (-not $script:DeepSeekHeadContextId) { [System.Windows.Forms.MessageBox]::Show('请先收集项目上下文。','Context Bundle') | Out-Null; return }
     $raw = Invoke-RouterCli @('deepseek-head','plan-from-context','--context-id',$script:DeepSeekHeadContextId)
     $deepSeekHeadRaw.Text = Redact-Text $raw; $deepSeekHeadRaw.Visible = $true
+}
+function Invoke-SessionBindingCli([string[]]$Arguments) {
+    $raw = Invoke-RouterCli (@('session') + $Arguments)
+    try { return ($raw | ConvertFrom-Json) } catch { throw 'SESSION_BINDING_RESPONSE_INVALID' }
+}
+function Refresh-SessionBinding([object]$Record) {
+    if (-not $Record) { return }
+    if ($Record.task_session_id) { $script:TaskSessionId = [string]$Record.task_session_id }
+    $sessionBindingStatus.Text = ("这是本地上下文绑定，不读取 Codex 或 DeepSeek 网页私有数据。`r`n当前 task_session_id：{0}`r`nCodex 状态：{1}；DeepSeek 状态：{2}；Patch Draft：{3}。`r`n安全状态：不保存 prompt/response，不读取 Cookie/Token。" -f $script:TaskSessionId,$Record.codex_synced,$Record.deepseek_analyzed,$Record.patch_draft_status)
+    $sessionBindingRaw.Text = Redact-Text ($Record | ConvertTo-Json -Depth 8)
+    $sessionBindingRaw.Visible = $false
+}
+function New-TaskSessionBinding {
+    $title = [Microsoft.VisualBasic.Interaction]::InputBox('输入非敏感任务标题。不会保存提示词或模型回复原文。','新建绑定会话','本地任务')
+    if (-not $title) { return }
+    $record = Invoke-SessionBindingCli @('create','--title',$title); Refresh-SessionBinding $record
+}
+function Load-TaskSessionBinding {
+    $id = [Microsoft.VisualBasic.Interaction]::InputBox('输入 task_session_id。','载入绑定会话',$script:TaskSessionId)
+    if (-not $id) { return }
+    $record = Invoke-SessionBindingCli @('status','--session-id',$id); Refresh-SessionBinding $record
+}
+function Show-SessionRollingSummary {
+    if (-not $script:TaskSessionId) { [System.Windows.Forms.MessageBox]::Show('请先新建或载入绑定会话。','会话绑定') | Out-Null; return }
+    $record = Invoke-SessionBindingCli @('context','--session-id',$script:TaskSessionId); $sessionBindingRaw.Text = Redact-Text ($record | ConvertTo-Json -Depth 8); $sessionBindingRaw.Visible = $true
+}
+function Append-CodexStatusToSession {
+    if (-not $script:TaskSessionId) { [System.Windows.Forms.MessageBox]::Show('请先新建或载入绑定会话。','会话绑定') | Out-Null; return }
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Filter = '状态摘要 (*.md;*.txt)|*.md;*.txt'
+    $dialog.Title = '选择项目内、非敏感的 UTF-8 Codex 状态摘要'
+    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $null = Invoke-SessionBindingCli @('append-codex-status','--session-id',$script:TaskSessionId,'--file',$dialog.FileName)
+    Refresh-SessionBinding (Invoke-SessionBindingCli @('status','--session-id',$script:TaskSessionId))
+}
+function Clear-SessionSensitiveCache {
+    if (-not $script:TaskSessionId) { [System.Windows.Forms.MessageBox]::Show('请先新建或载入绑定会话。','会话绑定') | Out-Null; return }
+    $record = Invoke-SessionBindingCli @('clear-sensitive-cache','--session-id',$script:TaskSessionId); Refresh-SessionBinding $record
 }
 function Add-DeepSeekHeadButton([string]$Caption,[scriptblock]$Action,[int]$Width=220,[string]$TooltipText='',[bool]$ReturnControl=$false) {
     Add-UiLayoutButton $deepSeekHeadButtons $Caption $Action $Width $TooltipText
@@ -1191,6 +1238,12 @@ Add-DeepSeekHeadButton '运行测试（需确认）' { [System.Windows.Forms.Mes
 Add-DeepSeekHeadButton '提交 commit（需确认）' { [System.Windows.Forms.MessageBox]::Show('该按钮不会自动提交；需在 Local Agent 面板确认，且禁止 push。','DeepSeek 首脑协作') | Out-Null } 210 '需要确认，不 push。'
 Add-DeepSeekHeadButton '查看 Context Bundle' { Show-DeepSeekHeadContext } 190
 Add-DeepSeekHeadButton '复制给 Codex 的指令' { if($script:DeepSeekHeadLastRecord -and $script:DeepSeekHeadLastRecord.agent_plan.codex_instruction){Set-Clipboard -Value (Redact-Text ([string]$script:DeepSeekHeadLastRecord.agent_plan.codex_instruction));[System.Windows.Forms.MessageBox]::Show('已复制脱敏 Codex 指令。','DeepSeek 首脑协作') | Out-Null}else{[System.Windows.Forms.MessageBox]::Show('请先生成 Agent Plan。','DeepSeek 首脑协作') | Out-Null} } 210
+Add-UiLayoutButton $sessionBindingButtons '新建绑定会话' { New-TaskSessionBinding } 170 '仅创建本地脱敏状态目录。'
+Add-UiLayoutButton $sessionBindingButtons '载入会话' { Load-TaskSessionBinding } 150 '只读取本地会话状态。'
+Add-UiLayoutButton $sessionBindingButtons '写入 Codex 执行摘要' { Append-CodexStatusToSession } 210 '只允许项目内、脱敏摘要，不保存完整日志。'
+Add-UiLayoutButton $sessionBindingButtons '生成 DeepSeek 上下文包' { Show-SessionRollingSummary } 210 '只显示脱敏会话摘要，不发送模型请求。'
+Add-UiLayoutButton $sessionBindingButtons '查看滚动摘要' { Show-SessionRollingSummary } 180 '默认折叠原始 JSON。'
+Add-UiLayoutButton $sessionBindingButtons '清理会话敏感缓存' { Clear-SessionSensitiveCache } 210 '清理可再生成上下文，不读取网页私有数据。'
 Add-CodexModeButton '切换官方直连' { Invoke-CodexModeAction 'official-direct' }
 Add-CodexModeButton '切换本地 Router' { Invoke-CodexModeAction 'custom-router' }
 Add-CodexModeButton 'DeepSeek 首脑' { Invoke-CodexModeAction 'custom-deepseek-head' } 150
@@ -1286,6 +1339,9 @@ if ($SelfTest) {
     Write-Output 'VERTICAL_SCROLL_LAYOUT=PASS'
     Write-Output 'DANGEROUS_ACTION_TOOLTIPS=PASS'
     Write-Output 'RAW_JSON_COLLAPSED=PASS'
+    Write-Output 'SESSION_BINDING_UI_CONSTRUCTION=PASS'
+    Write-Output 'SESSION_BINDING_LOCAL_ONLY=YES'
+    Write-Output 'SESSION_BINDING_WEB_SESSION_READ=NO'
     Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'
     exit 0
 }

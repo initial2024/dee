@@ -29,6 +29,7 @@ from .local_agent import BRAIN_PROVIDERS, LocalAgent, LocalAgentError
 from .agent_api import AGENT_API_BASE
 from .assist_coordinator import ASSIST_STARTUP_INSTRUCTION
 from .deepseek_head_coordinator import DeepSeekHeadCoordinator, DeepSeekHeadCoordinatorError, choose_brain
+from .session_context import SessionContextError, SessionContextHub
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -123,6 +124,15 @@ def main() -> None:
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
     config = sub.add_parser("config"); config.add_argument("action", choices=("show",))
     tools_policy = sub.add_parser("tools-policy"); tools_policy.add_argument("action", choices=("show", "set")); tools_policy.add_argument("policy", nargs="?", choices=VALID_POLICIES)
+    session = sub.add_parser("session", help="local sanitized task-session binding")
+    session_sub = session.add_subparsers(dest="session_action", required=True)
+    session_create = session_sub.add_parser("create"); session_create.add_argument("--title", required=True)
+    session_status = session_sub.add_parser("status"); session_status.add_argument("--session-id", required=True)
+    session_append_status = session_sub.add_parser("append-codex-status"); session_append_status.add_argument("--session-id", required=True); session_append_status.add_argument("--file", type=Path, required=True)
+    session_append_test = session_sub.add_parser("append-test-result"); session_append_test.add_argument("--session-id", required=True); session_append_test.add_argument("--summary", required=True)
+    session_append_commit = session_sub.add_parser("append-commit"); session_append_commit.add_argument("--session-id", required=True); session_append_commit.add_argument("--repo", choices=("router", "bridge"), required=True); session_append_commit.add_argument("--commit", required=True)
+    session_context = session_sub.add_parser("context"); session_context.add_argument("--session-id", required=True)
+    session_clear = session_sub.add_parser("clear-sensitive-cache"); session_clear.add_argument("--session-id", required=True)
     deepseek = sub.add_parser("deepseek")
     deepseek_sub = deepseek.add_subparsers(dest="deepseek_action", required=True)
     deepseek_sub.add_parser("mode-probe")
@@ -168,6 +178,8 @@ def main() -> None:
             item.add_argument("--patch-draft", action="store_true", help="require a project-relative unified diff; never apply it")
             item.add_argument("--selected-mode", choices=("quick_plain", "quick_thinking", "quick_search", "expert_plain", "expert_thinking", "expert_thinking_search"), help="require a previously verified local DeepSeek text mode")
             item.add_argument("--no-search", action="store_true", help="require search=false for a local project task")
+            item.add_argument("--task-session-id", help="reuse a local sanitized task-session binding")
+            item.add_argument("--use-session-context", action="store_true", help="include only the local session's sanitized summaries")
     context_plan = deepseek_head_sub.add_parser("plan-from-context")
     context_plan.add_argument("--context-id", required=True)
     execute_plan = deepseek_head_sub.add_parser("execute-plan")
@@ -200,6 +212,25 @@ def main() -> None:
         else:
             if not args.policy: raise SystemExit("POLICY_REQUIRED")
             emit(save_policy(args.policy))
+    elif args.command == "session":
+        hub = SessionContextHub(Path.cwd())
+        try:
+            if args.session_action == "create":
+                emit(hub.create(args.title))
+            elif args.session_action == "status":
+                emit(hub.status(args.session_id))
+            elif args.session_action == "append-codex-status":
+                emit(hub.append_codex_status_from_file(args.session_id, args.file))
+            elif args.session_action == "append-test-result":
+                emit(hub.append_test_result(args.session_id, args.summary))
+            elif args.session_action == "append-commit":
+                emit(hub.append_commit(args.session_id, args.repo, args.commit))
+            elif args.session_action == "context":
+                emit({"task_session_id": args.session_id, "llm_context_bundle": hub.llm_context(args.session_id), "prompt_response_logged": "NO"})
+            else:
+                emit(hub.clear_sensitive_cache(args.session_id))
+        except SessionContextError as exc:
+            emit({"status": "ERROR", "error_code": exc.code, "prompt_response_logged": "NO", "secrets_logged": "NO"})
     elif args.command == "deepseek":
         if args.deepseek_action == "mode-probe":
             emit(probe_deepseek_modes())
@@ -279,7 +310,7 @@ def main() -> None:
             if args.deepseek_head_action == "choose-brain":
                 emit(choose_brain(args.task, args.brain_provider))
             elif args.deepseek_head_action in {"coordinate", "collect-context"}:
-                emit(coordinator.coordinate({"task": args.task, "brain_provider": args.brain_provider, "invoke_brain": bool(getattr(args, "invoke_brain", False)), "allow_patch_draft": bool(getattr(args, "patch_draft", False)), "selected_mode": getattr(args, "selected_mode", None), "search": False if bool(getattr(args, "no_search", False)) else None}))
+                emit(coordinator.coordinate({"task": args.task, "brain_provider": args.brain_provider, "invoke_brain": bool(getattr(args, "invoke_brain", False)), "allow_patch_draft": bool(getattr(args, "patch_draft", False)), "selected_mode": getattr(args, "selected_mode", None), "search": False if bool(getattr(args, "no_search", False)) else None, "task_session_id": getattr(args, "task_session_id", None), "use_session_context": bool(getattr(args, "use_session_context", False))}))
             elif args.deepseek_head_action == "plan-from-context":
                 emit(agent_api_request("/deepseek-head/plan-from-context", {"context_bundle_id": args.context_id, "invoke_brain": False}))
             else:

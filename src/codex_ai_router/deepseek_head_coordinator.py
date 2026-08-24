@@ -28,6 +28,7 @@ from .patch_draft import (
     validate_unified_diff,
 )
 from .provider_allowlist import providers as allowlisted_providers
+from .session_context import SessionContextError, SessionContextHub
 
 
 DEEPSEEK_HEAD_PATH = "/deepseek-head/coordinate"
@@ -190,6 +191,7 @@ class DeepSeekHeadCoordinator:
     agent: LocalAgent | None = None
     provider_snapshot: Callable[[], list[dict[str, Any]]] = allowlisted_providers
     collector: ContextCollector | None = None
+    session_hub: SessionContextHub | None = None
     _bundles: dict[str, dict[str, Any]] = field(default_factory=dict)
     _plans: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -197,6 +199,7 @@ class DeepSeekHeadCoordinator:
         self.root = self.root.resolve()
         self.agent = self.agent or LocalAgent(self.root)
         self.collector = self.collector or ContextCollector(self.root, self.agent.ledger)
+        self.session_hub = self.session_hub or SessionContextHub(self.root)
 
     def coordinate(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = payload.get("task")
@@ -210,6 +213,17 @@ class DeepSeekHeadCoordinator:
             except (OSError, RuntimeError):
                 raise DeepSeekHeadCoordinatorError("PROJECT_ROOT_NOT_ALLOWED")
         requested = str(payload.get("brain_provider", payload.get("brain", "auto")) or "auto")
+        task_session_id = payload.get("task_session_id")
+        use_session_context = payload.get("use_session_context") is True
+        if task_session_id is not None and not isinstance(task_session_id, str):
+            raise DeepSeekHeadCoordinatorError("TASK_SESSION_ID_INVALID")
+        if use_session_context and not task_session_id:
+            raise DeepSeekHeadCoordinatorError("TASK_SESSION_ID_REQUIRED")
+        if task_session_id:
+            try:
+                self.session_hub.status(task_session_id)
+            except SessionContextError as exc:
+                raise DeepSeekHeadCoordinatorError(exc.code) from exc
         choice = choose_brain(task, requested, self.provider_snapshot())
         if payload.get("collect_context", True) is False:
             bundle = {
@@ -221,9 +235,19 @@ class DeepSeekHeadCoordinator:
             }
         else:
             bundle = self.collector.collect(task, selected_brain=choice["selected_brain"])
+        if task_session_id and use_session_context:
+            try:
+                bundle["session_context"] = self.session_hub.llm_context(task_session_id)
+            except SessionContextError as exc:
+                raise DeepSeekHeadCoordinatorError(exc.code) from exc
         bundle["task_difficulty"] = choice["task_difficulty"]
         bundle_id = "ctx-" + uuid.uuid4().hex[:12]
         self._bundles[bundle_id] = bundle
+        if task_session_id:
+            try:
+                self.session_hub.store_context_bundles(task_session_id, bundle, build_llm_context_bundle(bundle))
+            except SessionContextError as exc:
+                raise DeepSeekHeadCoordinatorError(exc.code) from exc
         selected = choice["selected_brain"]
         invoke = payload.get("invoke_brain") is True
         patch_draft_requested = payload.get("allow_patch_draft") is True
@@ -323,6 +347,7 @@ class DeepSeekHeadCoordinator:
             error_code = "PATCH_DRAFT_UNAVAILABLE" if draft["patch_draft_unavailable"] == "YES" else (draft["patch_synthesizer_error_code"] or "PATCH_DRAFT_FORMAT_INVALID")
         retry_available = bool(model_output_available == "YES" and error_code and error_code.startswith("PATCH_") and error_code != "PATCH_DRAFT_UNAVAILABLE")
         result = {"status": "PASS" if not error_code else "ERROR", "context_bundle_id": bundle_id,
+                "task_session_id": task_session_id,
                 "selected_brain": choice["selected_brain"], "task_difficulty": choice["task_difficulty"], "why_selected": choice["why_selected"],
                 "provider_health": choice["provider_health"], "deepseek_plan_id": plan_id if selected.startswith("deepseek") else None,
                 "agent_plan": output_plan, "local_agent_actions": actions,
@@ -341,6 +366,11 @@ class DeepSeekHeadCoordinator:
                 "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "commit_created": "NO",
                 "loopback_only": "YES", "worker_required": "NO", "wrangler_required": "NO", "tools_forwarded": "NO",
                 "prompt_response_logged": "NO", "sensitive_data_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO"}
+        if task_session_id:
+            try:
+                self.session_hub.record_deepseek_outcome(task_session_id, result)
+            except SessionContextError as exc:
+                raise DeepSeekHeadCoordinatorError(exc.code) from exc
         return _sanitize_api_response(result)
 
     def context(self, context_id: str) -> dict[str, Any]:

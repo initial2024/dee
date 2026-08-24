@@ -8,3 +8,4 @@ build/
 reports/*.runtime.json
 .codex-ai-router/
 .runtime/
+codex-handoff/sessions/

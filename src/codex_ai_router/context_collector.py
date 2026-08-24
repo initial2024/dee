@@ -53,7 +53,7 @@ def build_llm_context_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     Local callers may need neutral structural information.  Models receive a
     separate copy with credential-related field names generalized as well.
     """
-    allowed = ("project_root", "git_status", "changed_files", "relevant_files", "file_snippets", "diff_summary", "risk_flags", "loopback_ports", "collection_mode")
+    allowed = ("project_root", "git_status", "changed_files", "relevant_files", "file_snippets", "diff_summary", "risk_flags", "loopback_ports", "collection_mode", "session_context")
 
     def sanitize(value: Any) -> Any:
         if isinstance(value, str):

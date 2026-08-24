@@ -95,6 +95,16 @@ class AgentApiTests(unittest.TestCase):
         context_status, context = self.post("/deepseek-head/context", {"context_bundle_id": body["context_bundle_id"]})
         self.assertEqual((context_status, context["context_bundle"]["collection_mode"]), (200, "read_only"))
 
+    def test_session_endpoints_are_local_metadata_only(self):
+        status, session = self.post("/session/create", {"title": "本地会话验收"})
+        self.assertEqual((status, session["local_only"]), (200, "YES"))
+        session_id = session["task_session_id"]
+        status, test_result = self.post("/session/append-test-result", {"task_session_id": session_id, "summary": "unittest PASS"})
+        self.assertEqual((status, test_result["prompt_response_logged"]), (200, "NO"))
+        status, context = self.post("/session/context", {"task_session_id": session_id})
+        self.assertEqual((status, context["prompt_response_logged"]), (200, "NO"))
+        self.assertTrue(context["llm_context_bundle"]["session_context_sanitized"])
+
     def test_readonly_uses_only_allowlisted_read_commands(self):
         status, body = self.post("/agent/readonly", {"task": "只读检查"})
         self.assertEqual((status, body["status"], body["workspace_write"], body["files_touched"]), (200, "PASS", "NO", []))

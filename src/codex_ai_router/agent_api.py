@@ -14,6 +14,7 @@ from typing import Any
 from .assist_coordinator import AssistCoordinator, AssistCoordinatorError
 from .deepseek_head_coordinator import DeepSeekHeadCoordinator, DeepSeekHeadCoordinatorError
 from .local_agent import LocalAgent, LocalAgentError
+from .session_context import SessionContextError
 
 
 AGENT_API_HOST = "127.0.0.1"
@@ -55,6 +56,7 @@ class AgentApiController:
         self.agent = agent or LocalAgent(self.root)
         self.coordinator = coordinator or AssistCoordinator()
         self.deepseek_head = deepseek_head or DeepSeekHeadCoordinator(self.root, agent=self.agent)
+        self.sessions = self.deepseek_head.session_hub
 
     def health(self) -> dict[str, Any]:
         return {
@@ -76,6 +78,12 @@ class AgentApiController:
                 "deepseek-head-context",
                 "deepseek-head-plan",
                 "deepseek-head-plan-from-context",
+                "session-create",
+                "session-append-codex-status",
+                "session-append-test-result",
+                "session-append-commit",
+                "session-context",
+                "session-clear-sensitive-cache",
             ],
             "bind_host": AGENT_API_HOST,
             "port": AGENT_API_PORT,
@@ -121,6 +129,36 @@ class AgentApiController:
         return _confirmation_matches(payload, plan_id)
 
     def _dispatch(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path == "/session/create":
+            title = payload.get("title")
+            if not isinstance(title, str):
+                raise LocalAgentError("SESSION_TITLE_REQUIRED")
+            return self.sessions.create(title)
+        if path == "/session/append-codex-status":
+            session_id, source = payload.get("task_session_id"), payload.get("file")
+            if not isinstance(session_id, str) or not isinstance(source, str):
+                raise LocalAgentError("TASK_SESSION_ID_AND_FILE_REQUIRED")
+            return self.sessions.append_codex_status_from_file(session_id, Path(source))
+        if path == "/session/append-test-result":
+            session_id, summary = payload.get("task_session_id"), payload.get("summary")
+            if not isinstance(session_id, str) or not isinstance(summary, str):
+                raise LocalAgentError("TASK_SESSION_ID_AND_SUMMARY_REQUIRED")
+            return self.sessions.append_test_result(session_id, summary)
+        if path == "/session/append-commit":
+            session_id, repo, commit = payload.get("task_session_id"), payload.get("repo"), payload.get("commit")
+            if not isinstance(session_id, str) or not isinstance(repo, str) or not isinstance(commit, str):
+                raise LocalAgentError("TASK_SESSION_ID_REPO_AND_COMMIT_REQUIRED")
+            return self.sessions.append_commit(session_id, repo, commit)
+        if path == "/session/context":
+            session_id = payload.get("task_session_id")
+            if not isinstance(session_id, str):
+                raise LocalAgentError("TASK_SESSION_ID_REQUIRED")
+            return {"task_session_id": session_id, "llm_context_bundle": self.sessions.llm_context(session_id), "prompt_response_logged": "NO"}
+        if path == "/session/clear-sensitive-cache":
+            session_id = payload.get("task_session_id")
+            if not isinstance(session_id, str):
+                raise LocalAgentError("TASK_SESSION_ID_REQUIRED")
+            return self.sessions.clear_sensitive_cache(session_id)
         if path == "/assist/coordinate":
             return self.coordinator.coordinate(payload)
         if path == "/deepseek-head/coordinate":
@@ -198,7 +236,7 @@ class AgentApiController:
     def post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         try:
             return 200, self._dispatch(path, payload)
-        except (LocalAgentError, AssistCoordinatorError, DeepSeekHeadCoordinatorError) as exc:
+        except (LocalAgentError, AssistCoordinatorError, DeepSeekHeadCoordinatorError, SessionContextError) as exc:
             code = exc.code
             status = 403 if code == "LOCAL_AGENT_HIGH_RISK_STOP" else 400
             return status, {
