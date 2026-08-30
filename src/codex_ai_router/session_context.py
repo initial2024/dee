@@ -130,6 +130,7 @@ class SessionContextHub:
             "task_session_id": session_id, "title": _safe_summary(session.get("title"), limit=200),
             "created_at": session.get("created_at"), "updated_at": session.get("updated_at"),
             "session_directory": str(directory.relative_to(self.root)),
+            "work_profile": self._safe_profile(session.get("work_profile")),
             "codex_synced": "YES" if (directory / "codex_status.md").read_text(encoding="utf-8").strip().endswith("未同步。") is False else "NO",
             "deepseek_analyzed": "YES" if (directory / "deepseek_plan.md").read_text(encoding="utf-8").strip().endswith("未分析。") is False else "NO",
             "patch_draft_status": patch.get("status", "not_requested"),
@@ -143,6 +144,13 @@ class SessionContextHub:
         except (OSError, json.JSONDecodeError):
             return {}
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _safe_profile(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        allowed = {"profile_id", "task_difficulty", "desired_reasoning", "codex_custom_mode", "codex_reasoning_strength", "deepseek_mode", "local_model_policy", "external_api_policy", "local_agent_policy", "search_policy", "vision_policy", "file_policy", "apply_policy", "test_policy", "commit_policy", "risk_level", "target_executor", "recommended_codex_mode", "recommended_codex_reasoning_strength", "user_confirmed_codex_mode", "handoff_created_at"}
+        return {key: _safe_summary(value[key], limit=120) if isinstance(value[key], str) else value[key] for key in allowed if key in value}
 
     def append_codex_status_from_file(self, session_id: str, file_path: Path) -> dict[str, Any]:
         directory = self._require(session_id)
@@ -177,6 +185,33 @@ class SessionContextHub:
             raise SessionContextError("SESSION_COMMIT_INVALID")
         return self.append_codex_status(session_id, f"{repo} commit：{str(commit)[:64]}")
 
+    def append_work_profile(self, session_id: str, profile: dict[str, Any], *, user_confirmed_codex_mode: str = "NO", handoff_created_at: str | None = None) -> dict[str, Any]:
+        """Bind a sanitized Work Profile to a session without storing task text."""
+        directory = self._require(session_id)
+        if not isinstance(profile, dict) or not profile.get("profile_id"):
+            raise SessionContextError("WORK_PROFILE_INVALID")
+        allowed = {
+            "profile_id", "task_difficulty", "desired_reasoning", "codex_custom_mode",
+            "codex_reasoning_strength", "deepseek_mode", "local_model_policy",
+            "external_api_policy", "local_agent_policy", "search_policy", "vision_policy",
+            "file_policy", "apply_policy", "test_policy", "commit_policy", "risk_level",
+            "target_executor",
+        }
+        safe_profile = {key: _safe_summary(profile[key], limit=120) for key in allowed if key in profile}
+        safe_profile["recommended_codex_mode"] = safe_profile.get("codex_custom_mode", "UNKNOWN")
+        safe_profile["recommended_codex_reasoning_strength"] = safe_profile.get("codex_reasoning_strength", "UNKNOWN")
+        safe_profile["user_confirmed_codex_mode"] = "YES" if str(user_confirmed_codex_mode).upper() == "YES" else "NO"
+        safe_profile["handoff_created_at"] = _safe_summary(handoff_created_at, limit=64) if handoff_created_at else None
+        data = self._session_json(directory)
+        data["work_profile"] = safe_profile
+        self._write_json(directory / "session.json", data)
+        self._append_markdown(directory / "rolling_summary.md", "Work Profile", f"已绑定 {safe_profile['profile_id']}；Codex 模式由用户确认：{safe_profile['user_confirmed_codex_mode']}。")
+        self._touch(directory)
+        return {"status": "WORK_PROFILE_BOUND", "task_session_id": session_id, **safe_profile, "prompt_response_logged": "NO"}
+
+    # Explicit alias for integrations that use record terminology.
+    record_work_profile = append_work_profile
+
     def store_context_bundles(self, session_id: str, local_bundle: dict[str, Any], llm_bundle: dict[str, Any]) -> None:
         directory = self._require(session_id)
         local = self._safe_bundle(local_bundle)
@@ -208,6 +243,7 @@ class SessionContextHub:
             "decisions": _safe_summary((directory / "decisions.md").read_text(encoding="utf-8"), limit=1000),
             "codex_status": _safe_summary((directory / "codex_status.md").read_text(encoding="utf-8"), limit=1000),
             "patch_draft_status": {key: _safe_summary(value, limit=300) if isinstance(value, str) else value for key, value in patch.items() if key in {"status", "next_action_suggestion", "patch_draft_location", "unified_diff_detected"}},
+            "work_profile": self._safe_profile(session.get("work_profile")),
             "session_context_sanitized": True,
         }
 

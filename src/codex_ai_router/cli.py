@@ -30,6 +30,15 @@ from .agent_api import AGENT_API_BASE
 from .assist_coordinator import ASSIST_STARTUP_INSTRUCTION
 from .deepseek_head_coordinator import DeepSeekHeadCoordinator, DeepSeekHeadCoordinatorError, choose_brain
 from .session_context import SessionContextError, SessionContextHub
+from .work_profiles import (
+    DEFAULT_WORK_PROFILES,
+    REASONING_STRENGTHS,
+    classify_work_profile,
+    confirm_codex_mode,
+    generate_codex_handoff,
+    profile_summary,
+    select_work_profile,
+)
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -131,8 +140,15 @@ def main() -> None:
     session_append_status = session_sub.add_parser("append-codex-status"); session_append_status.add_argument("--session-id", required=True); session_append_status.add_argument("--file", type=Path, required=True)
     session_append_test = session_sub.add_parser("append-test-result"); session_append_test.add_argument("--session-id", required=True); session_append_test.add_argument("--summary", required=True)
     session_append_commit = session_sub.add_parser("append-commit"); session_append_commit.add_argument("--session-id", required=True); session_append_commit.add_argument("--repo", choices=("router", "bridge"), required=True); session_append_commit.add_argument("--commit", required=True)
+    session_append_profile = session_sub.add_parser("append-work-profile"); session_append_profile.add_argument("--session-id", required=True); session_append_profile.add_argument("--profile-id", choices=tuple(DEFAULT_WORK_PROFILES), required=True); session_append_profile.add_argument("--confirmed", action="store_true"); session_append_profile.add_argument("--handoff-created-at")
     session_context = session_sub.add_parser("context"); session_context.add_argument("--session-id", required=True)
     session_clear = session_sub.add_parser("clear-sensitive-cache"); session_clear.add_argument("--session-id", required=True)
+    work_profile = sub.add_parser("work-profile", help="本地 Work Profile 与 Codex 自定义模式绑定")
+    work_profile_sub = work_profile.add_subparsers(dest="work_profile_action", required=True)
+    work_profile_sub.add_parser("list")
+    work_profile_select = work_profile_sub.add_parser("select"); work_profile_select.add_argument("--task", required=True); work_profile_select.add_argument("--profile", dest="profile_id"); work_profile_select.add_argument("--production-impact", action="store_true"); work_profile_select.add_argument("--needs-official", action="store_true")
+    work_profile_handoff = work_profile_sub.add_parser("handoff"); work_profile_handoff.add_argument("--task", required=True); work_profile_handoff.add_argument("--profile", dest="profile_id"); work_profile_handoff.add_argument("--production-impact", action="store_true"); work_profile_handoff.add_argument("--needs-official", action="store_true")
+    work_profile_confirm = work_profile_sub.add_parser("confirm"); work_profile_confirm.add_argument("--profile-id", required=True, choices=tuple(DEFAULT_WORK_PROFILES)); work_profile_confirm.add_argument("--reasoning-strength", choices=tuple(REASONING_STRENGTHS)); work_profile_confirm.add_argument("--confirmed", action="store_true")
     deepseek = sub.add_parser("deepseek")
     deepseek_sub = deepseek.add_subparsers(dest="deepseek_action", required=True)
     deepseek_sub.add_parser("mode-probe")
@@ -225,12 +241,28 @@ def main() -> None:
                 emit(hub.append_test_result(args.session_id, args.summary))
             elif args.session_action == "append-commit":
                 emit(hub.append_commit(args.session_id, args.repo, args.commit))
+            elif args.session_action == "append-work-profile":
+                emit(hub.append_work_profile(args.session_id, profile_summary(args.profile_id), user_confirmed_codex_mode="YES" if args.confirmed else "NO", handoff_created_at=args.handoff_created_at))
             elif args.session_action == "context":
                 emit({"task_session_id": args.session_id, "llm_context_bundle": hub.llm_context(args.session_id), "prompt_response_logged": "NO"})
             else:
                 emit(hub.clear_sensitive_cache(args.session_id))
         except SessionContextError as exc:
             emit({"status": "ERROR", "error_code": exc.code, "prompt_response_logged": "NO", "secrets_logged": "NO"})
+    elif args.command == "work-profile":
+        try:
+            if args.work_profile_action == "list":
+                emit({"profiles": [profile_summary(profile) for profile in DEFAULT_WORK_PROFILES.values()], "reasoning_strengths": list(REASONING_STRENGTHS), "ui_language": "ZH_CN", "codex_ui_scraping": "NO", "codex_ui_automation": "NO"})
+            elif args.work_profile_action == "select":
+                profile = select_work_profile(args.task, profile_id=args.profile_id, production_impact=args.production_impact, needs_official=args.needs_official)
+                emit({"status": "SELECTED", "task_difficulty": profile.task_difficulty, "profile": profile_summary(profile), "classification": classify_work_profile(args.task, production_impact=args.production_impact, needs_official=args.needs_official), "codex_ui_scraping": "NO", "codex_ui_automation": "NO"})
+            elif args.work_profile_action == "handoff":
+                profile = select_work_profile(args.task, profile_id=args.profile_id, production_impact=args.production_impact, needs_official=args.needs_official)
+                emit({"status": "HANDOFF_READY", "profile_id": profile.profile_id, "recommended_codex_mode": profile.codex_custom_mode, "recommended_codex_reasoning_strength": profile.codex_reasoning_strength, "codex_handoff_instruction": generate_codex_handoff(profile), "codex_ui_scraping": "NO", "codex_ui_automation": "NO", "prompt_response_logged": "NO"})
+            else:
+                emit({"status": "CONFIRMED" if args.confirmed else "PENDING_CONFIRMATION", **confirm_codex_mode(args.profile_id, confirmed_mode=args.confirmed, confirmed_strength=args.reasoning_strength), "handoff_created_at": None})
+        except ValueError as exc:
+            emit({"status": "ERROR", "error_code": str(exc), "prompt_response_logged": "NO", "secrets_logged": "NO"})
     elif args.command == "deepseek":
         if args.deepseek_action == "mode-probe":
             emit(probe_deepseek_modes())

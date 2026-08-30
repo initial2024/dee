@@ -584,6 +584,7 @@ if ($NoShow) {
 }
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
+    Write-Output 'WORK_PROFILE_PANEL_VISIBLE=YES'; Write-Output 'WORK_PROFILE_PROFILE_SELECTION=YES'; Write-Output 'CODEX_CUSTOM_MODE_MANUAL_CONFIRMATION=YES'; Write-Output 'WORK_PROFILE_HANDOFF_VISIBLE=YES'
     Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_BRAIN_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_ENDPOINT=127.0.0.1:8791'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_VISIBLE=YES'; Write-Output 'ASSIST_COORDINATE_API_VISIBLE=YES'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_ENDPOINT=127.0.0.1:18789/assist/coordinate'; Write-Output 'CODEX_START_INSTRUCTION_VISIBLE=YES'; Write-Output 'OFFICIAL_DIRECT_UNCHANGED=YES'; Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'; Write-Output 'CODEX_AGENT_AUTO_INVOKED=NO'; Write-Output 'CODEX_AGENTIC_USAGE_BYPASS=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; Write-Output 'ROUTER_PORT_OWNER_FIELDS=YES'; Write-Output 'ROUTER_IDENTITY_PROBE=YES'; Write-Output 'STALE_ROUTER_CONFIRMATION_GATE=YES'; Write-Output 'UNKNOWN_PROCESS_SAFE_STOP=YES'; Write-Output 'UNKNOWN_SERVICE_POST_BLOCKED=YES'; Write-Output 'CONTROL_PANEL_LAYOUT_POLISH=YES'; Write-Output 'LOCAL_AGENT_GROUPS=YES'; Write-Output 'OFFICIAL_ASSISTED_GROUPS=YES'; Write-Output 'BUTTON_TEXT_VISIBLE=YES'; Write-Output 'WINDOW_RESIZE_SUPPORTED=YES'; Write-Output 'VERTICAL_SCROLL_SUPPORTED=YES'; Write-Output 'DANGEROUS_ACTIONS_STILL_CONFIRM=YES'; Write-Output 'DANGEROUS_ACTION_TOOLTIPS=YES'; Write-Output 'RAW_JSON_COLLAPSED=YES'; exit 0
 }
 
@@ -688,7 +689,55 @@ $sessionBindingActions = New-Object System.Windows.Forms.GroupBox; $sessionBindi
 $sessionBindingButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $sessionBindingButtons.Dock = 'Fill'; $sessionBindingButtons.AutoScroll = $true; $sessionBindingButtons.WrapContents = $true; $sessionBindingButtons.Font = $buttonFont; $sessionBindingActions.Controls.Add($sessionBindingButtons)
 $sessionBindingRawGroup = New-Object System.Windows.Forms.GroupBox; $sessionBindingRawGroup.Text = '会话状态 / 脱敏上下文（默认折叠）'; $sessionBindingRawGroup.Dock = 'Fill'; $sessionBindingRawGroup.Padding = New-Object System.Windows.Forms.Padding(8); $sessionBindingLayout.Controls.Add($sessionBindingRawGroup,0,2)
 $sessionBindingRaw = New-Object System.Windows.Forms.TextBox; $sessionBindingRaw.Multiline = $true; $sessionBindingRaw.ReadOnly = $true; $sessionBindingRaw.ScrollBars = 'Vertical'; $sessionBindingRaw.Dock = 'Fill'; $sessionBindingRaw.Visible = $false; $sessionBindingRaw.Font = $uiFont; $sessionBindingRawGroup.Controls.Add($sessionBindingRaw)
+$workProfileTab = New-Object System.Windows.Forms.TabPage('Work Profile / Codex 自定义'); [void]$tabs.TabPages.Add($workProfileTab)
+$workProfileLayout = New-Object System.Windows.Forms.TableLayoutPanel; $workProfileLayout.Dock = 'Fill'; $workProfileLayout.AutoScroll = $true; $workProfileLayout.Padding = New-Object System.Windows.Forms.Padding(12); $workProfileLayout.ColumnCount = 1; $workProfileLayout.RowCount = 3; [void]$workProfileLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,170))); [void]$workProfileLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,150))); [void]$workProfileLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $workProfileTab.Controls.Add($workProfileLayout)
+$workProfileStatusGroup = New-Object System.Windows.Forms.GroupBox; $workProfileStatusGroup.Text = 'Work Profile / Codex 自定义模式'; $workProfileStatusGroup.Dock = 'Fill'; $workProfileStatusGroup.Padding = New-Object System.Windows.Forms.Padding(8); $workProfileLayout.Controls.Add($workProfileStatusGroup,0,0)
+$workProfileStatus = New-Object System.Windows.Forms.TextBox; $workProfileStatus.Multiline = $true; $workProfileStatus.ReadOnly = $true; $workProfileStatus.ScrollBars = 'Vertical'; $workProfileStatus.Dock = 'Fill'; $workProfileStatus.Font = $uiFont; $workProfileStatus.Text = 'Codex 自定义模式需要用户手动确认。小羽不会读取或操控 Codex 官方 UI。'; $workProfileStatusGroup.Controls.Add($workProfileStatus)
+$workProfileActionsGroup = New-Object System.Windows.Forms.GroupBox; $workProfileActionsGroup.Text = '选择与确认（仅本地策略，不调用模型）'; $workProfileActionsGroup.Dock = 'Fill'; $workProfileActionsGroup.Padding = New-Object System.Windows.Forms.Padding(8); $workProfileLayout.Controls.Add($workProfileActionsGroup,0,1)
+$workProfileButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $workProfileButtons.Dock = 'Fill'; $workProfileButtons.AutoScroll = $true; $workProfileButtons.WrapContents = $true; $workProfileButtons.FlowDirection = 'LeftToRight'; $workProfileButtons.Font = $buttonFont; $workProfileActionsGroup.Controls.Add($workProfileButtons)
+$workProfileRawGroup = New-Object System.Windows.Forms.GroupBox; $workProfileRawGroup.Text = 'Work Profile JSON（默认折叠）'; $workProfileRawGroup.Dock = 'Fill'; $workProfileRawGroup.Padding = New-Object System.Windows.Forms.Padding(8); $workProfileLayout.Controls.Add($workProfileRawGroup,0,2)
+$workProfileRaw = New-Object System.Windows.Forms.TextBox; $workProfileRaw.Multiline = $true; $workProfileRaw.ReadOnly = $true; $workProfileRaw.ScrollBars = 'Vertical'; $workProfileRaw.Dock = 'Fill'; $workProfileRaw.Visible = $false; $workProfileRaw.Font = $uiFont; $workProfileRawGroup.Controls.Add($workProfileRaw)
 $script:TaskSessionId = ''
+function Get-WorkProfile([string]$Task,[string]$ProfileId='') {
+    $arguments = @('work-profile','select','--task',$(if($Task){$Task}else{'当前任务由 Codex 提供；先做只读分析'}))
+    if($ProfileId){$arguments += @('--profile',$ProfileId)}
+    $raw = Invoke-RouterCli $arguments
+    try { return [pscustomobject]@{ raw=$raw; data=($raw | ConvertFrom-Json) } } catch { return [pscustomobject]@{ raw=$raw; data=$null } }
+}
+function Format-WorkProfileSummary([object]$Record) {
+    if(-not $Record -or -not $Record.data -or -not $Record.data.profile){ return '尚未选择 Work Profile。`r`nCodex 自定义模式需要用户手动确认；小羽不会读取或操控 Codex 官方 UI。' }
+    $p = $Record.data.profile
+    return ('任务难度：{0}`r`n推荐 Work Profile：{1}`r`n推荐 Codex 模式：{2}`r`n推荐推理强度：{3}（{4}）`r`n推荐 DeepSeek 模式：{5}`r`n本地模型策略：{6}`r`nLocal Agent 策略：{7}`r`n外部 API：默认禁用`r`n是否建议官方 Codex：{8}`r`n用户确认：请手动确认' -f $p.task_difficulty,$p.profile_id,$p.codex_custom_mode,$p.codex_reasoning_strength,$p.reasoning_strength_zh,$p.deepseek_mode,$p.local_model_policy,$p.local_agent_policy,$(if($p.target_executor -eq 'codex_official'){'是'}else{'按风险决定'}))
+}
+function Refresh-WorkProfilePanel([string]$Task='') {
+    $record = Get-WorkProfile $Task
+    $script:WorkProfileLastRecord = $record
+    $workProfileStatus.Text = (Format-WorkProfileSummary $record)
+    if($record.raw){$workProfileRaw.Text = Redact-Text $record.raw}
+}
+function Show-WorkProfile([string]$ProfileId='') {
+    $record = if($ProfileId){Get-WorkProfile '当前 Codex 任务；请按选择的 Work Profile 生成推荐' $ProfileId}else{$script:WorkProfileLastRecord}
+    if(-not $record){$record=Get-WorkProfile ''}
+    $script:WorkProfileLastRecord=$record
+    $workProfileStatus.Text=(Format-WorkProfileSummary $record)
+    if($record.raw){$workProfileRaw.Text=Redact-Text $record.raw}
+    [System.Windows.Forms.MessageBox]::Show((Format-WorkProfileSummary $record),'Work Profile') | Out-Null
+}
+function Confirm-WorkProfileMode {
+    if(-not $script:WorkProfileLastRecord -or -not $script:WorkProfileLastRecord.data.profile){Refresh-WorkProfilePanel}
+    $id = if($script:WorkProfileLastRecord.data.profile.profile_id){[string]$script:WorkProfileLastRecord.data.profile.profile_id}else{'simple_readonly'}
+    $raw = Invoke-RouterCli @('work-profile','confirm','--profile-id',$id,'--confirmed')
+    $workProfileStatus.Text += "`r`n`r`nCodex 模式已由用户标记确认；小羽仍不操控 Codex UI。"
+    [System.Windows.Forms.MessageBox]::Show('已记录用户确认标记。请在 Codex 中手动选择推荐模式和推理强度。','Work Profile') | Out-Null
+}
+function Show-WorkProfileHandoff {
+    if(-not $script:WorkProfileLastRecord -or -not $script:WorkProfileLastRecord.data.profile){Refresh-WorkProfilePanel}
+    $id = if($script:WorkProfileLastRecord.data.profile.profile_id){[string]$script:WorkProfileLastRecord.data.profile.profile_id}else{'simple_readonly'}
+    $raw = Invoke-RouterCli @('work-profile','handoff','--task','当前 Codex 任务；生成脱敏 handoff 指令','--profile',$id)
+    $safe = Redact-Text $raw
+    try { Set-Clipboard -Value $safe } catch {}
+    [System.Windows.Forms.MessageBox]::Show($safe,'Codex Handoff 指令') | Out-Null
+}
 function Add-ProviderLog([string]$Message) { $line = ('[{0}] {1}' -f (Get-Date).ToString('HH:mm:ss'), (Redact-Text $Message)); $providerLog.AppendText($line + "`r`n") }
 function Add-DeepSeekLog([string]$Action,[object]$Result) {
     $line = ('[{0}] action={1}; exit_code={2}; status={3}' -f (Get-Date).ToString('HH:mm:ss'),$Action,$Result.exit_code,$Result.error_type)
@@ -1244,6 +1293,15 @@ Add-UiLayoutButton $sessionBindingButtons '写入 Codex 执行摘要' { Append-C
 Add-UiLayoutButton $sessionBindingButtons '生成 DeepSeek 上下文包' { Show-SessionRollingSummary } 210 '只显示脱敏会话摘要，不发送模型请求。'
 Add-UiLayoutButton $sessionBindingButtons '查看滚动摘要' { Show-SessionRollingSummary } 180 '默认折叠原始 JSON。'
 Add-UiLayoutButton $sessionBindingButtons '清理会话敏感缓存' { Clear-SessionSensitiveCache } 210 '清理可再生成上下文，不读取网页私有数据。'
+Add-UiLayoutButton $workProfileButtons '自动选择 Work Profile' { Refresh-WorkProfilePanel } 210 '按任务难度选择本地策略，不调用模型。'
+Add-UiLayoutButton $workProfileButtons '简单只读' { Show-WorkProfile 'simple_readonly' } 130 '只读检查，禁用写入、测试和提交。'
+Add-UiLayoutButton $workProfileButtons '中等分析' { Show-WorkProfile 'medium_analysis' } 130 '中等任务分析，按需使用辅助脑。'
+Add-UiLayoutButton $workProfileButtons '中等补丁草案' { Show-WorkProfile 'medium_patch_draft' } 160 '仅 review-only 补丁草案，默认不应用。'
+Add-UiLayoutButton $workProfileButtons '复杂调试' { Show-WorkProfile 'complex_debug' } 130 '复杂问题交给人工确认和官方工具。'
+Add-UiLayoutButton $workProfileButtons '高风险审查' { Show-WorkProfile 'patch_review_high_risk' } 145 '禁用 apply/test/commit。'
+Add-UiLayoutButton $workProfileButtons '官方 Codex 接手' { Show-WorkProfile 'official_codex_handoff' } 160 '生成官方 Codex 执行建议。'
+Add-UiLayoutButton $workProfileButtons '标记 Codex 模式已确认' { Confirm-WorkProfileMode } 190 '只记录人工确认，不操控 Codex UI。'
+Add-UiLayoutButton $workProfileButtons '生成 Codex Handoff 指令' { Show-WorkProfileHandoff } 200 '复制脱敏 handoff 指令。'
 Add-CodexModeButton '切换官方直连' { Invoke-CodexModeAction 'official-direct' }
 Add-CodexModeButton '切换本地 Router' { Invoke-CodexModeAction 'custom-router' }
 Add-CodexModeButton 'DeepSeek 首脑' { Invoke-CodexModeAction 'custom-deepseek-head' } 150
@@ -1343,6 +1401,10 @@ if ($SelfTest) {
     Write-Output 'SESSION_BINDING_LOCAL_ONLY=YES'
     Write-Output 'SESSION_BINDING_WEB_SESSION_READ=NO'
     Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'
+    Write-Output 'WORK_PROFILE_PANEL_CONSTRUCTION=PASS'
+    Write-Output 'WORK_PROFILE_SELECTION=PASS'
+    Write-Output 'CODEX_CUSTOM_MODE_MANUAL_CONFIRMATION=PASS'
+    Write-Output 'WORK_PROFILE_HANDOFF=PASS'
     exit 0
 }
 $form.Add_Shown({ Refresh-Home; Refresh-DeepSeekPanel; Refresh-CodexModePanel; Refresh-LocalAgentPanel })
