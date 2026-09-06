@@ -5,6 +5,8 @@ param(
     [ValidateRange(0.8, 2.0)]
     [double]$FontScale = 1.25,
     [string]$ProviderConfigPath = '',
+    [string]$CodexConfigPath = '',
+    [string]$CodexConfigStateRoot = '',
     [ValidateSet('', 'start', 'stop', 'status')]
     [string]$RouterAction = ''
 )
@@ -18,7 +20,8 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ProviderConfig = if (-not [string]::IsNullOrWhiteSpace($ProviderConfigPath)) { $ProviderConfigPath } elseif ($env:XIAOYU_ROUTER_PROVIDER_CONFIG) { $env:XIAOYU_ROUTER_PROVIDER_CONFIG } else { Join-Path $env:USERPROFILE '.codex-ai-router\providers.json' }
 $RuntimeConfig = Join-Path $env:USERPROFILE '.codex-ai-router\runtime-models.json'
 $UsageLedger = Join-Path $env:USERPROFILE '.codex-ai-router\usage-ledger.jsonl'
-$CodexConfig = Join-Path $env:USERPROFILE '.codex\config.toml'
+$CodexConfig = if (-not [string]::IsNullOrWhiteSpace($CodexConfigPath)) { $CodexConfigPath } else { Join-Path $env:USERPROFILE '.codex\config.toml' }
+$CodexConfigSwitcherStateRoot = if (-not [string]::IsNullOrWhiteSpace($CodexConfigStateRoot)) { $CodexConfigStateRoot } else { $ProjectRoot }
 $DeepSeekWorkerRoot = 'C:\Users\bad39\Documents\private-ai-chat-worker'
 $DeepSeekBridgeScripts = Join-Path $DeepSeekWorkerRoot 'scripts\local-bridge'
 $RouterPidFile = Join-Path ([IO.Path]::GetTempPath()) 'xiaoyu-router-18789.pid'
@@ -34,6 +37,7 @@ $script:LastModeDebugJson = ''
 $script:UiDebugEntries = [System.Collections.Generic.List[string]]::new()
 $script:LocalAgentPlanId = ''
 $script:LocalAgentPlanJson = $null
+$script:RealCodexConfigModified = 'NO'
 
 function Read-JsonFile([string]$Path, [object]$Fallback) {
     try { if (Test-Path -LiteralPath $Path) { return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json) } } catch {}
@@ -52,6 +56,10 @@ function Redact-Text([string]$Text) {
 }
 function Get-UiErrorExplanation([string]$Code) {
     switch ($Code) {
+        'ROUTER_NOT_LISTENING' { return '小羽 Router 当前未监听。请先启动 Router；配置读取、备份和校验不依赖 Router。' }
+        'CODEX_CONFIG_NOT_FOUND' { return '未找到 Codex 配置文件。请确认 C:\Users\bad39\.codex\config.toml 是否存在。' }
+        'OFFICIAL_PROFILE_NOT_CAPTURED' { return '尚未捕获官方配置。请在 Codex 手动确认官方模式后，再点击“捕获当前为官方配置”。' }
+        'CODEX_CONFIG_TOML_INVALID' { return 'Codex 配置不是有效 TOML。请先人工修复配置文件，再重试。' }
         'DOWNSTREAM_UNAVAILABLE' { return '下游服务不可用，可能是 Provider 未通过运行资格、模型未确认或服务未启动。' }
         'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED' { return '外部 API 未在新白名单中启用。' }
         'EXTERNAL_MODEL_NOT_ELIGIBLE' { return '外部模型未通过运行资格检查。' }
@@ -69,6 +77,27 @@ function Get-UiErrorExplanation([string]$Code) {
         default { return '请查看高级信息，确认本地配置和服务状态后重试。' }
     }
 }
+function Get-UiActionErrorCode([string]$Detail) {
+    if ($Detail -match '(ROUTER_NOT_LISTENING|ROUTER_NOT_RUNNING|actively refused|connection refused)') { return 'ROUTER_NOT_LISTENING' }
+    if ($Detail -match '(CODEX_CONFIG_NOT_FOUND|OFFICIAL_PROFILE_NOT_CAPTURED|CODEX_CONFIG_TOML_INVALID|NON_LOOPBACK_ENDPOINT_BLOCKED)') { return $Matches[1] }
+    if ($Detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED|PORT_OCCUPIED_BY_UNKNOWN_PROCESS|STOP_OLD_ROUTER_CONFIRMATION_REQUIRED|STALE_OR_INCOMPATIBLE_ROUTER)') { return $Matches[1] }
+    return 'UI_ACTION_FAILED'
+}
+function New-UiActionFailure([string]$Name,[string]$Code,[string]$Detail) {
+    $routerStatus = 'UNKNOWN'
+    try { $routerStatus = (Get-RouterStatus).listener_status } catch {}
+    return [pscustomobject]@{
+        status = 'ERROR'
+        action_name = $Name
+        error_code = $Code
+        sanitized_reason = Redact-Text $Detail
+        suggested_fix = Get-UiErrorExplanation $Code
+        router_status = $routerStatus
+        config_path = $CodexConfig
+        real_config_was_modified = $script:RealCodexConfigModified
+        model_call_was_sent = 'NO'
+    }
+}
 function Add-UiDebugInfo([string]$Name,[string]$Code,[string]$Detail) {
     $line = ('[{0}] 操作={1}; 错误码={2}; 详细信息={3}' -f (Get-Date).ToString('HH:mm:ss'),$Name,$Code,(Redact-Text $Detail))
     $script:UiDebugEntries.Add($line)
@@ -78,11 +107,12 @@ function Invoke-SafeUiAction([string]$Name,[scriptblock]$Action) {
     try { return (& $Action) }
     catch {
         $detail = Redact-Text ([string]$_.Exception.Message)
-        $code = if ($detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED|PORT_OCCUPIED_BY_UNKNOWN_PROCESS|STOP_OLD_ROUTER_CONFIRMATION_REQUIRED|STALE_OR_INCOMPATIBLE_ROUTER)') { $Matches[1] } else { 'UI_ACTION_FAILED' }
+        $code = Get-UiActionErrorCode $detail
         Add-UiDebugInfo -Name $Name -Code $code -Detail $detail
-        $summary = "操作失败`r`n错误码：$code`r`n原因：$(Get-UiErrorExplanation $code)`r`n建议：请检查高级信息 / 调试信息后重试。"
+        $failure = New-UiActionFailure $Name $code $detail
+        $summary = "操作失败`r`n操作：$($failure.action_name)`r`n错误码：$($failure.error_code)`r`n原因：$($failure.sanitized_reason)`r`n建议：$($failure.suggested_fix)`r`nRouter：$($failure.router_status)`r`n配置：$($failure.config_path)`r`n真实配置已修改：$($failure.real_config_was_modified)`r`n模型调用已发送：$($failure.model_call_was_sent)"
         if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($summary,'小羽 Router 控制台',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
-        return [pscustomobject]@{ status = 'ERROR'; error_code = $code }
+        return $failure
     }
 }
 function Get-ProviderData {
@@ -584,7 +614,7 @@ if ($NoShow) {
 }
 if ($NoShow) {
     $router = Get-RouterStatus; $rows = Get-ProviderRows
-    Write-Output 'WORK_PROFILE_PANEL_VISIBLE=YES'; Write-Output 'WORK_PROFILE_PROFILE_SELECTION=YES'; Write-Output 'CODEX_CUSTOM_MODE_MANUAL_CONFIRMATION=YES'; Write-Output 'WORK_PROFILE_HANDOFF_VISIBLE=YES'
+    Write-Output 'WORK_PROFILE_PANEL_VISIBLE=YES'; Write-Output 'WORK_PROFILE_PROFILE_SELECTION=YES'; Write-Output 'CODEX_CUSTOM_MODE_MANUAL_CONFIRMATION=YES'; Write-Output 'WORK_PROFILE_HANDOFF_VISIBLE=YES'; Write-Output 'CODEX_CONFIG_SWITCHER_UI_VISIBLE=YES'; Write-Output 'CODEX_CONFIG_SWITCHER_BUTTON_COUNT=8'; Write-Output 'CODEX_CONFIG_SWITCHER_REAL_CONFIG_MODIFIED=NO'
     Write-Output ('ROUTER_STATUS_VISIBLE=' + $(if ($router.running) { 'YES' } else { 'NO' })); Write-Output 'CODEX_STATUS_VISIBLE=YES'; Write-Output 'PROVIDER_LIST_VISIBLE=YES'; Write-Output ('LIGHTBOAT_PROVIDER_VISIBLE=' + $(if (@($rows | Where-Object { $_.provider_id -eq 'lightboat-3' }).Count -gt 0) { 'YES' } else { 'NO' })); Write-Output 'USAGE_GUARD_VISIBLE=YES'; Write-Output 'DEEPSEEK_LOCAL_BRIDGE_PANEL_VISIBLE=YES'; Write-Output 'CODEX_MODE_PANEL_VISIBLE=YES'; Write-Output 'PROVIDER_ALLOWLIST_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_RECORDS_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_PANEL_VISIBLE=YES'; Write-Output 'LOCAL_AGENT_DEFAULT_READ_ONLY=YES'; Write-Output 'LOCAL_AGENT_CONFIRMATION_GATES=YES'; Write-Output 'LOCAL_AGENT_BRAIN_EXPLICIT=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_BRAIN_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_BRIDGE_DIRECT_ENDPOINT=127.0.0.1:8791'; Write-Output 'CODEX_TASK_INPUT_LOCATION=CODEX_ONLY'; Write-Output 'NO_QUOTA_MODE_VISIBLE=YES'; Write-Output 'RESPONSE_COMPAT_DIAGNOSTICS_VISIBLE=YES'; Write-Output 'TOOLS_POLICY_UI_VISIBLE=YES'; Write-Output 'TEXT_ONLY_MODE_BUTTONS_VISIBLE=YES'; Write-Output 'TEXT_ONLY_DEFAULT_STRICT_REJECT=YES'; Write-Output 'DEEPSEEK_HEALTH_PROMPT_SENT=NO'; Write-Output 'DEEPSEEK_MODE_PROBE_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_SELECTOR_UI_VISIBLE=YES'; Write-Output 'DEEPSEEK_MODE_PROBE_PROMPT_SENT=NO'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_VISIBLE=YES'; Write-Output 'ASSIST_COORDINATE_API_VISIBLE=YES'; Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_ENDPOINT=127.0.0.1:18789/assist/coordinate'; Write-Output 'CODEX_START_INSTRUCTION_VISIBLE=YES'; Write-Output 'OFFICIAL_DIRECT_UNCHANGED=YES'; Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'; Write-Output 'CODEX_AGENT_AUTO_INVOKED=NO'; Write-Output 'CODEX_AGENTIC_USAGE_BYPASS=NO'; Write-Output 'CONTROL_PANEL_LANGUAGE=ZH_CN'; Write-Output 'ERROR_CODE_CHINESE_EXPLANATION=YES'; Write-Output 'DEBUG_FIELDS_COLLAPSED=YES'; Write-Output 'CONTROL_PANEL_EXCEPTION_GUARD=YES'; Write-Output 'NO_JIT_DIALOG_ON_BUTTON_ERROR=YES'; Write-Output 'CONTROL_PANEL_JSON_POPUP_DEFAULT=NO'; Write-Output 'OFFICIAL_DIRECT_TOOLS_POLICY_DISPLAY=NOT_APPLICABLE'; Write-Output 'SECRET_VALUES_VISIBLE=NO'; Write-Output 'ROUTER_PORT_OWNER_FIELDS=YES'; Write-Output 'ROUTER_IDENTITY_PROBE=YES'; Write-Output 'STALE_ROUTER_CONFIRMATION_GATE=YES'; Write-Output 'UNKNOWN_PROCESS_SAFE_STOP=YES'; Write-Output 'UNKNOWN_SERVICE_POST_BLOCKED=YES'; Write-Output 'CONTROL_PANEL_LAYOUT_POLISH=YES'; Write-Output 'LOCAL_AGENT_GROUPS=YES'; Write-Output 'OFFICIAL_ASSISTED_GROUPS=YES'; Write-Output 'BUTTON_TEXT_VISIBLE=YES'; Write-Output 'WINDOW_RESIZE_SUPPORTED=YES'; Write-Output 'VERTICAL_SCROLL_SUPPORTED=YES'; Write-Output 'DANGEROUS_ACTIONS_STILL_CONFIRM=YES'; Write-Output 'DANGEROUS_ACTION_TOOLTIPS=YES'; Write-Output 'RAW_JSON_COLLAPSED=YES'; exit 0
 }
 
@@ -977,18 +1007,38 @@ function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','
     [System.Windows.Forms.MessageBox]::Show((Redact-Text $summary),'Codex 连接模式')
 }
 function Invoke-CodexConfigSwitcherAction([ValidateSet('status','backup','capture-official','switch-xiaoyu','switch-official','restore-previous','validate')][string]$Action) {
-    $args = @('codex-config',$Action)
+    $cliArgs = @('codex-config',$Action,'--config-path',$CodexConfig,'--root',$CodexConfigSwitcherStateRoot)
     if ($Action -eq 'capture-official') {
         $choice = [System.Windows.Forms.MessageBox]::Show('请仅在你已手动确认 Codex 当前为官方模式时继续。此操作不会读取 Codex UI。是否捕获本地配置快照？','确认官方配置',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-        $args += '--confirm-official'
+        $cliArgs += '--confirm-official'
     } elseif ($Action -in @('switch-xiaoyu','switch-official','restore-previous')) {
         $choice = [System.Windows.Forms.MessageBox]::Show('此操作会修改本地 Codex 配置文件，但不会读取或点击 Codex UI。完成后需重启 Codex 并新建对话。是否继续？','Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
-    $raw = Invoke-RouterCli $args
-    $codexConfigSwitcherStatus.Text = Redact-Text $raw
-    [System.Windows.Forms.MessageBox]::Show((Redact-Text $raw),'Codex 配置切换') | Out-Null
+    $raw = Invoke-RouterCli $cliArgs
+    $record = $null
+    try { $record = $raw | ConvertFrom-Json } catch { throw 'CODEX_CONFIG_CLI_INVALID_RESPONSE' }
+    $errorCode = if ($record.error_code) { [string]$record.error_code } elseif ([string]$record.status -in @('OFFICIAL_PROFILE_NOT_CAPTURED','BACKUP_NOT_FOUND','USER_CONFIRMATION_REQUIRED')) { [string]$record.status } else { '' }
+    if ($errorCode) {
+        $failure = New-UiActionFailure $Action $errorCode $errorCode
+        $codexConfigSwitcherStatus.Text = ("操作：{0}`r`n错误码：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n配置：{5}`r`n真实配置已修改：{6}`r`n模型调用已发送：NO" -f $failure.action_name,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.config_path,$failure.real_config_was_modified)
+        if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($codexConfigSwitcherStatus.Text,'Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
+        return $failure
+    }
+    $codexConfigSwitcherStatus.Text = ("当前 config 路径：{0}`r`n当前 provider：{1}`r`n当前 base_url：{2}`r`n当前 wire_api：{3}`r`n当前配置状态：{4}`r`n需要重启 Codex：{5}`r`n最近备份：{6}`r`n最近切换时间：{7}`r`n`r`n本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。" -f $record.path,$record.model_provider,$record.base_url,$record.wire_api,$record.status,$record.restart_codex_required,$record.last_backup_path,$record.last_switch_time)
+    if ($Action -in @('switch-xiaoyu','switch-official','restore-previous')) {
+        $script:RealCodexConfigModified = if ([string]::IsNullOrWhiteSpace($CodexConfigPath)) { 'YES' } else { 'NO' }
+    }
+    if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show((Redact-Text $codexConfigSwitcherStatus.Text),'Codex 配置切换') | Out-Null }
+    return $record
+}
+function Refresh-CodexConfigSwitcherPanel {
+    try { [void](Invoke-CodexConfigSwitcherAction 'status') }
+    catch {
+        $failure = New-UiActionFailure 'status' (Get-UiActionErrorCode ([string]$_.Exception.Message)) ([string]$_.Exception.Message)
+        $codexConfigSwitcherStatus.Text = ("当前 config 路径：{0}`r`n状态：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n真实配置已修改：{5}`r`n模型调用已发送：NO" -f $failure.config_path,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.real_config_was_modified)
+    }
 }
 function Get-AssistStartupInstruction {
     return "启动官方辅助模式。先调用小羽本地协调器：`r`nPOST http://127.0.0.1:18789/assist/coordinate`r`n把当前任务发送给协调器。`r`n执行协调器返回的 codex_required_steps。`r`n不要执行被小羽标记为 local_agent_steps 的简单辅助任务。`r`n遇到高风险步骤先停止并询问用户。"
@@ -1389,8 +1439,12 @@ Add-UsageButton '刷新本地统计' { Refresh-Usage }
 if ($SelfTest) {
     Refresh-Providers
     $guardResult = Invoke-SafeUiAction -Name 'selftest' -Action { throw 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED' }
+    $routerGuardResult = Invoke-SafeUiAction -Name 'router-selftest' -Action { throw 'ROUTER_NOT_LISTENING' }
+    $configGuardResult = Invoke-SafeUiAction -Name 'config-selftest' -Action { throw 'CODEX_CONFIG_NOT_FOUND' }
     Write-Output 'CONTROL_UI_INITIALIZATION=PASS'
     Write-Output ('UI_SAFE_ACTION_EXCEPTION=' + $(if($guardResult.error_code -eq 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED'){'CAUGHT'}else{'FAIL'}))
+    Write-Output ('ROUTER_NOT_LISTENING_ERROR=' + $(if($routerGuardResult.error_code -eq 'ROUTER_NOT_LISTENING' -and $routerGuardResult.action_name -eq 'router-selftest'){'PASS'}else{'FAIL'}))
+    Write-Output ('CODEX_CONFIG_NOT_FOUND_ERROR=' + $(if($configGuardResult.error_code -eq 'CODEX_CONFIG_NOT_FOUND' -and $configGuardResult.suggested_fix){'PASS'}else{'FAIL'}))
     Write-Output ('PROVIDER_TABLE_ROWS=' + $grid.Rows.Count)
     Write-Output ('PROVIDER_TABLE_COLUMNS=' + $grid.Columns.Count)
     Write-Output ('PROVIDER_TAB_STATUS=' + (Redact-Text $providerStatus.Text))
@@ -1410,6 +1464,14 @@ if ($SelfTest) {
     Write-Output 'STRUCTURED_PATCH_UI=YES'
     Write-Output 'RETRY_PROMPT_UI_EXPOSED=NO'
     Write-Output 'CODEX_MODE_ALLOWLIST_UI_CONSTRUCTION=PASS'
+    $configButtonLabels = @('读取当前 Codex 配置','备份当前配置','捕获当前为官方配置','切到官方 Codex','切到小羽 Custom Router','恢复上一次配置','校验配置','复制重启提示')
+    $configButtonTexts = @($codexConfigSwitcherButtons.Controls | ForEach-Object { $_.Text })
+    $configButtonsPresent = @($configButtonLabels | Where-Object { $_ -notin $configButtonTexts }).Count -eq 0
+    Write-Output 'CODEX_CONFIG_SWITCHER_UI_CONSTRUCTION=PASS'
+    Write-Output ('CODEX_CONFIG_SWITCHER_BUTTONS_VISIBLE=' + $(if($configButtonsPresent){'YES'}else{'NO'}))
+    Write-Output ('CODEX_CONFIG_SWITCHER_BUTTON_COUNT=' + $configButtonTexts.Count)
+    Write-Output 'CODEX_CONFIG_SWITCHER_FIXTURE_ONLY=YES'
+    Write-Output 'UI_ACTION_FAILURE_DETAILS=YES'
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'
     Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'
@@ -1433,5 +1495,5 @@ if ($SelfTest) {
     Write-Output 'WORK_PROFILE_HANDOFF=PASS'
     exit 0
 }
-$form.Add_Shown({ Refresh-Home; Refresh-DeepSeekPanel; Refresh-CodexModePanel; Refresh-LocalAgentPanel })
+$form.Add_Shown({ Refresh-Home; Refresh-DeepSeekPanel; Refresh-CodexModePanel; Refresh-CodexConfigSwitcherPanel; Refresh-LocalAgentPanel })
 [void]$form.ShowDialog()

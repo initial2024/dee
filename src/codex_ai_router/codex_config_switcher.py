@@ -46,6 +46,23 @@ def _paths(root: Path) -> tuple[Path, Path, Path]:
     return handoff / "codex-config-backups", handoff / "codex-config-profiles", handoff / "codex-config-state.json"
 
 
+def _load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_state(path: Path, **updates: str) -> None:
+    state = _load_state(path)
+    state.update(updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
 def _safe_summary(path: Path, data: dict[str, Any]) -> dict[str, Any]:
     providers = data.get("model_providers") if isinstance(data.get("model_providers"), dict) else {}
     provider_id = data.get("model_provider") if isinstance(data.get("model_provider"), str) else "DEFAULT"
@@ -60,7 +77,12 @@ class CodexConfigSwitcher:
         self.root = root or Path.cwd()
 
     def detect_config(self) -> dict[str, Any]:
-        return _safe_summary(self.config_path, _parse(_read(self.config_path)))
+        _, _, state_path = _paths(self.root)
+        return {
+            **_safe_summary(self.config_path, _parse(_read(self.config_path))),
+            "last_backup_path": _load_state(state_path).get("last_backup", "NONE"),
+            "last_switch_time": _load_state(state_path).get("last_switch_time", "NONE"),
+        }
 
     def backup_config(self) -> dict[str, Any]:
         text = _read(self.config_path); _parse(text)
@@ -68,7 +90,7 @@ class CodexConfigSwitcher:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
         backup = backups / f"config-{stamp}.toml.bak"; shutil.copyfile(self.config_path, backup)
         meta = backups / f"config-{stamp}.meta.json"; meta.write_text(json.dumps({"created_at": datetime.now(timezone.utc).isoformat(), "source_name": self.config_path.name, "summary": self.detect_config()}, ensure_ascii=False), encoding="utf-8")
-        state_path.write_text(json.dumps({"last_backup": str(backup)}, ensure_ascii=False), encoding="utf-8")
+        _save_state(state_path, last_backup=str(backup), last_backup_time=datetime.now(timezone.utc).isoformat())
         return {"status": "BACKUP_CREATED", "backup_path": str(backup), "metadata_path": str(meta)}
 
     def capture_official_profile(self, *, user_confirmed: bool = False) -> dict[str, Any]:
@@ -76,6 +98,8 @@ class CodexConfigSwitcher:
         text = _read(self.config_path); _parse(text)
         _, profiles, _ = _paths(self.root); profiles.mkdir(parents=True, exist_ok=True)
         target = profiles / "official.toml"; target.write_text(text, encoding="utf-8")
+        _, _, state_path = _paths(self.root)
+        _save_state(state_path, official_profile_captured_at=datetime.now(timezone.utc).isoformat())
         return {"status": "OFFICIAL_PROFILE_CAPTURED", "profile_path": str(target)}
 
     def _write_after_backup(self, text: str) -> dict[str, Any]:
@@ -102,12 +126,16 @@ class CodexConfigSwitcher:
         else:
             end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines)); lines[start:end] = block
         backup = self._write_after_backup("\n".join(lines) + "\n")
+        _, _, state_path = _paths(self.root)
+        _save_state(state_path, last_switch_time=datetime.now(timezone.utc).isoformat(), last_action="switch-xiaoyu")
         return {**backup, **self.detect_config(), "status": "XIAOYU_ROUTER_ENABLED"}
 
     def switch_to_official_codex(self) -> dict[str, Any]:
         _, profiles, _ = _paths(self.root); profile = profiles / "official.toml"
         if not profile.exists(): return {"status": "OFFICIAL_PROFILE_NOT_CAPTURED"}
         backup = self._write_after_backup(profile.read_text(encoding="utf-8"))
+        _, _, state_path = _paths(self.root)
+        _save_state(state_path, last_switch_time=datetime.now(timezone.utc).isoformat(), last_action="switch-official")
         return {**backup, **self.detect_config(), "status": "OFFICIAL_PROFILE_RESTORED"}
 
     def restore_previous_config(self) -> dict[str, Any]:
@@ -116,6 +144,7 @@ class CodexConfigSwitcher:
         backup = Path(json.loads(state.read_text(encoding="utf-8")).get("last_backup", ""))
         if not backup.exists(): return {"status": "BACKUP_NOT_FOUND"}
         current = self.backup_config(); self.config_path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8"); _parse(_read(self.config_path))
+        _save_state(state, last_switch_time=datetime.now(timezone.utc).isoformat(), last_action="restore-previous")
         return {**self.detect_config(), "status": "PREVIOUS_CONFIG_RESTORED", "pre_restore_backup": current["backup_path"]}
 
     def validate_config(self) -> dict[str, Any]:

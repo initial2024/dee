@@ -16,8 +16,17 @@ class SwitcherTests(unittest.TestCase):
   self.assertEqual(summary['status'],'OFFICIAL_CODEX')
   self.assertNotIn('fixture-redacted', str(summary))
   self.assertEqual(self.s.backup_config()['status'],'BACKUP_CREATED')
+  self.assertNotEqual(self.s.detect_config()['last_backup_path'],'NONE')
   self.assertEqual(self.s.capture_official_profile(user_confirmed=True)['status'],'OFFICIAL_PROFILE_CAPTURED')
- def test_xiaoyu_and_restore(self): self.s.capture_official_profile(user_confirmed=True); r=self.s.switch_to_xiaoyu_router(); self.assertEqual(r['base_url'],'http://127.0.0.1:18789/v1'); self.assertEqual(r['wire_api'],'responses'); self.assertEqual(self.s.restore_previous_config()['status'],'PREVIOUS_CONFIG_RESTORED')
+ def test_xiaoyu_and_restore(self):
+  self.s.capture_official_profile(user_confirmed=True)
+  r=self.s.switch_to_xiaoyu_router()
+  self.assertEqual(r['base_url'],'http://127.0.0.1:18789/v1')
+  self.assertEqual(r['wire_api'],'responses')
+  self.assertNotEqual(self.s.detect_config()['last_switch_time'],'NONE')
+  self.assertEqual(self.s.switch_to_official_codex()['status'],'OFFICIAL_PROFILE_RESTORED')
+  self.s.switch_to_xiaoyu_router()
+  self.assertEqual(self.s.restore_previous_config()['status'],'PREVIOUS_CONFIG_RESTORED')
  def test_blocks_and_validates(self):
   with self.assertRaises(CodexConfigError): self.s.switch_to_xiaoyu_router('http://0.0.0.0:18789/v1')
   self.assertEqual(self.s.switch_to_official_codex()['status'],'OFFICIAL_PROFILE_NOT_CAPTURED')
@@ -30,4 +39,10 @@ class SwitcherTests(unittest.TestCase):
   out = StringIO()
   with patch('sys.argv',['xiaoyu-router','codex-config','status','--config-path',str(self.c),'--root',str(self.root)]), redirect_stdout(out): main()
   self.assertIn('OFFICIAL_CODEX',out.getvalue())
+  self.assertNotIn('fixture-redacted',out.getvalue())
+ def test_cli_missing_temporary_config_is_structured(self):
+  out = StringIO()
+  missing = self.root / 'missing.toml'
+  with patch('sys.argv',['xiaoyu-router','codex-config','status','--config-path',str(missing),'--root',str(self.root)]), redirect_stdout(out): main()
+  self.assertIn('CODEX_CONFIG_NOT_FOUND',out.getvalue())
   self.assertNotIn('fixture-redacted',out.getvalue())
