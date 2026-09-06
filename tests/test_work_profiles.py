@@ -12,6 +12,7 @@ from codex_ai_router.work_profiles import (
     classify_work_profile,
     confirm_codex_mode,
     generate_codex_handoff,
+    codex_execution_state,
     select_work_profile,
 )
 
@@ -45,18 +46,37 @@ class WorkProfileTests(unittest.TestCase):
         profile = select_work_profile("任意任务", profile_id="official_codex_handoff")
         self.assertEqual(profile.target_executor, "codex_official")
         handoff = generate_codex_handoff(profile)
-        self.assertTrue(handoff.startswith("请在 Codex 官方直连模式中继续执行。"))
+        self.assertTrue(handoff.startswith("请在 Codex 自定义模式中手动选择：推理强度=最高。"))
+        self.assertIn("确认当前 Codex 输入框右下角为官方模型后，再执行任务。", handoff)
+        self.assertIn("小羽不会读取或点击 Codex UI。", handoff)
         self.assertIn("官方工具", handoff)
         self.assertNotIn("Authorization", handoff)
 
     def test_custom_handoff_has_required_strength_instruction(self) -> None:
         profile = select_work_profile("生成 patch 草案", profile_id="medium_patch_draft")
         handoff = generate_codex_handoff(profile)
-        self.assertTrue(handoff.startswith("请在 Codex 自定义模式中选择：推理强度=高。"))
+        self.assertTrue(handoff.startswith("请在 Codex 自定义模式中手动选择：推理强度=高。"))
         confirmed = confirm_codex_mode(profile, confirmed_mode=True, confirmed_strength="高")
         self.assertEqual(confirmed["user_confirmed_codex_mode"], "YES")
         self.assertEqual(confirmed["user_confirmed_codex_reasoning_strength"], "high")
         self.assertEqual(confirmed["codex_ui_scraping"], "NO")
+
+    def test_recommendation_never_claims_control_of_codex_ui(self) -> None:
+        state = codex_execution_state("official_codex_handoff")
+        self.assertEqual(state["XIAOYU_RECOMMENDED_CODEX_LAYER"], "official_direct")
+        self.assertEqual(state["CODEX_UI_CONTROLLED_BY_XIAOYU"], "NO")
+        self.assertEqual(state["CODEX_UI_MANUAL_CONFIRMATION_REQUIRED"], "YES")
+        self.assertEqual(state["USER_CONFIRMED_CODEX_MODEL"], "unknown")
+
+    def test_zero_steps_does_not_expect_official_codex_usage(self) -> None:
+        state = codex_execution_state("simple_readonly", needs_codex_steps=0, official_codex_required=False)
+        self.assertEqual(state["EXPECTED_OFFICIAL_CODEX_USAGE"], "no")
+        self.assertIn("不需要官方 Codex", state["codex_execution_message"])
+
+    def test_official_requirement_keeps_usage_unconfirmed(self) -> None:
+        state = codex_execution_state("official_codex_handoff", needs_codex_steps=1, official_codex_required=True)
+        self.assertEqual(state["EXPECTED_OFFICIAL_CODEX_USAGE"], "unknown")
+        self.assertIn("请手动确认 Codex 模型和推理强度", state["codex_execution_message"])
 
     def test_external_is_disabled_and_internal_provider_not_public(self) -> None:
         for profile in DEFAULT_WORK_PROFILES.values():

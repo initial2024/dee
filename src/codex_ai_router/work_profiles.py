@@ -177,11 +177,13 @@ def generate_codex_handoff(profile: WorkProfile | str, *, task: str | None = Non
     value = get_work_profile(profile) if isinstance(profile, str) else profile
     strength = REASONING_STRENGTH_ZH[value.codex_reasoning_strength]
     if value.codex_custom_mode == "OFFICIAL_DIRECT":
-        opening = "请在 Codex 官方直连模式中继续执行。"
+        opening = f"请在 Codex 自定义模式中手动选择：推理强度={strength}。"
     else:
-        opening = f"请在 Codex 自定义模式中选择：推理强度={strength}。"
+        opening = f"请在 Codex 自定义模式中手动选择：推理强度={strength}。"
     return (
         f"{opening}\n"
+        "确认当前 Codex 输入框右下角为官方模型后，再执行任务。\n"
+        "小羽不会读取或点击 Codex UI。\n"
         f"推荐 Work Profile：{value.profile_id}；任务难度：{value.task_difficulty}。\n"
         f"辅助 DeepSeek 模式：{value.deepseek_mode}；本地 Agent 策略：{value.local_agent_policy}。\n"
         "小羽只提供脱敏计划、只读结果或 review-only 草案；不会读取或操控 Codex 官方 UI。\n"
@@ -193,18 +195,54 @@ def build_handoff(profile: WorkProfile | str, *, task: str | None = None) -> str
     return generate_codex_handoff(profile, task=task)
 
 
-def confirm_codex_mode(profile: WorkProfile | str, *, confirmed_mode: bool = False, confirmed_strength: str | None = None) -> dict[str, Any]:
+def codex_execution_state(
+    profile: WorkProfile | str,
+    *,
+    needs_codex_steps: int = 0,
+    official_codex_required: bool | None = None,
+    confirmed_mode: bool = False,
+    confirmed_strength: str | None = None,
+) -> dict[str, Any]:
+    """Describe a recommendation without asserting anything about the Codex UI."""
     value = get_work_profile(profile) if isinstance(profile, str) else profile
     strength = normalize_reasoning_strength(confirmed_strength, value.codex_reasoning_strength) if confirmed_strength else None
+    required = value.target_executor == "codex_official" if official_codex_required is None else official_codex_required
+    recommended_layer = "official_direct" if value.codex_custom_mode == "OFFICIAL_DIRECT" else "custom_router"
+    confirmed_model = (
+        "official_model_confirmed" if confirmed_mode and recommended_layer == "official_direct"
+        else "custom_mode_confirmed" if confirmed_mode
+        else "unknown"
+    )
+    expected_usage = "no" if needs_codex_steps == 0 and not required else "unknown"
+    preview_message = (
+        "当前任务不需要官方 Codex 处理步骤，因此不会预期消耗官方 Codex 额度。"
+        if expected_usage == "no"
+        else "需要官方 Codex。请手动确认 Codex 模型和推理强度。"
+        if required
+        else "预计是否消耗官方 Codex 额度：取决于你在 Codex 对话框中实际选择的官方模型和任务执行。"
+    )
     return {
         "profile_id": value.profile_id,
         "recommended_codex_mode": value.codex_custom_mode,
         "recommended_codex_reasoning_strength": value.codex_reasoning_strength,
         "user_confirmed_codex_mode": "YES" if confirmed_mode else "NO",
         "user_confirmed_codex_reasoning_strength": strength,
+        "XIAOYU_RECOMMENDED_CODEX_LAYER": recommended_layer,
+        "CODEX_UI_CONTROLLED_BY_XIAOYU": "NO",
+        "CODEX_UI_MANUAL_CONFIRMATION_REQUIRED": "YES",
+        "USER_CONFIRMED_CODEX_MODEL": confirmed_model,
+        "USER_CONFIRMED_CODEX_REASONING_STRENGTH": REASONING_STRENGTH_ZH[strength] if strength else "unknown",
+        "EXPECTED_OFFICIAL_CODEX_USAGE": expected_usage,
+        "needs_codex_steps": needs_codex_steps,
+        "official_codex_required": required,
+        "codex_execution_message": preview_message,
         "codex_ui_scraping": "NO",
         "codex_ui_automation": "NO",
     }
+
+
+def confirm_codex_mode(profile: WorkProfile | str, *, confirmed_mode: bool = False, confirmed_strength: str | None = None) -> dict[str, Any]:
+    return codex_execution_state(profile, confirmed_mode=confirmed_mode, confirmed_strength=confirmed_strength)
 
 
 def profile_summary(profile: WorkProfile | str) -> dict[str, Any]:
@@ -214,6 +252,7 @@ def profile_summary(profile: WorkProfile | str) -> dict[str, Any]:
     result["codex_handoff_instruction"] = generate_codex_handoff(value)
     result["codex_ui_scraping"] = "NO"
     result["codex_ui_automation"] = "NO"
+    result.update(codex_execution_state(value))
     return result
 
 
@@ -221,5 +260,5 @@ __all__ = [
     "WorkProfile", "REASONING_STRENGTHS", "REASONING_STRENGTH_ZH", "DEFAULT_WORK_PROFILES",
     "WORK_PROFILES", "PROFILES", "normalize_reasoning_strength", "classify_work_profile",
     "select_work_profile", "get_work_profile", "map_profile", "generate_codex_handoff",
-    "build_handoff", "confirm_codex_mode", "profile_summary",
+    "build_handoff", "codex_execution_state", "confirm_codex_mode", "profile_summary",
 ]

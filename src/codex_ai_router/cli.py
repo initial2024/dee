@@ -34,6 +34,7 @@ from .work_profiles import (
     DEFAULT_WORK_PROFILES,
     REASONING_STRENGTHS,
     classify_work_profile,
+    codex_execution_state,
     confirm_codex_mode,
     generate_codex_handoff,
     profile_summary,
@@ -258,7 +259,8 @@ def main() -> None:
                 emit({"status": "SELECTED", "task_difficulty": profile.task_difficulty, "profile": profile_summary(profile), "classification": classify_work_profile(args.task, production_impact=args.production_impact, needs_official=args.needs_official), "codex_ui_scraping": "NO", "codex_ui_automation": "NO"})
             elif args.work_profile_action == "handoff":
                 profile = select_work_profile(args.task, profile_id=args.profile_id, production_impact=args.production_impact, needs_official=args.needs_official)
-                emit({"status": "HANDOFF_READY", "profile_id": profile.profile_id, "recommended_codex_mode": profile.codex_custom_mode, "recommended_codex_reasoning_strength": profile.codex_reasoning_strength, "codex_handoff_instruction": generate_codex_handoff(profile), "codex_ui_scraping": "NO", "codex_ui_automation": "NO", "prompt_response_logged": "NO"})
+                state = codex_execution_state(profile, needs_codex_steps=1 if args.needs_official else 0, official_codex_required=args.needs_official)
+                emit({"status": "HANDOFF_READY", "profile_id": profile.profile_id, "recommended_codex_mode": profile.codex_custom_mode, "recommended_codex_reasoning_strength": profile.codex_reasoning_strength, "codex_handoff_instruction": generate_codex_handoff(profile), **state, "prompt_response_logged": "NO"})
             else:
                 emit({"status": "CONFIRMED" if args.confirmed else "PENDING_CONFIRMATION", **confirm_codex_mode(args.profile_id, confirmed_mode=args.confirmed, confirmed_strength=args.reasoning_strength), "handoff_created_at": None})
         except ValueError as exc:
