@@ -14,6 +14,9 @@ try {
   $output = $selfTest -join "`n"
 
 Assert-True ($source -match "Codex 配置切换") 'dedicated_config_switcher_group'
+Assert-True ($source.Contains("TabPage('Codex 配置切换')")) 'dedicated_config_switcher_tab'
+Assert-True ($source.Contains('$tabs.Multiline = $true') -and $source.IndexOf('$assistantTab') -lt $source.IndexOf('$configSwitcherTab')) 'tab_order_and_no_overflow_arrow'
+Assert-True ($source.Contains('$runtimeVersionText') -and $source.Contains('CODEX_CONFIG_SWITCHER_UI=YES')) 'runtime_version_feature_flag'
 foreach ($label in @('读取当前 Codex 配置','备份当前配置','捕获当前为官方配置','切到官方 Codex','切到小羽 Custom Router','恢复上一次配置','校验配置','复制重启提示')) {
   Assert-True ($source.Contains($label)) ('button_present_' + $label)
 }
@@ -27,6 +30,10 @@ Assert-True ($output -match 'CODEX_CONFIG_SWITCHER_BUTTON_COUNT=8') 'selftest_bu
 Assert-True ($output -match 'CODEX_CONFIG_SWITCHER_FIXTURE_ONLY=YES') 'selftest_fixture_guard'
 Assert-True ($output -match 'ROUTER_NOT_LISTENING_ERROR=PASS') 'router_not_listening_error'
 Assert-True ($output -match 'CODEX_CONFIG_NOT_FOUND_ERROR=PASS') 'config_not_found_error'
+Assert-True ($output -match 'LOCAL_LIGHT_UNAVAILABLE_ERROR=PASS') 'local_light_unavailable_error'
+foreach ($field in @('CODEX_CONFIG_SWITCHER_TAB_VISIBLE','CODEX_CONFIG_SWITCHER_HOME_SECTION_VISIBLE','READ_CONFIG_BUTTON_VISIBLE','BACKUP_CONFIG_BUTTON_VISIBLE','CAPTURE_OFFICIAL_BUTTON_VISIBLE','SWITCH_OFFICIAL_BUTTON_VISIBLE','SWITCH_XIAOYU_BUTTON_VISIBLE','RESTORE_PREVIOUS_BUTTON_VISIBLE','VALIDATE_CONFIG_BUTTON_VISIBLE','COPY_RESTART_NOTICE_BUTTON_VISIBLE')) {
+  Assert-True ($output -match ($field + '=YES')) ('ui_selfcheck_' + $field)
+}
 } finally {
   if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
 }

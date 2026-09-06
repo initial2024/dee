@@ -57,6 +57,7 @@ function Redact-Text([string]$Text) {
 function Get-UiErrorExplanation([string]$Code) {
     switch ($Code) {
         'ROUTER_NOT_LISTENING' { return '小羽 Router 当前未监听。请先启动 Router；配置读取、备份和校验不依赖 Router。' }
+        'LOCAL_LIGHT_UNAVAILABLE' { return '本地轻量模型不可用。请检查本地后端或改用不依赖本地模型的策略选择。' }
         'CODEX_CONFIG_NOT_FOUND' { return '未找到 Codex 配置文件。请确认 C:\Users\bad39\.codex\config.toml 是否存在。' }
         'OFFICIAL_PROFILE_NOT_CAPTURED' { return '尚未捕获官方配置。请在 Codex 手动确认官方模式后，再点击“捕获当前为官方配置”。' }
         'CODEX_CONFIG_TOML_INVALID' { return 'Codex 配置不是有效 TOML。请先人工修复配置文件，再重试。' }
@@ -79,9 +80,10 @@ function Get-UiErrorExplanation([string]$Code) {
 }
 function Get-UiActionErrorCode([string]$Detail) {
     if ($Detail -match '(ROUTER_NOT_LISTENING|ROUTER_NOT_RUNNING|actively refused|connection refused)') { return 'ROUTER_NOT_LISTENING' }
+    if ($Detail -match '(LOCAL_LIGHT_UNAVAILABLE|LOCAL_DIRECT_BACKEND_ERROR|LOCAL_BACKEND_UNAVAILABLE)') { return 'LOCAL_LIGHT_UNAVAILABLE' }
     if ($Detail -match '(CODEX_CONFIG_NOT_FOUND|OFFICIAL_PROFILE_NOT_CAPTURED|CODEX_CONFIG_TOML_INVALID|NON_LOOPBACK_ENDPOINT_BLOCKED)') { return $Matches[1] }
     if ($Detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED|PORT_OCCUPIED_BY_UNKNOWN_PROCESS|STOP_OLD_ROUTER_CONFIRMATION_REQUIRED|STALE_OR_INCOMPATIBLE_ROUTER)') { return $Matches[1] }
-    return 'UI_ACTION_FAILED'
+    return 'ACTION_ERROR_UNCLASSIFIED'
 }
 function New-UiActionFailure([string]$Name,[string]$Code,[string]$Detail) {
     $routerStatus = 'UNKNOWN'
@@ -622,18 +624,29 @@ $uiFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $Fo
 $buttonFont = New-Object System.Drawing.Font('Microsoft YaHei UI', [single](11 * $FontScale), [System.Drawing.FontStyle]::Regular)
 $uiToolTip = New-Object System.Windows.Forms.ToolTip; $uiToolTip.AutoPopDelay = 9000; $uiToolTip.InitialDelay = 250; $uiToolTip.ReshowDelay = 100
 $form = New-Object System.Windows.Forms.Form; $form.Text = '小羽 Router 控制台'; $form.Size = New-Object System.Drawing.Size(1180,780); $form.MinimumSize = New-Object System.Drawing.Size(920,620); $form.StartPosition = 'CenterScreen'; $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi; $form.AutoScroll = $true; $form.Font = $uiFont
-$tabs = New-Object System.Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $form.Controls.Add($tabs)
-$homeTab = New-Object System.Windows.Forms.TabPage('首页'); $providersTab = New-Object System.Windows.Forms.TabPage('供应商'); $deepSeekTab = New-Object System.Windows.Forms.TabPage('DeepSeek 本地桥接'); $assistantTab = New-Object System.Windows.Forms.TabPage('Codex 模式与供应商白名单'); $localAgentTab = New-Object System.Windows.Forms.TabPage('小羽本地 Agent'); $usageTab = New-Object System.Windows.Forms.TabPage('用量保护'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('诊断'); [void]$tabs.TabPages.AddRange(@($homeTab,$providersTab,$deepSeekTab,$assistantTab,$localAgentTab,$usageTab,$diagnosticsTab))
-$homeLayout = New-Object System.Windows.Forms.TableLayoutPanel; $homeLayout.Dock = 'Fill'; $homeLayout.Padding = New-Object System.Windows.Forms.Padding(12); $homeLayout.RowCount = 4; $homeLayout.ColumnCount = 1; [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); $homeTab.Controls.Add($homeLayout)
+$tabs = New-Object System.Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $tabs.Multiline = $true; $form.Controls.Add($tabs)
+$homeTab = New-Object System.Windows.Forms.TabPage('首页'); $providersTab = New-Object System.Windows.Forms.TabPage('供应商'); $deepSeekTab = New-Object System.Windows.Forms.TabPage('DeepSeek 本地桥接'); $assistantTab = New-Object System.Windows.Forms.TabPage('Codex 模式与供应商白名单'); $configSwitcherTab = New-Object System.Windows.Forms.TabPage('Codex 配置切换'); $localAgentTab = New-Object System.Windows.Forms.TabPage('小羽本地 Agent'); $usageTab = New-Object System.Windows.Forms.TabPage('用量保护'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('诊断'); [void]$tabs.TabPages.AddRange(@($homeTab,$providersTab,$deepSeekTab,$assistantTab,$configSwitcherTab,$localAgentTab,$usageTab,$diagnosticsTab))
+$RouterCommit = try { (git -C $ProjectRoot rev-parse --short HEAD 2>$null).Trim() } catch { 'UNAVAILABLE' }
+$ConfigSwitcherVersion = 'R3_VISIBLE_UI'
+$runtimeVersionText = "Router git commit：$RouterCommit`r`n脚本路径：$PSCommandPath`r`nConfig Switcher version：$ConfigSwitcherVersion`r`nCODEX_CONFIG_SWITCHER_UI=YES"
+$homeLayout = New-Object System.Windows.Forms.TableLayoutPanel; $homeLayout.Dock = 'Fill'; $homeLayout.Padding = New-Object System.Windows.Forms.Padding(12); $homeLayout.RowCount = 5; $homeLayout.ColumnCount = 1; [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,152))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); $homeTab.Controls.Add($homeLayout)
 $routerGroup = New-Object System.Windows.Forms.GroupBox; $routerGroup.Text = 'Router 服务'; $routerGroup.Dock = 'Fill'; $routerGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($routerGroup,0,0)
 $homeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeButtons.Dock = 'Fill'; $homeButtons.AutoSize = $true; $routerGroup.Controls.Add($homeButtons)
 $switchGroup = New-Object System.Windows.Forms.GroupBox; $switchGroup.Text = 'Codex 切换与交接'; $switchGroup.Dock = 'Fill'; $switchGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($switchGroup,0,1)
 $switchButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $switchButtons.Dock = 'Fill'; $switchButtons.AutoSize = $true; $switchGroup.Controls.Add($switchButtons)
-$statusGroup = New-Object System.Windows.Forms.GroupBox; $statusGroup.Text = '当前状态'; $statusGroup.Dock = 'Fill'; $statusGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($statusGroup,0,2)
+$homeConfigSwitcherGroup = New-Object System.Windows.Forms.GroupBox; $homeConfigSwitcherGroup.Text = 'Codex 配置切换'; $homeConfigSwitcherGroup.Dock = 'Fill'; $homeConfigSwitcherGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($homeConfigSwitcherGroup,0,2)
+$homeConfigSwitcherStatus = New-Object System.Windows.Forms.TextBox; $homeConfigSwitcherStatus.Multiline = $true; $homeConfigSwitcherStatus.ReadOnly = $true; $homeConfigSwitcherStatus.Dock = 'Left'; $homeConfigSwitcherStatus.Width = 440; $homeConfigSwitcherStatus.Font = $uiFont; $homeConfigSwitcherStatus.Text = $runtimeVersionText; $homeConfigSwitcherGroup.Controls.Add($homeConfigSwitcherStatus)
+$homeConfigSwitcherButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeConfigSwitcherButtons.Dock = 'Fill'; $homeConfigSwitcherButtons.AutoScroll = $true; $homeConfigSwitcherButtons.WrapContents = $true; $homeConfigSwitcherButtons.Font = $buttonFont; $homeConfigSwitcherGroup.Controls.Add($homeConfigSwitcherButtons)
+$statusGroup = New-Object System.Windows.Forms.GroupBox; $statusGroup.Text = '当前状态'; $statusGroup.Dock = 'Fill'; $statusGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($statusGroup,0,3)
 $statusBox = New-Object System.Windows.Forms.TextBox; $statusBox.Multiline = $true; $statusBox.ReadOnly = $true; $statusBox.Dock = 'Fill'; $statusBox.ScrollBars = 'Vertical'; $statusBox.Font = $uiFont; $statusGroup.Controls.Add($statusBox)
-$directLocalGroup = New-Object System.Windows.Forms.GroupBox; $directLocalGroup.Text = '直接本地模型（推荐）'; $directLocalGroup.Dock = 'Fill'; $directLocalGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($directLocalGroup,0,3)
+$directLocalGroup = New-Object System.Windows.Forms.GroupBox; $directLocalGroup.Text = '直接本地模型（推荐）'; $directLocalGroup.Dock = 'Fill'; $directLocalGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($directLocalGroup,0,4)
 $directLocalStatus = New-Object System.Windows.Forms.TextBox; $directLocalStatus.Multiline = $true; $directLocalStatus.ReadOnly = $true; $directLocalStatus.Dock = 'Fill'; $directLocalStatus.Font = $uiFont; $directLocalStatus.ScrollBars = 'Vertical'; $directLocalGroup.Controls.Add($directLocalStatus)
 $directLocalButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $directLocalButtons.Dock = 'Bottom'; $directLocalButtons.Height = 42; $directLocalButtons.Font = $buttonFont; $directLocalGroup.Controls.Add($directLocalButtons)
+$configSwitcherTabLayout = New-Object System.Windows.Forms.TableLayoutPanel; $configSwitcherTabLayout.Dock = 'Fill'; $configSwitcherTabLayout.Padding = New-Object System.Windows.Forms.Padding(12); $configSwitcherTabLayout.RowCount = 2; $configSwitcherTabLayout.ColumnCount = 1; [void]$configSwitcherTabLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,205))); [void]$configSwitcherTabLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $configSwitcherTab.Controls.Add($configSwitcherTabLayout)
+$configSwitcherRuntimeGroup = New-Object System.Windows.Forms.GroupBox; $configSwitcherRuntimeGroup.Text = '运行版本与当前配置'; $configSwitcherRuntimeGroup.Dock = 'Fill'; $configSwitcherRuntimeGroup.Padding = New-Object System.Windows.Forms.Padding(8); $configSwitcherTabLayout.Controls.Add($configSwitcherRuntimeGroup,0,0)
+$configSwitcherTabStatus = New-Object System.Windows.Forms.TextBox; $configSwitcherTabStatus.Multiline = $true; $configSwitcherTabStatus.ReadOnly = $true; $configSwitcherTabStatus.ScrollBars = 'Vertical'; $configSwitcherTabStatus.Dock = 'Fill'; $configSwitcherTabStatus.Font = $uiFont; $configSwitcherTabStatus.Text = $runtimeVersionText; $configSwitcherRuntimeGroup.Controls.Add($configSwitcherTabStatus)
+$configSwitcherActionsGroup = New-Object System.Windows.Forms.GroupBox; $configSwitcherActionsGroup.Text = 'Codex 配置切换'; $configSwitcherActionsGroup.Dock = 'Fill'; $configSwitcherActionsGroup.Padding = New-Object System.Windows.Forms.Padding(8); $configSwitcherTabLayout.Controls.Add($configSwitcherActionsGroup,0,1)
+$configSwitcherTabButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $configSwitcherTabButtons.Dock = 'Fill'; $configSwitcherTabButtons.AutoScroll = $true; $configSwitcherTabButtons.WrapContents = $true; $configSwitcherTabButtons.Font = $buttonFont; $configSwitcherActionsGroup.Controls.Add($configSwitcherTabButtons)
 $providerLayout = New-Object System.Windows.Forms.TableLayoutPanel; $providerLayout.Dock = 'Fill'; $providerLayout.Padding = New-Object System.Windows.Forms.Padding(12); $providerLayout.RowCount = 4; $providerLayout.ColumnCount = 1; [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,130))); $providersTab.Controls.Add($providerLayout)
 $providerToolbar = New-Object System.Windows.Forms.TableLayoutPanel; $providerToolbar.Dock = 'Fill'; $providerToolbar.AutoSize = $true; $providerToolbar.ColumnCount = 1; $providerLayout.Controls.Add($providerToolbar,0,0)
 $providerOperationsGroup = New-Object System.Windows.Forms.GroupBox; $providerOperationsGroup.Text = '供应商操作'; $providerOperationsGroup.Dock = 'Fill'; $providerOperationsGroup.Padding = New-Object System.Windows.Forms.Padding(6); [void]$providerToolbar.Controls.Add($providerOperationsGroup)
@@ -1006,6 +1019,11 @@ function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','
     if ($diagnosticsText -and $debugToggle -and $debugToggle.Checked) { $diagnosticsText.Text = ($script:LastModeDebugJson + "`r`n" + ($script:UiDebugEntries -join "`r`n")) }
     [System.Windows.Forms.MessageBox]::Show((Redact-Text $summary),'Codex 连接模式')
 }
+function Set-CodexConfigSwitcherStatus([string]$Text) {
+    foreach ($target in @($codexConfigSwitcherStatus,$homeConfigSwitcherStatus,$configSwitcherTabStatus)) {
+        if ($target) { $target.Text = Redact-Text $Text }
+    }
+}
 function Invoke-CodexConfigSwitcherAction([ValidateSet('status','backup','capture-official','switch-xiaoyu','switch-official','restore-previous','validate')][string]$Action) {
     $cliArgs = @('codex-config',$Action,'--config-path',$CodexConfig,'--root',$CodexConfigSwitcherStateRoot)
     if ($Action -eq 'capture-official') {
@@ -1022,22 +1040,22 @@ function Invoke-CodexConfigSwitcherAction([ValidateSet('status','backup','captur
     $errorCode = if ($record.error_code) { [string]$record.error_code } elseif ([string]$record.status -in @('OFFICIAL_PROFILE_NOT_CAPTURED','BACKUP_NOT_FOUND','USER_CONFIRMATION_REQUIRED')) { [string]$record.status } else { '' }
     if ($errorCode) {
         $failure = New-UiActionFailure $Action $errorCode $errorCode
-        $codexConfigSwitcherStatus.Text = ("操作：{0}`r`n错误码：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n配置：{5}`r`n真实配置已修改：{6}`r`n模型调用已发送：NO" -f $failure.action_name,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.config_path,$failure.real_config_was_modified)
-        if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($codexConfigSwitcherStatus.Text,'Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
+        Set-CodexConfigSwitcherStatus ("操作：{0}`r`n错误码：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n配置：{5}`r`n真实配置已修改：{6}`r`n模型调用已发送：NO" -f $failure.action_name,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.config_path,$failure.real_config_was_modified)
+        if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($homeConfigSwitcherStatus.Text,'Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
         return $failure
     }
-    $codexConfigSwitcherStatus.Text = ("当前 config 路径：{0}`r`n当前 provider：{1}`r`n当前 base_url：{2}`r`n当前 wire_api：{3}`r`n当前配置状态：{4}`r`n需要重启 Codex：{5}`r`n最近备份：{6}`r`n最近切换时间：{7}`r`n`r`n本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。" -f $record.path,$record.model_provider,$record.base_url,$record.wire_api,$record.status,$record.restart_codex_required,$record.last_backup_path,$record.last_switch_time)
+    Set-CodexConfigSwitcherStatus ("$runtimeVersionText`r`n`r`n当前 config 路径：{0}`r`n当前 provider：{1}`r`n当前 base_url：{2}`r`n当前 wire_api：{3}`r`n当前配置状态：{4}`r`n需要重启 Codex：{5}`r`n最近备份：{6}`r`n最近切换时间：{7}`r`n`r`n本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。" -f $record.path,$record.model_provider,$record.base_url,$record.wire_api,$record.status,$record.restart_codex_required,$record.last_backup_path,$record.last_switch_time)
     if ($Action -in @('switch-xiaoyu','switch-official','restore-previous')) {
         $script:RealCodexConfigModified = if ([string]::IsNullOrWhiteSpace($CodexConfigPath)) { 'YES' } else { 'NO' }
     }
-    if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show((Redact-Text $codexConfigSwitcherStatus.Text),'Codex 配置切换') | Out-Null }
+    if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($homeConfigSwitcherStatus.Text,'Codex 配置切换') | Out-Null }
     return $record
 }
 function Refresh-CodexConfigSwitcherPanel {
     try { [void](Invoke-CodexConfigSwitcherAction 'status') }
     catch {
         $failure = New-UiActionFailure 'status' (Get-UiActionErrorCode ([string]$_.Exception.Message)) ([string]$_.Exception.Message)
-        $codexConfigSwitcherStatus.Text = ("当前 config 路径：{0}`r`n状态：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n真实配置已修改：{5}`r`n模型调用已发送：NO" -f $failure.config_path,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.real_config_was_modified)
+        Set-CodexConfigSwitcherStatus ("$runtimeVersionText`r`n`r`n当前 config 路径：{0}`r`n状态：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n真实配置已修改：{5}`r`n模型调用已发送：NO" -f $failure.config_path,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.real_config_was_modified)
     }
 }
 function Get-AssistStartupInstruction {
@@ -1273,7 +1291,34 @@ function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=15
 function Add-DeepSeekModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=30; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(3); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekModeButtons.Controls.Add($button) }
 function Add-UiLayoutButton([System.Windows.Forms.Control]$Target,[string]$Caption,[scriptblock]$Action,[int]$Width=210,[string]$TooltipText='') { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.MinimumSize=New-Object System.Drawing.Size($Width,36); $button.Height=36; $button.AutoSize=$false; $button.AutoEllipsis=$false; $button.TextAlign='MiddleCenter'; $button.UseCompatibleTextRendering=$true; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); if($TooltipText){$uiToolTip.SetToolTip($button,$TooltipText)}; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$Target.Controls.Add($button) }
 function Add-CodexModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=190) { Add-UiLayoutButton $codexModeButtons $Caption $Action $Width }
-function Add-CodexConfigSwitcherButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { Add-UiLayoutButton $codexConfigSwitcherButtons $Caption $Action $Width }
+function Add-CodexConfigSwitcherButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) {
+    Add-UiLayoutButton $codexConfigSwitcherButtons $Caption $Action $Width
+    Add-UiLayoutButton $homeConfigSwitcherButtons $Caption $Action $Width
+    Add-UiLayoutButton $configSwitcherTabButtons $Caption $Action $Width
+}
+function Invoke-CodexConfigSwitcherUiSelfCheck {
+    $labels = @('读取当前 Codex 配置','备份当前配置','捕获当前为官方配置','切到官方 Codex','切到小羽 Custom Router','恢复上一次配置','校验配置','复制重启提示')
+    $buttonText = @($homeConfigSwitcherButtons.Controls | ForEach-Object { $_.Text }) + @($configSwitcherTabButtons.Controls | ForEach-Object { $_.Text })
+    $result = [ordered]@{
+        CODEX_CONFIG_SWITCHER_TAB_VISIBLE = $tabs.TabPages.Contains($configSwitcherTab)
+        CODEX_CONFIG_SWITCHER_HOME_SECTION_VISIBLE = ($null -ne $homeConfigSwitcherGroup -and -not $homeConfigSwitcherGroup.IsDisposed)
+        READ_CONFIG_BUTTON_VISIBLE = '读取当前 Codex 配置' -in $buttonText
+        BACKUP_CONFIG_BUTTON_VISIBLE = '备份当前配置' -in $buttonText
+        CAPTURE_OFFICIAL_BUTTON_VISIBLE = '捕获当前为官方配置' -in $buttonText
+        SWITCH_OFFICIAL_BUTTON_VISIBLE = '切到官方 Codex' -in $buttonText
+        SWITCH_XIAOYU_BUTTON_VISIBLE = '切到小羽 Custom Router' -in $buttonText
+        RESTORE_PREVIOUS_BUTTON_VISIBLE = '恢复上一次配置' -in $buttonText
+        VALIDATE_CONFIG_BUTTON_VISIBLE = '校验配置' -in $buttonText
+        COPY_RESTART_NOTICE_BUTTON_VISIBLE = '复制重启提示' -in $buttonText
+        missing_button_count = @($labels | Where-Object { $_ -notin $buttonText }).Count
+        real_config_was_modified = 'NO'
+        model_call_was_sent = 'NO'
+    }
+    $text = $result | ConvertTo-Json -Depth 3
+    Set-CodexConfigSwitcherStatus $text
+    if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($text,'检查配置切换器 UI') | Out-Null }
+    return [pscustomobject]$result
+}
 function Add-CodexAssistButton([string]$Caption,[scriptblock]$Action,[int]$Width=210) { Add-UiLayoutButton $codexAssistButtons $Caption $Action $Width }
 function Add-CodexAnalysisButton([string]$Caption,[scriptblock]$Action,[int]$Width=210) { Add-UiLayoutButton $codexAnalysisButtons $Caption $Action $Width }
 function Add-CodexBrainButton([string]$Caption,[scriptblock]$Action,[int]$Width=210) { Add-UiLayoutButton $codexBrainButtons $Caption $Action $Width }
@@ -1394,6 +1439,8 @@ Add-CodexConfigSwitcherButton '切到小羽 Custom Router' { Invoke-CodexConfigS
 Add-CodexConfigSwitcherButton '恢复上一次配置' { Invoke-CodexConfigSwitcherAction 'restore-previous' }
 Add-CodexConfigSwitcherButton '校验配置' { Invoke-CodexConfigSwitcherAction 'validate' }
 Add-CodexConfigSwitcherButton '复制重启提示' { Set-Clipboard -Value '本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。'; [System.Windows.Forms.MessageBox]::Show('已复制重启提示。','Codex 配置切换') | Out-Null } 160
+Add-UiLayoutButton $homeConfigSwitcherButtons '检查配置切换器 UI' { Invoke-CodexConfigSwitcherUiSelfCheck } 180
+Add-UiLayoutButton $configSwitcherTabButtons '检查配置切换器 UI' { Invoke-CodexConfigSwitcherUiSelfCheck } 180
 Add-CodexModeButton '启用 DeepSeek 首脑' { Invoke-CodexModeAction 'deepseek-head' } 170
 Add-CodexModeButton '本地 Agent（预留）' { Invoke-CodexModeAction 'local-agent-pending' } 170
 Add-CodexModeButton 'DeepSeek 文本兼容模式' { Invoke-CodexTextOnlyMode 'custom-deepseek-text-only' } 190
@@ -1441,10 +1488,12 @@ if ($SelfTest) {
     $guardResult = Invoke-SafeUiAction -Name 'selftest' -Action { throw 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED' }
     $routerGuardResult = Invoke-SafeUiAction -Name 'router-selftest' -Action { throw 'ROUTER_NOT_LISTENING' }
     $configGuardResult = Invoke-SafeUiAction -Name 'config-selftest' -Action { throw 'CODEX_CONFIG_NOT_FOUND' }
+    $localLightGuardResult = Invoke-SafeUiAction -Name 'local-light-selftest' -Action { throw 'LOCAL_LIGHT_UNAVAILABLE' }
     Write-Output 'CONTROL_UI_INITIALIZATION=PASS'
     Write-Output ('UI_SAFE_ACTION_EXCEPTION=' + $(if($guardResult.error_code -eq 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED'){'CAUGHT'}else{'FAIL'}))
     Write-Output ('ROUTER_NOT_LISTENING_ERROR=' + $(if($routerGuardResult.error_code -eq 'ROUTER_NOT_LISTENING' -and $routerGuardResult.action_name -eq 'router-selftest'){'PASS'}else{'FAIL'}))
     Write-Output ('CODEX_CONFIG_NOT_FOUND_ERROR=' + $(if($configGuardResult.error_code -eq 'CODEX_CONFIG_NOT_FOUND' -and $configGuardResult.suggested_fix){'PASS'}else{'FAIL'}))
+    Write-Output ('LOCAL_LIGHT_UNAVAILABLE_ERROR=' + $(if($localLightGuardResult.error_code -eq 'LOCAL_LIGHT_UNAVAILABLE'){'PASS'}else{'FAIL'}))
     Write-Output ('PROVIDER_TABLE_ROWS=' + $grid.Rows.Count)
     Write-Output ('PROVIDER_TABLE_COLUMNS=' + $grid.Columns.Count)
     Write-Output ('PROVIDER_TAB_STATUS=' + (Redact-Text $providerStatus.Text))
@@ -1472,6 +1521,17 @@ if ($SelfTest) {
     Write-Output ('CODEX_CONFIG_SWITCHER_BUTTON_COUNT=' + $configButtonTexts.Count)
     Write-Output 'CODEX_CONFIG_SWITCHER_FIXTURE_ONLY=YES'
     Write-Output 'UI_ACTION_FAILURE_DETAILS=YES'
+    $configUiCheck = Invoke-CodexConfigSwitcherUiSelfCheck
+    Write-Output ('CODEX_CONFIG_SWITCHER_TAB_VISIBLE=' + $(if($configUiCheck.CODEX_CONFIG_SWITCHER_TAB_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('CODEX_CONFIG_SWITCHER_HOME_SECTION_VISIBLE=' + $(if($configUiCheck.CODEX_CONFIG_SWITCHER_HOME_SECTION_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('READ_CONFIG_BUTTON_VISIBLE=' + $(if($configUiCheck.READ_CONFIG_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('BACKUP_CONFIG_BUTTON_VISIBLE=' + $(if($configUiCheck.BACKUP_CONFIG_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('CAPTURE_OFFICIAL_BUTTON_VISIBLE=' + $(if($configUiCheck.CAPTURE_OFFICIAL_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('SWITCH_OFFICIAL_BUTTON_VISIBLE=' + $(if($configUiCheck.SWITCH_OFFICIAL_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('SWITCH_XIAOYU_BUTTON_VISIBLE=' + $(if($configUiCheck.SWITCH_XIAOYU_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('RESTORE_PREVIOUS_BUTTON_VISIBLE=' + $(if($configUiCheck.RESTORE_PREVIOUS_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('VALIDATE_CONFIG_BUTTON_VISIBLE=' + $(if($configUiCheck.VALIDATE_CONFIG_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('COPY_RESTART_NOTICE_BUTTON_VISIBLE=' + $(if($configUiCheck.COPY_RESTART_NOTICE_BUTTON_VISIBLE){'YES'}else{'NO'}))
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'
     Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'
