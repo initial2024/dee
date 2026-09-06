@@ -627,24 +627,31 @@ $form = New-Object System.Windows.Forms.Form; $form.Text = '小羽 Router 控制
 $tabs = New-Object System.Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $tabs.Multiline = $true; $form.Controls.Add($tabs)
 $homeTab = New-Object System.Windows.Forms.TabPage('首页'); $providersTab = New-Object System.Windows.Forms.TabPage('供应商'); $deepSeekTab = New-Object System.Windows.Forms.TabPage('DeepSeek 本地桥接'); $assistantTab = New-Object System.Windows.Forms.TabPage('Codex 模式与供应商白名单'); $configSwitcherTab = New-Object System.Windows.Forms.TabPage('Codex 配置切换'); $localAgentTab = New-Object System.Windows.Forms.TabPage('小羽本地 Agent'); $usageTab = New-Object System.Windows.Forms.TabPage('用量保护'); $diagnosticsTab = New-Object System.Windows.Forms.TabPage('诊断'); [void]$tabs.TabPages.AddRange(@($homeTab,$providersTab,$deepSeekTab,$assistantTab,$configSwitcherTab,$localAgentTab,$usageTab,$diagnosticsTab))
 $RouterCommit = try { (git -C $ProjectRoot rev-parse --short HEAD 2>$null).Trim() } catch { 'UNAVAILABLE' }
-$ConfigSwitcherVersion = 'R3_VISIBLE_UI'
-$runtimeVersionText = "Router git commit：$RouterCommit`r`n脚本路径：$PSCommandPath`r`nConfig Switcher version：$ConfigSwitcherVersion`r`nCODEX_CONFIG_SWITCHER_UI=YES"
-$homeLayout = New-Object System.Windows.Forms.TableLayoutPanel; $homeLayout.Dock = 'Fill'; $homeLayout.Padding = New-Object System.Windows.Forms.Padding(12); $homeLayout.RowCount = 5; $homeLayout.ColumnCount = 1; [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,152))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); $homeTab.Controls.Add($homeLayout)
+$ConfigSwitcherVersion = 'R4_LAYOUT_FONTSCALE'
+$scriptLeaf = Split-Path -Leaf $PSCommandPath; $scriptParentLeaf = Split-Path -Leaf (Split-Path -Parent $PSCommandPath)
+$shortScriptPath = if ($PSCommandPath.Length -gt 56) { "...\$scriptParentLeaf\$scriptLeaf" } else { $PSCommandPath }
+$runtimeVersionText = "Router git commit：$RouterCommit`r`n脚本路径：$shortScriptPath`r`nConfig Switcher version：$ConfigSwitcherVersion`r`nCODEX_CONFIG_SWITCHER_UI=YES"
+$runtimeVersionDetail = "Router git commit：$RouterCommit`r`n脚本路径：$PSCommandPath`r`nConfig Switcher version：$ConfigSwitcherVersion`r`nCODEX_CONFIG_SWITCHER_UI=YES"
+$homeConfigHeight = [math]::Ceiling(120 + (70 * $FontScale)); $homeConfigStatusHeight = [math]::Ceiling(38 + (28 * $FontScale))
+$homeTab.AutoScroll = $true
+$homeLayout = New-Object System.Windows.Forms.TableLayoutPanel; $homeLayout.Dock = 'Fill'; $homeLayout.AutoScroll = $true; $homeLayout.Padding = New-Object System.Windows.Forms.Padding(12); $homeLayout.RowCount = 5; $homeLayout.ColumnCount = 1; [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,$homeConfigHeight))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$homeLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,175))); $homeTab.Controls.Add($homeLayout)
 $routerGroup = New-Object System.Windows.Forms.GroupBox; $routerGroup.Text = 'Router 服务'; $routerGroup.Dock = 'Fill'; $routerGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($routerGroup,0,0)
 $homeButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeButtons.Dock = 'Fill'; $homeButtons.AutoSize = $true; $routerGroup.Controls.Add($homeButtons)
 $switchGroup = New-Object System.Windows.Forms.GroupBox; $switchGroup.Text = 'Codex 切换与交接'; $switchGroup.Dock = 'Fill'; $switchGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($switchGroup,0,1)
 $switchButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $switchButtons.Dock = 'Fill'; $switchButtons.AutoSize = $true; $switchGroup.Controls.Add($switchButtons)
 $homeConfigSwitcherGroup = New-Object System.Windows.Forms.GroupBox; $homeConfigSwitcherGroup.Text = 'Codex 配置切换'; $homeConfigSwitcherGroup.Dock = 'Fill'; $homeConfigSwitcherGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($homeConfigSwitcherGroup,0,2)
-$homeConfigSwitcherStatus = New-Object System.Windows.Forms.TextBox; $homeConfigSwitcherStatus.Multiline = $true; $homeConfigSwitcherStatus.ReadOnly = $true; $homeConfigSwitcherStatus.Dock = 'Left'; $homeConfigSwitcherStatus.Width = 440; $homeConfigSwitcherStatus.Font = $uiFont; $homeConfigSwitcherStatus.Text = $runtimeVersionText; $homeConfigSwitcherGroup.Controls.Add($homeConfigSwitcherStatus)
-$homeConfigSwitcherButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeConfigSwitcherButtons.Dock = 'Fill'; $homeConfigSwitcherButtons.AutoScroll = $true; $homeConfigSwitcherButtons.WrapContents = $true; $homeConfigSwitcherButtons.Font = $buttonFont; $homeConfigSwitcherGroup.Controls.Add($homeConfigSwitcherButtons)
+$homeConfigSwitcherLayout = New-Object System.Windows.Forms.TableLayoutPanel; $homeConfigSwitcherLayout.Dock = 'Fill'; $homeConfigSwitcherLayout.RowCount = 2; $homeConfigSwitcherLayout.ColumnCount = 1; [void]$homeConfigSwitcherLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,$homeConfigStatusHeight))); [void]$homeConfigSwitcherLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $homeConfigSwitcherGroup.Controls.Add($homeConfigSwitcherLayout)
+$homeConfigSwitcherStatus = New-Object System.Windows.Forms.TextBox; $homeConfigSwitcherStatus.Multiline = $true; $homeConfigSwitcherStatus.ReadOnly = $true; $homeConfigSwitcherStatus.WordWrap = $true; $homeConfigSwitcherStatus.ScrollBars = 'Vertical'; $homeConfigSwitcherStatus.Dock = 'Fill'; $homeConfigSwitcherStatus.Font = $uiFont; $homeConfigSwitcherStatus.Text = $runtimeVersionText; $uiToolTip.SetToolTip($homeConfigSwitcherStatus,$runtimeVersionDetail); $homeConfigSwitcherLayout.Controls.Add($homeConfigSwitcherStatus,0,0)
+$homeConfigSwitcherButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeConfigSwitcherButtons.Dock = 'Fill'; $homeConfigSwitcherButtons.AutoScroll = $true; $homeConfigSwitcherButtons.WrapContents = $true; $homeConfigSwitcherButtons.FlowDirection = 'LeftToRight'; $homeConfigSwitcherButtons.Font = $buttonFont; $homeConfigSwitcherLayout.Controls.Add($homeConfigSwitcherButtons,0,1)
 $statusGroup = New-Object System.Windows.Forms.GroupBox; $statusGroup.Text = '当前状态'; $statusGroup.Dock = 'Fill'; $statusGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($statusGroup,0,3)
 $statusBox = New-Object System.Windows.Forms.TextBox; $statusBox.Multiline = $true; $statusBox.ReadOnly = $true; $statusBox.Dock = 'Fill'; $statusBox.ScrollBars = 'Vertical'; $statusBox.Font = $uiFont; $statusGroup.Controls.Add($statusBox)
 $directLocalGroup = New-Object System.Windows.Forms.GroupBox; $directLocalGroup.Text = '直接本地模型（推荐）'; $directLocalGroup.Dock = 'Fill'; $directLocalGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($directLocalGroup,0,4)
 $directLocalStatus = New-Object System.Windows.Forms.TextBox; $directLocalStatus.Multiline = $true; $directLocalStatus.ReadOnly = $true; $directLocalStatus.Dock = 'Fill'; $directLocalStatus.Font = $uiFont; $directLocalStatus.ScrollBars = 'Vertical'; $directLocalGroup.Controls.Add($directLocalStatus)
 $directLocalButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $directLocalButtons.Dock = 'Bottom'; $directLocalButtons.Height = 42; $directLocalButtons.Font = $buttonFont; $directLocalGroup.Controls.Add($directLocalButtons)
-$configSwitcherTabLayout = New-Object System.Windows.Forms.TableLayoutPanel; $configSwitcherTabLayout.Dock = 'Fill'; $configSwitcherTabLayout.Padding = New-Object System.Windows.Forms.Padding(12); $configSwitcherTabLayout.RowCount = 2; $configSwitcherTabLayout.ColumnCount = 1; [void]$configSwitcherTabLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,205))); [void]$configSwitcherTabLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $configSwitcherTab.Controls.Add($configSwitcherTabLayout)
+$configSwitcherTab.AutoScroll = $true
+$configSwitcherTabLayout = New-Object System.Windows.Forms.TableLayoutPanel; $configSwitcherTabLayout.Dock = 'Fill'; $configSwitcherTabLayout.AutoScroll = $true; $configSwitcherTabLayout.Padding = New-Object System.Windows.Forms.Padding(12); $configSwitcherTabLayout.RowCount = 2; $configSwitcherTabLayout.ColumnCount = 1; [void]$configSwitcherTabLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,205))); [void]$configSwitcherTabLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); $configSwitcherTab.Controls.Add($configSwitcherTabLayout)
 $configSwitcherRuntimeGroup = New-Object System.Windows.Forms.GroupBox; $configSwitcherRuntimeGroup.Text = '运行版本与当前配置'; $configSwitcherRuntimeGroup.Dock = 'Fill'; $configSwitcherRuntimeGroup.Padding = New-Object System.Windows.Forms.Padding(8); $configSwitcherTabLayout.Controls.Add($configSwitcherRuntimeGroup,0,0)
-$configSwitcherTabStatus = New-Object System.Windows.Forms.TextBox; $configSwitcherTabStatus.Multiline = $true; $configSwitcherTabStatus.ReadOnly = $true; $configSwitcherTabStatus.ScrollBars = 'Vertical'; $configSwitcherTabStatus.Dock = 'Fill'; $configSwitcherTabStatus.Font = $uiFont; $configSwitcherTabStatus.Text = $runtimeVersionText; $configSwitcherRuntimeGroup.Controls.Add($configSwitcherTabStatus)
+$configSwitcherTabStatus = New-Object System.Windows.Forms.TextBox; $configSwitcherTabStatus.Multiline = $true; $configSwitcherTabStatus.ReadOnly = $true; $configSwitcherTabStatus.WordWrap = $true; $configSwitcherTabStatus.ScrollBars = 'Vertical'; $configSwitcherTabStatus.Dock = 'Fill'; $configSwitcherTabStatus.Font = $uiFont; $configSwitcherTabStatus.Text = $runtimeVersionDetail; $uiToolTip.SetToolTip($configSwitcherTabStatus,$runtimeVersionDetail); $configSwitcherRuntimeGroup.Controls.Add($configSwitcherTabStatus)
 $configSwitcherActionsGroup = New-Object System.Windows.Forms.GroupBox; $configSwitcherActionsGroup.Text = 'Codex 配置切换'; $configSwitcherActionsGroup.Dock = 'Fill'; $configSwitcherActionsGroup.Padding = New-Object System.Windows.Forms.Padding(8); $configSwitcherTabLayout.Controls.Add($configSwitcherActionsGroup,0,1)
 $configSwitcherTabButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $configSwitcherTabButtons.Dock = 'Fill'; $configSwitcherTabButtons.AutoScroll = $true; $configSwitcherTabButtons.WrapContents = $true; $configSwitcherTabButtons.Font = $buttonFont; $configSwitcherActionsGroup.Controls.Add($configSwitcherTabButtons)
 $providerLayout = New-Object System.Windows.Forms.TableLayoutPanel; $providerLayout.Dock = 'Fill'; $providerLayout.Padding = New-Object System.Windows.Forms.Padding(12); $providerLayout.RowCount = 4; $providerLayout.ColumnCount = 1; [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize))); [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent,100))); [void]$providerLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute,130))); $providersTab.Controls.Add($providerLayout)
@@ -1291,14 +1298,37 @@ function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=15
 function Add-DeepSeekModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=30; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(3); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekModeButtons.Controls.Add($button) }
 function Add-UiLayoutButton([System.Windows.Forms.Control]$Target,[string]$Caption,[scriptblock]$Action,[int]$Width=210,[string]$TooltipText='') { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.MinimumSize=New-Object System.Drawing.Size($Width,36); $button.Height=36; $button.AutoSize=$false; $button.AutoEllipsis=$false; $button.TextAlign='MiddleCenter'; $button.UseCompatibleTextRendering=$true; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); if($TooltipText){$uiToolTip.SetToolTip($button,$TooltipText)}; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$Target.Controls.Add($button) }
 function Add-CodexModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=190) { Add-UiLayoutButton $codexModeButtons $Caption $Action $Width }
-function Add-CodexConfigSwitcherButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) {
-    Add-UiLayoutButton $codexConfigSwitcherButtons $Caption $Action $Width
-    Add-UiLayoutButton $homeConfigSwitcherButtons $Caption $Action $Width
-    Add-UiLayoutButton $configSwitcherTabButtons $Caption $Action $Width
+function Add-CodexConfigButtonToTarget([System.Windows.Forms.Control]$Target,[string]$Caption,[scriptblock]$Action,[int]$Width) {
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $Caption; $button.AutoSize = $true; $button.AutoSizeMode = 'GrowAndShrink'; $button.MinimumSize = New-Object System.Drawing.Size($Width,42); $button.UseCompatibleTextRendering = $true; $button.AutoEllipsis = $false; $button.TextAlign = 'MiddleCenter'; $button.Font = $buttonFont; $button.Padding = New-Object System.Windows.Forms.Padding(10,6,10,6); $button.Margin = New-Object System.Windows.Forms.Padding(4)
+    $safeName = $Caption; $safeAction = $Action; $button.Add_Click({ Invoke-SafeUiAction -Name $safeName -Action $safeAction }.GetNewClosure()); [void]$Target.Controls.Add($button)
+}
+function Add-CodexConfigSwitcherButton([string]$Caption,[scriptblock]$Action,[int]$Width=170) {
+    Add-CodexConfigButtonToTarget $codexConfigSwitcherButtons $Caption $Action $Width
+    Add-CodexConfigButtonToTarget $homeConfigSwitcherButtons $Caption $Action $Width
+    Add-CodexConfigButtonToTarget $configSwitcherTabButtons $Caption $Action $Width
+}
+function Test-CodexConfigSwitcherLayout {
+    $form.PerformLayout(); $homeConfigSwitcherLayout.PerformLayout(); $configSwitcherTabLayout.PerformLayout()
+    $allButtons = @($homeConfigSwitcherButtons.Controls) + @($configSwitcherTabButtons.Controls)
+    $textFits = $true
+    foreach ($button in $allButtons) {
+        $measured = [System.Windows.Forms.TextRenderer]::MeasureText($button.Text,$button.Font)
+        if ($button.PreferredSize.Width -lt ($measured.Width + 8)) { $textFits = $false }
+    }
+    $homeSeparateRows = $homeConfigSwitcherLayout.GetRow($homeConfigSwitcherStatus) -ne $homeConfigSwitcherLayout.GetRow($homeConfigSwitcherButtons)
+    return [pscustomobject]@{
+        version_info_no_overlap = $homeSeparateRows
+        button_text_fits = $textFits
+        home_scroll_enabled = $homeTab.AutoScroll -and $homeConfigSwitcherButtons.AutoScroll
+        tab_scroll_enabled = $configSwitcherTab.AutoScroll -and $configSwitcherTabButtons.AutoScroll
+        runtime_path_shortened = ($homeConfigSwitcherStatus.Text -notmatch [regex]::Escape($PSCommandPath)) -and ($homeConfigSwitcherStatus.Text -match '\.\.\\')
+    }
 }
 function Invoke-CodexConfigSwitcherUiSelfCheck {
     $labels = @('读取当前 Codex 配置','备份当前配置','捕获当前为官方配置','切到官方 Codex','切到小羽 Custom Router','恢复上一次配置','校验配置','复制重启提示')
     $buttonText = @($homeConfigSwitcherButtons.Controls | ForEach-Object { $_.Text }) + @($configSwitcherTabButtons.Controls | ForEach-Object { $_.Text })
+    $layout = Test-CodexConfigSwitcherLayout
     $result = [ordered]@{
         CODEX_CONFIG_SWITCHER_TAB_VISIBLE = $tabs.TabPages.Contains($configSwitcherTab)
         CODEX_CONFIG_SWITCHER_HOME_SECTION_VISIBLE = ($null -ne $homeConfigSwitcherGroup -and -not $homeConfigSwitcherGroup.IsDisposed)
@@ -1310,6 +1340,10 @@ function Invoke-CodexConfigSwitcherUiSelfCheck {
         RESTORE_PREVIOUS_BUTTON_VISIBLE = '恢复上一次配置' -in $buttonText
         VALIDATE_CONFIG_BUTTON_VISIBLE = '校验配置' -in $buttonText
         COPY_RESTART_NOTICE_BUTTON_VISIBLE = '复制重启提示' -in $buttonText
+        VERSION_INFO_NO_OVERLAP = $layout.version_info_no_overlap
+        BUTTON_TEXT_FITS = $layout.button_text_fits
+        WINDOW_SCROLLING_ENABLED = $layout.home_scroll_enabled -and $layout.tab_scroll_enabled
+        RUNTIME_PATH_SHORTENED = $layout.runtime_path_shortened
         missing_button_count = @($labels | Where-Object { $_ -notin $buttonText }).Count
         real_config_was_modified = 'NO'
         model_call_was_sent = 'NO'
@@ -1532,6 +1566,10 @@ if ($SelfTest) {
     Write-Output ('RESTORE_PREVIOUS_BUTTON_VISIBLE=' + $(if($configUiCheck.RESTORE_PREVIOUS_BUTTON_VISIBLE){'YES'}else{'NO'}))
     Write-Output ('VALIDATE_CONFIG_BUTTON_VISIBLE=' + $(if($configUiCheck.VALIDATE_CONFIG_BUTTON_VISIBLE){'YES'}else{'NO'}))
     Write-Output ('COPY_RESTART_NOTICE_BUTTON_VISIBLE=' + $(if($configUiCheck.COPY_RESTART_NOTICE_BUTTON_VISIBLE){'YES'}else{'NO'}))
+    Write-Output ('CONFIG_SWITCHER_LAYOUT_NO_OVERLAP=' + $(if($configUiCheck.VERSION_INFO_NO_OVERLAP){'PASS'}else{'FAIL'}))
+    Write-Output ('CONFIG_SWITCHER_BUTTON_TEXT_FITS=' + $(if($configUiCheck.BUTTON_TEXT_FITS){'PASS'}else{'FAIL'}))
+    Write-Output ('CONFIG_SWITCHER_SCROLLING=' + $(if($configUiCheck.WINDOW_SCROLLING_ENABLED){'PASS'}else{'FAIL'}))
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_PATH_SHORTENED=' + $(if($configUiCheck.RUNTIME_PATH_SHORTENED){'PASS'}else{'FAIL'}))
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'
     Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'
