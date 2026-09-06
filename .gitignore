@@ -9,3 +9,6 @@ reports/*.runtime.json
 .codex-ai-router/
 .runtime/
 codex-handoff/sessions/
+codex-handoff/codex-config-backups/
+codex-handoff/codex-config-profiles/
+codex-handoff/codex-config-state.json

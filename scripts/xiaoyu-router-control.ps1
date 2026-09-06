@@ -637,6 +637,9 @@ $codexAnalysisButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $codexA
 $codexBrainGroup = New-Object System.Windows.Forms.GroupBox; $codexBrainGroup.Text = '辅助脑'; $codexBrainGroup.Dock = 'Top'; $codexBrainGroup.Height = 76; $codexBrainGroup.Padding = New-Object System.Windows.Forms.Padding(6); $codexModeScroll.Controls.Add($codexBrainGroup)
 $codexBrainButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $codexBrainButtons.Dock = 'Fill'; $codexBrainButtons.AutoScroll = $true; $codexBrainButtons.WrapContents = $true; $codexBrainButtons.FlowDirection = 'LeftToRight'; $codexBrainButtons.Font = $buttonFont; $codexBrainGroup.Controls.Add($codexBrainButtons)
 $codexAssistBrainProvider = New-Object System.Windows.Forms.ComboBox; $codexAssistBrainProvider.DropDownStyle = 'DropDownList'; $codexAssistBrainProvider.Width = 215; $codexAssistBrainProvider.Height = 32; $codexAssistBrainProvider.Font = $buttonFont; [void]$codexAssistBrainProvider.Items.Add('自动'); [void]$codexAssistBrainProvider.Items.Add('本地模型'); [void]$codexAssistBrainProvider.Items.Add('DeepSeek Bridge 直连（本地 8791）'); [void]$codexAssistBrainProvider.Items.Add('外部 API'); [void]$codexAssistBrainProvider.Items.Add('Hybrid'); $codexAssistBrainProvider.SelectedIndex = 0; $codexAssistBrainProvider.Add_SelectedIndexChanged({ $script:AssistBrainSelection = [string]$codexAssistBrainProvider.SelectedItem }.GetNewClosure()); $script:AssistBrainSelection = '自动'; [void]$codexBrainButtons.Controls.Add($codexAssistBrainProvider)
+$codexConfigSwitcherGroup = New-Object System.Windows.Forms.GroupBox; $codexConfigSwitcherGroup.Text = 'Codex 配置切换'; $codexConfigSwitcherGroup.Dock = 'Top'; $codexConfigSwitcherGroup.Height = 174; $codexConfigSwitcherGroup.Padding = New-Object System.Windows.Forms.Padding(6); $codexModeScroll.Controls.Add($codexConfigSwitcherGroup)
+$codexConfigSwitcherStatus = New-Object System.Windows.Forms.TextBox; $codexConfigSwitcherStatus.Multiline = $true; $codexConfigSwitcherStatus.ReadOnly = $true; $codexConfigSwitcherStatus.ScrollBars = 'Vertical'; $codexConfigSwitcherStatus.Dock = 'Top'; $codexConfigSwitcherStatus.Height = 76; $codexConfigSwitcherStatus.Font = $uiFont; $codexConfigSwitcherStatus.Text = '本轮未读取或修改真实 Codex 配置。`r`n本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。'; $codexConfigSwitcherGroup.Controls.Add($codexConfigSwitcherStatus)
+$codexConfigSwitcherButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $codexConfigSwitcherButtons.Dock = 'Fill'; $codexConfigSwitcherButtons.AutoScroll = $true; $codexConfigSwitcherButtons.WrapContents = $true; $codexConfigSwitcherButtons.FlowDirection = 'LeftToRight'; $codexConfigSwitcherButtons.Font = $buttonFont; $codexConfigSwitcherGroup.Controls.Add($codexConfigSwitcherButtons)
 $codexOtherGroup = New-Object System.Windows.Forms.GroupBox; $codexOtherGroup.Text = '其他模式与维护'; $codexOtherGroup.Dock = 'Top'; $codexOtherGroup.Height = 116; $codexOtherGroup.Padding = New-Object System.Windows.Forms.Padding(6); $codexModeScroll.Controls.Add($codexOtherGroup)
 $codexOtherButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $codexOtherButtons.Dock = 'Fill'; $codexOtherButtons.AutoScroll = $true; $codexOtherButtons.WrapContents = $true; $codexOtherButtons.FlowDirection = 'LeftToRight'; $codexOtherButtons.Font = $buttonFont; $codexModeButtons = $codexOtherButtons; $codexOtherGroup.Controls.Add($codexOtherButtons)
 $toolsPolicyGroup = New-Object System.Windows.Forms.GroupBox; $toolsPolicyGroup.Text = 'Codex 工具策略（默认严格拒绝）'; $toolsPolicyGroup.Dock = 'Fill'; $toolsPolicyGroup.Padding = New-Object System.Windows.Forms.Padding(8); $assistantLayout.Controls.Add($toolsPolicyGroup,0,1)
@@ -973,6 +976,20 @@ function Invoke-CodexModeAction([ValidateSet('official-direct','custom-router','
     if ($diagnosticsText -and $debugToggle -and $debugToggle.Checked) { $diagnosticsText.Text = ($script:LastModeDebugJson + "`r`n" + ($script:UiDebugEntries -join "`r`n")) }
     [System.Windows.Forms.MessageBox]::Show((Redact-Text $summary),'Codex 连接模式')
 }
+function Invoke-CodexConfigSwitcherAction([ValidateSet('status','backup','capture-official','switch-xiaoyu','switch-official','restore-previous','validate')][string]$Action) {
+    $args = @('codex-config',$Action)
+    if ($Action -eq 'capture-official') {
+        $choice = [System.Windows.Forms.MessageBox]::Show('请仅在你已手动确认 Codex 当前为官方模式时继续。此操作不会读取 Codex UI。是否捕获本地配置快照？','确认官方配置',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $args += '--confirm-official'
+    } elseif ($Action -in @('switch-xiaoyu','switch-official','restore-previous')) {
+        $choice = [System.Windows.Forms.MessageBox]::Show('此操作会修改本地 Codex 配置文件，但不会读取或点击 Codex UI。完成后需重启 Codex 并新建对话。是否继续？','Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
+    $raw = Invoke-RouterCli $args
+    $codexConfigSwitcherStatus.Text = Redact-Text $raw
+    [System.Windows.Forms.MessageBox]::Show((Redact-Text $raw),'Codex 配置切换') | Out-Null
+}
 function Get-AssistStartupInstruction {
     return "启动官方辅助模式。先调用小羽本地协调器：`r`nPOST http://127.0.0.1:18789/assist/coordinate`r`n把当前任务发送给协调器。`r`n执行协调器返回的 codex_required_steps。`r`n不要执行被小羽标记为 local_agent_steps 的简单辅助任务。`r`n遇到高风险步骤先停止并询问用户。"
 }
@@ -1206,6 +1223,7 @@ function Add-DeepSeekButton([string]$Caption,[scriptblock]$Action,[int]$Width=15
 function Add-DeepSeekModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=145) { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.Height=30; $button.Font=$buttonFont; $button.Margin = New-Object System.Windows.Forms.Padding(3); $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$deepSeekModeButtons.Controls.Add($button) }
 function Add-UiLayoutButton([System.Windows.Forms.Control]$Target,[string]$Caption,[scriptblock]$Action,[int]$Width=210,[string]$TooltipText='') { $button=New-Object System.Windows.Forms.Button; $button.Text=$Caption; $button.Width=$Width; $button.MinimumSize=New-Object System.Drawing.Size($Width,36); $button.Height=36; $button.AutoSize=$false; $button.AutoEllipsis=$false; $button.TextAlign='MiddleCenter'; $button.UseCompatibleTextRendering=$true; $button.Font=$buttonFont; $button.Margin=New-Object System.Windows.Forms.Padding(4); if($TooltipText){$uiToolTip.SetToolTip($button,$TooltipText)}; $safeName=$Caption;$safeAction=$Action;$button.Add_Click({Invoke-SafeUiAction -Name $safeName -Action $safeAction}.GetNewClosure()); [void]$Target.Controls.Add($button) }
 function Add-CodexModeButton([string]$Caption,[scriptblock]$Action,[int]$Width=190) { Add-UiLayoutButton $codexModeButtons $Caption $Action $Width }
+function Add-CodexConfigSwitcherButton([string]$Caption,[scriptblock]$Action,[int]$Width=150) { Add-UiLayoutButton $codexConfigSwitcherButtons $Caption $Action $Width }
 function Add-CodexAssistButton([string]$Caption,[scriptblock]$Action,[int]$Width=210) { Add-UiLayoutButton $codexAssistButtons $Caption $Action $Width }
 function Add-CodexAnalysisButton([string]$Caption,[scriptblock]$Action,[int]$Width=210) { Add-UiLayoutButton $codexAnalysisButtons $Caption $Action $Width }
 function Add-CodexBrainButton([string]$Caption,[scriptblock]$Action,[int]$Width=210) { Add-UiLayoutButton $codexBrainButtons $Caption $Action $Width }
@@ -1318,6 +1336,14 @@ Add-CodexAnalysisButton '分析测试失败' { Show-AssistStepList $true } 190
 Add-CodexAnalysisButton '生成下一轮 Codex 指令' { Show-AssistStartupInstruction } 220
 Add-CodexBrainButton '检查辅助脑状态' { Invoke-AssistCoordinatePrecheck } 190
 Add-CodexBrainButton '打开 handoff 目录' { Open-AssistHandoffDirectory } 190
+Add-CodexConfigSwitcherButton '读取当前 Codex 配置' { Invoke-CodexConfigSwitcherAction 'status' }
+Add-CodexConfigSwitcherButton '备份当前配置' { Invoke-CodexConfigSwitcherAction 'backup' }
+Add-CodexConfigSwitcherButton '捕获当前为官方配置' { Invoke-CodexConfigSwitcherAction 'capture-official' } 180
+Add-CodexConfigSwitcherButton '切到官方 Codex' { Invoke-CodexConfigSwitcherAction 'switch-official' }
+Add-CodexConfigSwitcherButton '切到小羽 Custom Router' { Invoke-CodexConfigSwitcherAction 'switch-xiaoyu' } 190
+Add-CodexConfigSwitcherButton '恢复上一次配置' { Invoke-CodexConfigSwitcherAction 'restore-previous' }
+Add-CodexConfigSwitcherButton '校验配置' { Invoke-CodexConfigSwitcherAction 'validate' }
+Add-CodexConfigSwitcherButton '复制重启提示' { Set-Clipboard -Value '本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。'; [System.Windows.Forms.MessageBox]::Show('已复制重启提示。','Codex 配置切换') | Out-Null } 160
 Add-CodexModeButton '启用 DeepSeek 首脑' { Invoke-CodexModeAction 'deepseek-head' } 170
 Add-CodexModeButton '本地 Agent（预留）' { Invoke-CodexModeAction 'local-agent-pending' } 170
 Add-CodexModeButton 'DeepSeek 文本兼容模式' { Invoke-CodexTextOnlyMode 'custom-deepseek-text-only' } 190

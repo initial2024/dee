@@ -40,6 +40,7 @@ from .work_profiles import (
     profile_summary,
     select_work_profile,
 )
+from .codex_config_switcher import CodexConfigError, CodexConfigSwitcher
 
 
 def emit(data): print(json.dumps(data, ensure_ascii=False, indent=2) if isinstance(data, dict) else data.to_json())
@@ -132,6 +133,11 @@ def main() -> None:
     serve = sub.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=18789); serve.add_argument("--gguf-dir", action="append", default=[]); serve.add_argument("--managed-gguf", help="optional discovered GGUF id to start persistently")
     handoff = sub.add_parser("handoff"); handoff.add_argument("task"); handoff.add_argument("--tests", default="NOT_RUN"); handoff.add_argument("--blockers", default="NONE"); handoff.add_argument("--constraints", default="")
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
+    codex_config = sub.add_parser("codex-config", help="local Codex config switcher; never controls Codex UI")
+    codex_config.add_argument("action", choices=("status", "backup", "capture-official", "switch-xiaoyu", "switch-official", "restore-previous", "validate"))
+    codex_config.add_argument("--config-path", type=Path, help="explicit config path; tests should use a temporary file")
+    codex_config.add_argument("--root", type=Path, help="state and backup root; defaults to the current directory")
+    codex_config.add_argument("--confirm-official", action="store_true", help="required before capturing an official profile")
     config = sub.add_parser("config"); config.add_argument("action", choices=("show",))
     tools_policy = sub.add_parser("tools-policy"); tools_policy.add_argument("action", choices=("show", "set")); tools_policy.add_argument("policy", nargs="?", choices=VALID_POLICIES)
     session = sub.add_parser("session", help="local sanitized task-session binding")
@@ -229,6 +235,26 @@ def main() -> None:
         else:
             if not args.policy: raise SystemExit("POLICY_REQUIRED")
             emit(save_policy(args.policy))
+    elif args.command == "codex-config":
+        switcher = CodexConfigSwitcher(args.config_path, args.root)
+        try:
+            if args.action == "status":
+                result = switcher.detect_config()
+            elif args.action == "backup":
+                result = switcher.backup_config()
+            elif args.action == "capture-official":
+                result = switcher.capture_official_profile(user_confirmed=args.confirm_official)
+            elif args.action == "switch-xiaoyu":
+                result = switcher.switch_to_xiaoyu_router()
+            elif args.action == "switch-official":
+                result = switcher.switch_to_official_codex()
+            elif args.action == "restore-previous":
+                result = switcher.restore_previous_config()
+            else:
+                result = switcher.validate_config()
+            emit({**result, "codex_ui_scraping": "NO", "codex_ui_automation": "NO", "secrets_logged": "NO"})
+        except CodexConfigError as exc:
+            emit({"status": "ERROR", "error_code": str(exc), "codex_ui_scraping": "NO", "codex_ui_automation": "NO", "secrets_logged": "NO"})
     elif args.command == "session":
         hub = SessionContextHub(Path.cwd())
         try:
