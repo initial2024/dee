@@ -46,3 +46,6 @@ class SwitcherTests(unittest.TestCase):
   with patch('sys.argv',['xiaoyu-router','codex-config','status','--config-path',str(missing),'--root',str(self.root)]), redirect_stdout(out): main()
   self.assertIn('CODEX_CONFIG_NOT_FOUND',out.getvalue())
   self.assertNotIn('fixture-redacted',out.getvalue())
+ def test_toml_parse_failure_is_classified(self):
+  self.c.write_text('model_provider = [',encoding='utf-8')
+  with self.assertRaisesRegex(CodexConfigError,'CODEX_CONFIG_TOML_PARSE_FAILED'): self.s.detect_config()

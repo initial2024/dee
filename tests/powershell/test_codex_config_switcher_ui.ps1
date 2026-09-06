@@ -45,6 +45,10 @@ foreach ($scale in @('1','1.29','1.5')) {
   Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_BUTTON_TEXT_FITS=PASS') ('button_text_fits_' + $scale)
   Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_SCROLLING=PASS') ('scrolling_' + $scale)
   Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_RUNTIME_PATH_SHORTENED=PASS') ('short_path_' + $scale)
+  Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_RUNTIME_SELFTEST=PASS') ('runtime_selftest_' + $scale)
+  Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_RUNTIME_COMMAND_KIND=python_module') ('runtime_command_kind_' + $scale)
+  Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_RUNTIME_PYTHONPATH_SET=YES') ('runtime_pythonpath_' + $scale)
+  Assert-True ($scaledOutput -match 'CONFIG_SWITCHER_RUNTIME_WORKDIR_SET=YES') ('runtime_workdir_' + $scale)
 }
 } finally {
   if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }

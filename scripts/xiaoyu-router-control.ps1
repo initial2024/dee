@@ -59,6 +59,14 @@ function Get-UiErrorExplanation([string]$Code) {
         'ROUTER_NOT_LISTENING' { return '小羽 Router 当前未监听。请先启动 Router；配置读取、备份和校验不依赖 Router。' }
         'LOCAL_LIGHT_UNAVAILABLE' { return '本地轻量模型不可用。请检查本地后端或改用不依赖本地模型的策略选择。' }
         'CODEX_CONFIG_NOT_FOUND' { return '未找到 Codex 配置文件。请确认 C:\Users\bad39\.codex\config.toml 是否存在。' }
+        'CODEX_CONFIG_READ_PERMISSION_DENIED' { return '没有读取 Codex 配置文件的权限。请检查文件 ACL 或以拥有权限的账户运行控制台。' }
+        'CODEX_CONFIG_TOML_PARSE_FAILED' { return 'Codex 配置 TOML 无法解析。请人工检查语法后重试。' }
+        'CODEX_CONFIG_STATUS_FAILED' { return '配置状态读取失败。请运行“配置切换器自检”查看 Python、stderr 和工作目录。' }
+        'CODEX_CONFIG_CLI_ENTRYPOINT_FAILED' { return '配置 CLI 入口无法启动。请检查项目 src 目录和 Python 运行时。' }
+        'CODEX_CONFIG_CLI_JSON_PARSE_FAILED' { return '配置 CLI 输出不是有效 JSON。请查看脱敏 stderr 摘要。' }
+        'CODEX_CONFIG_PYTHON_IMPORT_FAILED' { return 'Python 无法导入配置切换模块。请检查 PYTHONPATH 是否指向项目 src。' }
+        'CODEX_CONFIG_WORKDIR_INVALID' { return 'Router 项目工作目录无效。请从当前 Router 项目启动控制台。' }
+        'CODEX_CONFIG_UNKNOWN_ERROR_SANITIZED' { return '配置动作发生未知本地错误；详情已脱敏显示。' }
         'OFFICIAL_PROFILE_NOT_CAPTURED' { return '尚未捕获官方配置。请在 Codex 手动确认官方模式后，再点击“捕获当前为官方配置”。' }
         'CODEX_CONFIG_TOML_INVALID' { return 'Codex 配置不是有效 TOML。请先人工修复配置文件，再重试。' }
         'DOWNSTREAM_UNAVAILABLE' { return '下游服务不可用，可能是 Provider 未通过运行资格、模型未确认或服务未启动。' }
@@ -81,13 +89,13 @@ function Get-UiErrorExplanation([string]$Code) {
 function Get-UiActionErrorCode([string]$Detail) {
     if ($Detail -match '(ROUTER_NOT_LISTENING|ROUTER_NOT_RUNNING|actively refused|connection refused)') { return 'ROUTER_NOT_LISTENING' }
     if ($Detail -match '(LOCAL_LIGHT_UNAVAILABLE|LOCAL_DIRECT_BACKEND_ERROR|LOCAL_BACKEND_UNAVAILABLE)') { return 'LOCAL_LIGHT_UNAVAILABLE' }
-    if ($Detail -match '(CODEX_CONFIG_NOT_FOUND|OFFICIAL_PROFILE_NOT_CAPTURED|CODEX_CONFIG_TOML_INVALID|NON_LOOPBACK_ENDPOINT_BLOCKED)') { return $Matches[1] }
+    if ($Detail -match '(CODEX_CONFIG_NOT_FOUND|OFFICIAL_PROFILE_NOT_CAPTURED|CODEX_CONFIG_TOML_PARSE_FAILED|CODEX_CONFIG_TOML_INVALID|CODEX_CONFIG_READ_PERMISSION_DENIED|CODEX_CONFIG_CLI_ENTRYPOINT_FAILED|CODEX_CONFIG_CLI_JSON_PARSE_FAILED|CODEX_CONFIG_PYTHON_IMPORT_FAILED|CODEX_CONFIG_WORKDIR_INVALID|NON_LOOPBACK_ENDPOINT_BLOCKED)') { return $Matches[1] }
     if ($Detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED|PORT_OCCUPIED_BY_UNKNOWN_PROCESS|STOP_OLD_ROUTER_CONFIRMATION_REQUIRED|STALE_OR_INCOMPATIBLE_ROUTER)') { return $Matches[1] }
     return 'ACTION_ERROR_UNCLASSIFIED'
 }
 function New-UiActionFailure([string]$Name,[string]$Code,[string]$Detail) {
-    $routerStatus = 'UNKNOWN'
-    try { $routerStatus = (Get-RouterStatus).listener_status } catch {}
+    $routerStatus = if ($SelfTest) { 'NOT_LISTENING' } else { 'UNKNOWN' }
+    if (-not $SelfTest) { try { $routerStatus = (Get-RouterStatus).listener_status } catch {} }
     return [pscustomobject]@{
         status = 'ERROR'
         action_name = $Name
@@ -98,6 +106,12 @@ function New-UiActionFailure([string]$Name,[string]$Code,[string]$Detail) {
         config_path = $CodexConfig
         real_config_was_modified = $script:RealCodexConfigModified
         model_call_was_sent = 'NO'
+        command_kind = 'direct_powershell'
+        exit_code = 'NOT_APPLICABLE'
+        stderr_summary = ''
+        stdout_summary = ''
+        config_exists = Test-Path -LiteralPath $CodexConfig
+        router_required = 'NO'
     }
 }
 function Add-UiDebugInfo([string]$Name,[string]$Code,[string]$Detail) {
@@ -491,6 +505,48 @@ function Invoke-RouterCli([string[]]$Arguments) {
         $cliArgs = @($runner) + @($Arguments); return (Redact-Text (& $spec.path @cliArgs 2>&1 | Out-String))
     }
     return (Redact-Text (& $spec.path @Arguments 2>&1 | Out-String))
+}
+function Get-CodexConfigPythonExecutable {
+    $candidates = @((Join-Path $ProjectRoot '.venv\Scripts\python.exe'),(Join-Path $ProjectRoot 'venv\Scripts\python.exe'))
+    $systemPython = Get-Command python -ErrorAction SilentlyContinue
+    if ($systemPython -and $systemPython.Source) { $candidates += $systemPython.Source }
+    $candidates += 'C:\EasyDiffusion\installer_files\env\python.exe'
+    foreach ($candidate in @($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        $hasTomlParser = $false
+        try { & $candidate -c 'import tomllib' 2>$null; $hasTomlParser = ($LASTEXITCODE -eq 0) } catch {}
+        if (-not $hasTomlParser) { try { & $candidate -c 'import tomli' 2>$null; $hasTomlParser = ($LASTEXITCODE -eq 0) } catch {} }
+        if ($hasTomlParser) { return $candidate }
+    }
+    return $null
+}
+function Invoke-CodexConfigModuleCli([string[]]$Arguments) {
+    $srcRoot = Join-Path $ProjectRoot 'src'
+    if (-not (Test-Path -LiteralPath $ProjectRoot) -or -not (Test-Path -LiteralPath $srcRoot)) {
+        return [pscustomobject]@{ command_kind='python_module'; error_code='CODEX_CONFIG_WORKDIR_INVALID'; exit_code=1; stdout=''; stderr='Router project root or src directory is missing.'; python_executable=''; working_directory=$ProjectRoot; pythonpath=$srcRoot }
+    }
+    $python = Get-CodexConfigPythonExecutable
+    if (-not $python) {
+        return [pscustomobject]@{ command_kind='python_module'; error_code='CODEX_CONFIG_CLI_ENTRYPOINT_FAILED'; exit_code=1; stdout=''; stderr='Compatible Python runtime was not found.'; python_executable=''; working_directory=$ProjectRoot; pythonpath=$srcRoot }
+    }
+    $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-codex-config-' + [guid]::NewGuid().ToString('N') + '.stdout')
+    $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-codex-config-' + [guid]::NewGuid().ToString('N') + '.stderr')
+    $previousPythonPath = [string]$env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = $srcRoot
+        Push-Location -LiteralPath $ProjectRoot
+        & $python @('-m','codex_ai_router.cli') @Arguments 1>$stdoutPath 2>$stderrPath
+        $exitCode = $LASTEXITCODE
+        $stdout = if(Test-Path -LiteralPath $stdoutPath){Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8}else{''}
+        $stderr = if(Test-Path -LiteralPath $stderrPath){Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8}else{''}
+        return [pscustomobject]@{ command_kind='python_module'; error_code=''; exit_code=$exitCode; stdout=$stdout; stderr=$stderr; python_executable=$python; working_directory=$ProjectRoot; pythonpath=$srcRoot }
+    } catch {
+        return [pscustomobject]@{ command_kind='python_module'; error_code='CODEX_CONFIG_CLI_ENTRYPOINT_FAILED'; exit_code=1; stdout=''; stderr=([string]$_.Exception.Message); python_executable=$python; working_directory=$ProjectRoot; pythonpath=$srcRoot }
+    } finally {
+        Pop-Location -ErrorAction SilentlyContinue
+        $env:PYTHONPATH = $previousPythonPath
+        Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue
+    }
 }
 function Add-LocalAgentLog([string]$Message) {
     if ($localAgentLog) { $localAgentLog.AppendText(('[{0}] {1}' -f (Get-Date).ToString('HH:mm:ss'), (Redact-Text $Message)) + "`r`n") }
@@ -1031,6 +1087,25 @@ function Set-CodexConfigSwitcherStatus([string]$Text) {
         if ($target) { $target.Text = Redact-Text $Text }
     }
 }
+function Resolve-CodexConfigCliError([object]$Execution,[object]$Record) {
+    if ($Execution.error_code) { return [string]$Execution.error_code }
+    if ($Record -and $Record.error_code) { return [string]$Record.error_code }
+    $detail = [string]$Execution.stderr + "`n" + [string]$Execution.stdout
+    if ($detail -match '(CODEX_CONFIG_[A-Z_]+|OFFICIAL_PROFILE_NOT_CAPTURED)') { return $Matches[1] }
+    if ($detail -match '(ModuleNotFoundError|ImportError|No module named)') { return 'CODEX_CONFIG_PYTHON_IMPORT_FAILED' }
+    if ($Execution.exit_code -ne 0) { return 'CODEX_CONFIG_CLI_ENTRYPOINT_FAILED' }
+    return 'CODEX_CONFIG_UNKNOWN_ERROR_SANITIZED'
+}
+function New-CodexConfigActionFailure([string]$Action,[string]$Code,[object]$Execution) {
+    $failure = New-UiActionFailure $Action $Code (([string]$Execution.stderr + "`n" + [string]$Execution.stdout).Trim())
+    $failure.command_kind = [string]$Execution.command_kind; $failure.exit_code = $Execution.exit_code
+    $failure.stderr_summary = Redact-Text ([string]$Execution.stderr); $failure.stdout_summary = Redact-Text ([string]$Execution.stdout)
+    $failure.config_exists = Test-Path -LiteralPath $CodexConfig; $failure.router_required = 'NO'
+    return $failure
+}
+function Format-CodexConfigActionFailure([object]$Failure) {
+    return ("操作：{0}`r`n错误码：{1}`r`n原因：{2}`r`n建议：{3}`r`n命令类型：{4}`r`n退出码：{5}`r`nstderr 摘要：{6}`r`nstdout 摘要：{7}`r`n配置：{8}`r`n配置存在：{9}`r`n需要 Router：{10}`r`nRouter：{11}`r`n真实配置已修改：{12}`r`n模型调用已发送：{13}" -f $Failure.action_name,$Failure.error_code,$Failure.sanitized_reason,$Failure.suggested_fix,$Failure.command_kind,$Failure.exit_code,$Failure.stderr_summary,$Failure.stdout_summary,$Failure.config_path,$Failure.config_exists,$Failure.router_required,$Failure.router_status,$Failure.real_config_was_modified,$Failure.model_call_was_sent)
+}
 function Invoke-CodexConfigSwitcherAction([ValidateSet('status','backup','capture-official','switch-xiaoyu','switch-official','restore-previous','validate')][string]$Action) {
     $cliArgs = @('codex-config',$Action,'--config-path',$CodexConfig,'--root',$CodexConfigSwitcherStateRoot)
     if ($Action -eq 'capture-official') {
@@ -1041,13 +1116,15 @@ function Invoke-CodexConfigSwitcherAction([ValidateSet('status','backup','captur
         $choice = [System.Windows.Forms.MessageBox]::Show('此操作会修改本地 Codex 配置文件，但不会读取或点击 Codex UI。完成后需重启 Codex 并新建对话。是否继续？','Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
         if ($choice -ne [System.Windows.Forms.DialogResult]::Yes) { return }
     }
-    $raw = Invoke-RouterCli $cliArgs
+    $execution = Invoke-CodexConfigModuleCli $cliArgs
     $record = $null
-    try { $record = $raw | ConvertFrom-Json } catch { throw 'CODEX_CONFIG_CLI_INVALID_RESPONSE' }
-    $errorCode = if ($record.error_code) { [string]$record.error_code } elseif ([string]$record.status -in @('OFFICIAL_PROFILE_NOT_CAPTURED','BACKUP_NOT_FOUND','USER_CONFIRMATION_REQUIRED')) { [string]$record.status } else { '' }
+    if (-not $execution.error_code -and $execution.exit_code -eq 0) {
+        try { $record = $execution.stdout | ConvertFrom-Json -ErrorAction Stop } catch { $execution.error_code = 'CODEX_CONFIG_CLI_JSON_PARSE_FAILED' }
+    }
+    $errorCode = if ($execution.error_code -or $execution.exit_code -ne 0) { Resolve-CodexConfigCliError $execution $record } elseif ($record.error_code) { [string]$record.error_code } elseif ([string]$record.status -in @('OFFICIAL_PROFILE_NOT_CAPTURED','BACKUP_NOT_FOUND','USER_CONFIRMATION_REQUIRED')) { [string]$record.status } else { '' }
     if ($errorCode) {
-        $failure = New-UiActionFailure $Action $errorCode $errorCode
-        Set-CodexConfigSwitcherStatus ("操作：{0}`r`n错误码：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n配置：{5}`r`n真实配置已修改：{6}`r`n模型调用已发送：NO" -f $failure.action_name,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.config_path,$failure.real_config_was_modified)
+        $failure = New-CodexConfigActionFailure $Action $errorCode $execution
+        Set-CodexConfigSwitcherStatus (Format-CodexConfigActionFailure $failure)
         if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($homeConfigSwitcherStatus.Text,'Codex 配置切换',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
         return $failure
     }
@@ -1064,6 +1141,33 @@ function Refresh-CodexConfigSwitcherPanel {
         $failure = New-UiActionFailure 'status' (Get-UiActionErrorCode ([string]$_.Exception.Message)) ([string]$_.Exception.Message)
         Set-CodexConfigSwitcherStatus ("$runtimeVersionText`r`n`r`n当前 config 路径：{0}`r`n状态：{1}`r`n原因：{2}`r`n建议：{3}`r`nRouter：{4}`r`n真实配置已修改：{5}`r`n模型调用已发送：NO" -f $failure.config_path,$failure.error_code,$failure.sanitized_reason,$failure.suggested_fix,$failure.router_status,$failure.real_config_was_modified)
     }
+}
+function Invoke-CodexConfigSwitcherRuntimeSelfTest {
+    $execution = Invoke-CodexConfigModuleCli @('codex-config','status','--config-path',$CodexConfig,'--root',$CodexConfigSwitcherStateRoot)
+    $record = $null; $jsonParsed = $false
+    if (-not $execution.error_code -and $execution.exit_code -eq 0) {
+        try { $record = $execution.stdout | ConvertFrom-Json -ErrorAction Stop; $jsonParsed = $true } catch {}
+    }
+    $errorCode = if($jsonParsed){''}else{Resolve-CodexConfigCliError $execution $record}
+    $result = [ordered]@{
+        config_path = $CodexConfig
+        config_exists = Test-Path -LiteralPath $CodexConfig
+        python_executable = $execution.python_executable
+        command_kind = $execution.command_kind
+        working_directory = $execution.working_directory
+        pythonpath = $execution.pythonpath
+        exit_code = $execution.exit_code
+        json_parsed = $jsonParsed
+        router_required = 'NO'
+        router_status = if ($SelfTest) { 'NOT_LISTENING' } else { (Get-RouterStatus).listener_status }
+        error_code = $errorCode
+        stderr_summary = Redact-Text ([string]$execution.stderr)
+        real_config_was_modified = 'NO'
+        model_call_was_sent = 'NO'
+    }
+    Set-CodexConfigSwitcherStatus ($result | ConvertTo-Json -Depth 3)
+    if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($homeConfigSwitcherStatus.Text,'配置切换器自检') | Out-Null }
+    return [pscustomobject]$result
 }
 function Get-AssistStartupInstruction {
     return "启动官方辅助模式。先调用小羽本地协调器：`r`nPOST http://127.0.0.1:18789/assist/coordinate`r`n把当前任务发送给协调器。`r`n执行协调器返回的 codex_required_steps。`r`n不要执行被小羽标记为 local_agent_steps 的简单辅助任务。`r`n遇到高风险步骤先停止并询问用户。"
@@ -1475,6 +1579,8 @@ Add-CodexConfigSwitcherButton '校验配置' { Invoke-CodexConfigSwitcherAction 
 Add-CodexConfigSwitcherButton '复制重启提示' { Set-Clipboard -Value '本功能只修改本地 Codex 配置文件，不读取或点击 Codex UI。修改后请重启 Codex 并新建对话。'; [System.Windows.Forms.MessageBox]::Show('已复制重启提示。','Codex 配置切换') | Out-Null } 160
 Add-UiLayoutButton $homeConfigSwitcherButtons '检查配置切换器 UI' { Invoke-CodexConfigSwitcherUiSelfCheck } 180
 Add-UiLayoutButton $configSwitcherTabButtons '检查配置切换器 UI' { Invoke-CodexConfigSwitcherUiSelfCheck } 180
+Add-UiLayoutButton $homeConfigSwitcherButtons '配置切换器自检' { Invoke-CodexConfigSwitcherRuntimeSelfTest } 180
+Add-UiLayoutButton $configSwitcherTabButtons '配置切换器自检' { Invoke-CodexConfigSwitcherRuntimeSelfTest } 180
 Add-CodexModeButton '启用 DeepSeek 首脑' { Invoke-CodexModeAction 'deepseek-head' } 170
 Add-CodexModeButton '本地 Agent（预留）' { Invoke-CodexModeAction 'local-agent-pending' } 170
 Add-CodexModeButton 'DeepSeek 文本兼容模式' { Invoke-CodexTextOnlyMode 'custom-deepseek-text-only' } 190
@@ -1570,6 +1676,15 @@ if ($SelfTest) {
     Write-Output ('CONFIG_SWITCHER_BUTTON_TEXT_FITS=' + $(if($configUiCheck.BUTTON_TEXT_FITS){'PASS'}else{'FAIL'}))
     Write-Output ('CONFIG_SWITCHER_SCROLLING=' + $(if($configUiCheck.WINDOW_SCROLLING_ENABLED){'PASS'}else{'FAIL'}))
     Write-Output ('CONFIG_SWITCHER_RUNTIME_PATH_SHORTENED=' + $(if($configUiCheck.RUNTIME_PATH_SHORTENED){'PASS'}else{'FAIL'}))
+    $configRuntimeSelfTest = Invoke-CodexConfigSwitcherRuntimeSelfTest
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_SELFTEST=' + $(if($configRuntimeSelfTest.config_exists -and $configRuntimeSelfTest.json_parsed -and $configRuntimeSelfTest.exit_code -eq 0 -and $configRuntimeSelfTest.router_required -eq 'NO'){'PASS'}else{'FAIL'}))
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_EXIT_CODE=' + $configRuntimeSelfTest.exit_code)
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_JSON_PARSED=' + $configRuntimeSelfTest.json_parsed)
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_ERROR_CODE=' + $configRuntimeSelfTest.error_code)
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_STDERR=' + $configRuntimeSelfTest.stderr_summary)
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_COMMAND_KIND=' + $configRuntimeSelfTest.command_kind)
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_PYTHONPATH_SET=' + $(if($configRuntimeSelfTest.pythonpath -eq (Join-Path $ProjectRoot 'src')){'YES'}else{'NO'}))
+    Write-Output ('CONFIG_SWITCHER_RUNTIME_WORKDIR_SET=' + $(if($configRuntimeSelfTest.working_directory -eq $ProjectRoot){'YES'}else{'NO'}))
     Write-Output 'ASSIST_COORDINATOR_UI_CONSTRUCTION=PASS'
     Write-Output 'OFFICIAL_ASSISTED_COORDINATOR_UI_VISIBLE=YES'
     Write-Output 'CODEX_ENDPOINT_TOUCHED=NO'

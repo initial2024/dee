@@ -11,7 +11,10 @@ import os
 from pathlib import Path
 import re
 import shutil
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 runtime supported by the local UI.
+    import tomli as tomllib
 from typing import Any
 
 XIAOYU_PROVIDER = "XiaoyuRouter"
@@ -27,14 +30,19 @@ def default_config_path() -> Path:
 def _read(path: Path) -> str:
     if not path.exists():
         raise CodexConfigError("CODEX_CONFIG_NOT_FOUND")
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except PermissionError as exc:
+        raise CodexConfigError("CODEX_CONFIG_READ_PERMISSION_DENIED") from exc
+    except OSError as exc:
+        raise CodexConfigError("CODEX_CONFIG_READ_FAILED") from exc
 
 
 def _parse(text: str) -> dict[str, Any]:
     try:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise CodexConfigError("CODEX_CONFIG_TOML_INVALID") from exc
+        raise CodexConfigError("CODEX_CONFIG_TOML_PARSE_FAILED") from exc
 
 
 def _is_loopback(value: str) -> bool:
@@ -154,4 +162,4 @@ class CodexConfigSwitcher:
         if data.get("model_provider") == XIAOYU_PROVIDER:
             if provider.get("wire_api") != "responses": issues.append("WIRE_API_INVALID")
             if not _is_loopback(str(provider.get("base_url", ""))): issues.append("NON_LOOPBACK_ENDPOINT_BLOCKED")
-        return {"status": "PASS" if not issues else "FAIL", "issues": issues, **summary, "codex_ui_scraping": "NO", "codex_ui_automation": "NO"}
+        return {**summary, "status": "PASS" if not issues else "FAIL", "issues": issues, "codex_ui_scraping": "NO", "codex_ui_automation": "NO"}
