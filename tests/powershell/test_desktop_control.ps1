@@ -148,9 +148,12 @@ Assert-True ($source -match 'stage：' -and $source -match 'bridge_http_ready：
 Assert-True ($source -match 'three_in_one' -and $source -match '高思考或最高思考，并关闭联网搜索' -and $source -match '无法确认 DeepSeek 模式结构') 'deepseek_three_in_one_dynamic_copy_is_present'
 Assert-True ($source -match 'reasoning_strength_options_status' -and $source -match 'REASONING_OPTIONS_PARTIAL' -and $source -match '基础模式轴') 'deepseek_reasoning_partial_status_is_visible'
 Assert-True ($source -notmatch '智能搜素' -and $source -notmatch '搜素' -and $source -notmatch '新间') 'deepseek_ui_copy_has_no_known_typos'
-Assert-True ($source -match 'Resolve-ChromeExecutable' -and $source -match 'CHROME_OPEN' -and $source -match 'Start-Process -FilePath \(\[string\]\$open\.executable\)' -and $source -match '--new-window' -and $source -notmatch 'Start-Process \$DeepSeekWebUrl') 'deepseek_open_web_uses_chrome_only'
+Assert-True ($source -match 'Resolve-ChromeExecutable' -and $source -match 'CONTROLLED_CHROME' -and $source -match 'remote-debugging-port=9222' -and $source -match 'user_data_dir' -and $source -notmatch 'Start-Process \$DeepSeekWebUrl') 'deepseek_open_web_uses_controlled_chrome_only'
 Assert-True ($source -match 'CHROME_NOT_FOUND' -and $source -match '拒绝回退到 Firefox 或系统默认浏览器') 'deepseek_open_web_has_no_firefox_fallback'
 Assert-True ($source -match 'Chrome executable:' -and $source -match 'Chrome available:') 'deepseek_launcher_reports_chrome_diagnostics'
+Assert-True ($source -match 'Get-DeepSeekPortOwner' -and $source -match 'owner_kind' -and $source -match 'BRIDGE_PORT_OCCUPIED_BY_UNKNOWN_PROCESS' -and $source -match 'BRIDGE_PORT_OCCUPIED_BY_STALE_BRIDGE') 'deepseek_port_owner_diagnostics_and_guarded_cleanup'
+Assert-True ($source -match 'controlled_chrome_attached' -and $source -match 'composer_found' -and $source -match 'toolbar_found' -and $source -match 'DEEPSEEK_CONTROLLED_CHROME_NOT_ATTACHED') 'deepseek_controlled_chrome_health_diagnostics'
+Assert-True (($ui -join "`n") -match 'PORT_OWNER_DIAGNOSTICS=YES' -and ($ui -join "`n") -match 'DEEPSEEK_OPEN_USES_CONTROLLED_CHROME=YES') 'deepseek_controlled_chrome_selftest_flags'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
 . (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
 Assert-True (Use-DefaultNoCustomHeader 'https://api.groq.com/openai/v1') 'groq_runtime_default_header_is_no'

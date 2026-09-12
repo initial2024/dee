@@ -31,6 +31,8 @@ $RouterPidFile = Join-Path ([IO.Path]::GetTempPath()) 'xiaoyu-router-18789.pid'
 $DeepSeekRuntimeDir = Join-Path $DeepSeekBridgeRoot '.runtime'
 $DeepSeekLocalApiAddress = 'http://127.0.0.1:8791/v1'
 $DeepSeekWebUrl = 'https://chat.deepseek.com/'
+$DeepSeekChromeDebugPort = 9222
+$DeepSeekControlledChromeProfile = Join-Path $DeepSeekBridgeRoot 'deepseek-browser-poc-profile'
 $script:DeepSeekLauncherLast = $null
 $CodexModeScript = Join-Path $PSScriptRoot 'codex-mode-manager.ps1'
 $script:DeepSeekLastHealth = '未运行'
@@ -113,22 +115,25 @@ function Resolve-ChromeExecutable {
 }
 function Resolve-DeepSeekOpenCommand {
     $chrome = Resolve-ChromeExecutable
-    if ($chrome) { return [pscustomobject]@{ command_kind = 'CHROME_OPEN'; expected_path = $DeepSeekWebUrl; executable = $chrome; command_line_sanitized = 'chrome.exe --new-window <DeepSeek URL>'; file_exists = 'YES'; runtime_exists = 'YES'; bridge_required = 'NO'; worker_required = 'NO'; error_code = 'NONE'; suggested_fix = 'NONE' } }
-    return [pscustomobject]@{ command_kind = 'CHROME_OPEN'; expected_path = $DeepSeekWebUrl; executable = ''; command_line_sanitized = 'chrome.exe --new-window <DeepSeek URL>'; file_exists = 'NO'; runtime_exists = 'NO'; bridge_required = 'NO'; worker_required = 'NO'; error_code = 'CHROME_NOT_FOUND'; suggested_fix = '安装 Google Chrome，或确认 chrome.exe 位于标准安装路径。' }
+    $profile = if ($DeepSeekBridgeRoot) { Join-Path $DeepSeekBridgeRoot 'deepseek-browser-poc-profile' } else { $DeepSeekControlledChromeProfile }
+    $commandLine = 'controlled chrome --user-data-dir=<Bridge profile> --remote-debugging-port=9222 --new-window <DeepSeek URL>'
+    if ($chrome) { return [pscustomobject]@{ command_kind = 'CONTROLLED_CHROME'; expected_path = $DeepSeekWebUrl; executable = $chrome; user_data_dir = $profile; debug_port = $DeepSeekChromeDebugPort; command_line_sanitized = $commandLine; file_exists = 'YES'; runtime_exists = 'YES'; bridge_required = 'YES'; worker_required = 'NO'; error_code = 'NONE'; suggested_fix = 'NONE' } }
+    return [pscustomobject]@{ command_kind = 'CONTROLLED_CHROME'; expected_path = $DeepSeekWebUrl; executable = ''; user_data_dir = $profile; debug_port = $DeepSeekChromeDebugPort; command_line_sanitized = $commandLine; file_exists = 'NO'; runtime_exists = 'NO'; bridge_required = 'YES'; worker_required = 'NO'; error_code = 'CHROME_NOT_FOUND'; suggested_fix = '安装 Google Chrome，或确认 chrome.exe 位于标准安装路径。已拒绝回退到普通浏览器。' }
 }
 function Test-LauncherPrerequisites {
     $start = Resolve-BridgeStartCommand
     $health = Resolve-BridgeHealthCommand
-    $open = Resolve-DeepSeekOpenCommand
+    $portOwner = Get-DeepSeekPortOwner 8791
     $script:DeepSeekBridgeRoot = $start.resolved_bridge_root
     $script:DeepSeekBridgeScripts = if ($start.resolved_bridge_root) { Join-Path $start.resolved_bridge_root 'scripts' } else { $null }
     $script:DeepSeekWorkerRoot = $start.resolved_worker_root
     if ($start.resolved_bridge_root) { $script:DeepSeekRuntimeDir = Join-Path $start.resolved_bridge_root '.runtime' }
+    $open = Resolve-DeepSeekOpenCommand
     return [pscustomobject]@{
         resolved_router_root = $start.resolved_router_root; resolved_bridge_root = $start.resolved_bridge_root; resolved_worker_root = $start.resolved_worker_root
         bridge_start_command = $start; bridge_health_command = $health; deepseek_open_command = $open
         bridge_entry_exists = if ($start.file_exists) { 'YES' } else { 'NO' }; runtime_exists = if ($start.runtime_exists) { 'YES' } else { 'NO' }
-        worker_required = 'NO'; bridge_port = Get-DeepSeekPortState 8791; router_port = Get-DeepSeekPortState 18789
+        worker_required = 'NO'; bridge_port = Get-DeepSeekPortState 8791; bridge_port_owner = $portOwner; router_port = Get-DeepSeekPortState 18789
         last_error = if ($start.error_code -ne 'NONE') { $start.error_code } else { 'NONE' }
     }
 }
@@ -144,10 +149,14 @@ function Format-DeepSeekLauncherDiagnostic([object]$Diagnostic) {
         ('Bridge health URL: {0}' -f $Diagnostic.bridge_health_command.expected_path),
         ('Chrome executable: {0}' -f $Diagnostic.deepseek_open_command.executable),
         ('Chrome available: {0}' -f $Diagnostic.deepseek_open_command.runtime_exists),
+        ('Controlled Chrome profile: {0}' -f $Diagnostic.deepseek_open_command.user_data_dir),
+        ('Controlled Chrome debug port: {0}' -f $Diagnostic.deepseek_open_command.debug_port),
         ('Worker required: {0}' -f $Diagnostic.worker_required),
         ('Bridge entry exists: {0}' -f $Diagnostic.bridge_entry_exists),
         ('Node/npm available: {0}' -f $Diagnostic.runtime_exists),
         ('8791 status: {0}' -f $Diagnostic.bridge_port),
+        ('8791 owner kind/category: {0}/{1}' -f $Diagnostic.bridge_port_owner.owner_kind,$Diagnostic.bridge_port_owner.process_category),
+        ('8791 owner PID/name: {0}/{1}' -f $Diagnostic.bridge_port_owner.pid,$Diagnostic.bridge_port_owner.process_name),
         ('18789 status: {0}' -f $Diagnostic.router_port),
         ('Last launcher error: {0}' -f $Diagnostic.last_error)
     ) -join "`r`n"
@@ -186,11 +195,20 @@ function Get-UiErrorExplanation([string]$Code) {
         'BRIDGE_PROCESS_EXITED_EARLY' { return 'Bridge 进程在健康检查完成前退出；请查看脱敏 stdout/stderr 尾部。' }
         'BRIDGE_PORT_NOT_LISTENING' { return 'Bridge 启动后 8791 未监听；请检查启动入口、端口配置和依赖。' }
         'BRIDGE_HTTP_UNREACHABLE' { return '8791 已有监听或启动命令返回，但 /health HTTP 检查失败；未继续执行模式探测。' }
+        'BRIDGE_PORT_OCCUPIED_BY_STALE_BRIDGE' { return '8791 被已识别的旧 Bridge 进程占用；请点击“清理陈旧 Bridge”后再启动。' }
+        'BRIDGE_PORT_OCCUPIED_BY_UNKNOWN_PROCESS' { return '8791 被未知进程占用；未自动终止，请先确认 PID 和命令行。' }
+        'BRIDGE_PORT_OCCUPIED_BY_NON_BRIDGE' { return '8791 被非 Bridge 进程占用；已停止启动，避免误杀其他服务。' }
+        'BRIDGE_START_CWD_INVALID' { return 'Bridge 启动工作目录无效；启动器必须使用已解析的 Bridge 根目录。' }
+        'BRIDGE_START_COMMAND_FAILED' { return 'Bridge 启动命令执行失败；请查看脱敏 stdout/stderr 尾部。' }
         'BRIDGE_NOT_RUNNING' { return 'Bridge 未运行；请先启动本机 127.0.0.1:8791 Bridge。' }
         'BRIDGE_MODE_PROBE_FAILED' { return 'Bridge /mode-probe 只读检查失败；未调用 Router、未发送 prompt。' }
         'ROUTER_CLI_RUNTIME_NOT_FOUND' { return '未找到可用的 Router Python 运行时；已尝试项目环境和 Windows Python Launcher。' }
         'CHROME_NOT_FOUND' { return '未找到 Google Chrome；已拒绝回退到 Firefox 或系统默认浏览器。请安装 Chrome 或检查 chrome.exe 路径。' }
         'CHROME_OPEN_FAILED' { return '已找到 Chrome，但启动新窗口失败；请检查 Chrome 安装或进程状态。' }
+        'DEEPSEEK_CONTROLLED_CHROME_NOT_ATTACHED' { return '受控 Chrome 未通过本地调试端口连接到 Bridge；未使用普通 Chrome 代替。' }
+        'DEEPSEEK_OPENED_IN_DEFAULT_BROWSER_NOT_CONTROLLED' { return '检测到普通 Chrome 页面，但不是 Bridge 管理的受控 Chrome。' }
+        'DEEPSEEK_COMPOSER_NOT_FOUND' { return '受控 Chrome 已连接，但未找到 DeepSeek 输入框。' }
+        'DEEPSEEK_TOOLBAR_NOT_FOUND' { return '受控 Chrome 已连接，但未找到输入工具栏。' }
         'ACTION_ERROR_SANITIZED_UNKNOWN' { return '本地操作发生未分类错误；详情已脱敏，请查看高级诊断字段。' }
         'WORKER_SCRIPT_NOT_REQUIRED_FOR_DIRECT_BRIDGE' { return '当前三合一探测走 Bridge 8791，旧 Worker 不是必需项。' }
         'LEGACY_WORKER_SCRIPT_NOT_FOUND' { return '旧 Worker 启动脚本不存在；它不阻塞 Bridge-only 模式探测。' }
@@ -209,7 +227,8 @@ function Get-UiErrorExplanation([string]$Code) {
 function Get-UiActionErrorCode([string]$Detail) {
     if ($Detail -match '(ROUTER_RUNTIME_NOT_FOUND|ROUTER_CLI_RUNTIME_NOT_FOUND)') { return 'ROUTER_CLI_RUNTIME_NOT_FOUND' }
     if ($Detail -match '(CHROME_NOT_FOUND|CHROME_RUNTIME_NOT_FOUND|CHROME_OPEN_FAILED)') { return $Matches[1] -replace 'CHROME_RUNTIME_NOT_FOUND','CHROME_NOT_FOUND' }
-    if ($Detail -match '(BRIDGE_STARTED_BUT_HTTP_UNREACHABLE|BRIDGE_PROCESS_EXITED_EARLY|BRIDGE_PORT_NOT_LISTENING|BRIDGE_HTTP_UNREACHABLE|BRIDGE_NOT_RUNNING|BRIDGE_MODE_PROBE_FAILED)') { return $Matches[1] }
+    if ($Detail -match '(DEEPSEEK_CONTROLLED_CHROME_NOT_ATTACHED|DEEPSEEK_OPENED_IN_DEFAULT_BROWSER_NOT_CONTROLLED|DEEPSEEK_COMPOSER_NOT_FOUND|DEEPSEEK_TOOLBAR_NOT_FOUND)') { return $Matches[1] }
+    if ($Detail -match '(BRIDGE_PORT_OCCUPIED_BY_STALE_BRIDGE|BRIDGE_PORT_OCCUPIED_BY_UNKNOWN_PROCESS|BRIDGE_PORT_OCCUPIED_BY_NON_BRIDGE|BRIDGE_START_CWD_INVALID|BRIDGE_START_COMMAND_FAILED|BRIDGE_STARTED_BUT_HTTP_UNREACHABLE|BRIDGE_PROCESS_EXITED_EARLY|BRIDGE_PORT_NOT_LISTENING|BRIDGE_HTTP_UNREACHABLE|BRIDGE_NOT_RUNNING|BRIDGE_MODE_PROBE_FAILED)') { return $Matches[1] }
     if ($Detail -match '(ROUTER_NOT_LISTENING|ROUTER_NOT_RUNNING|actively refused|connection refused)') { return 'ROUTER_NOT_LISTENING' }
     if ($Detail -match '(LOCAL_LIGHT_UNAVAILABLE|LOCAL_DIRECT_BACKEND_ERROR|LOCAL_BACKEND_UNAVAILABLE)') { return 'LOCAL_LIGHT_UNAVAILABLE' }
     if ($Detail -match '(CODEX_CONFIG_NOT_FOUND|OFFICIAL_PROFILE_NOT_CAPTURED|CODEX_CONFIG_TOML_PARSE_FAILED|CODEX_CONFIG_TOML_INVALID|CODEX_CONFIG_READ_PERMISSION_DENIED|CODEX_CONFIG_CLI_ENTRYPOINT_FAILED|CODEX_CONFIG_CLI_JSON_PARSE_FAILED|CODEX_CONFIG_PYTHON_IMPORT_FAILED|CODEX_CONFIG_WORKDIR_INVALID|NON_LOOPBACK_ENDPOINT_BLOCKED)') { return $Matches[1] }
@@ -574,6 +593,48 @@ function Get-DeepSeekPortState([int]$Port) {
     if (@($addresses | Where-Object { $_ -notin @('127.0.0.1','::1') }).Count -gt 0) { return ('异常绑定：' + ($addresses -join ', ')) }
     return '127.0.0.1 本机监听'
 }
+function Get-DeepSeekPortOwner([int]$Port) {
+    $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($connections.Count -eq 0) {
+        return [pscustomobject]@{ port = $Port; port_listening = 'NO'; pid = ''; process_name = ''; command_line_sanitized = ''; executable_path_sanitized = ''; cwd_sanitized = ''; owner_kind = 'none'; process_category = 'none' }
+    }
+    $rows = foreach ($connection in $connections) {
+        $ownerPid = [int]$connection.OwningProcess
+        $processInfo = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $ownerPid) -ErrorAction SilentlyContinue
+        $name = if ($processInfo -and $processInfo.Name) { [string]$processInfo.Name } else { '' }
+        $commandLine = if ($processInfo -and $processInfo.CommandLine) { [string]$processInfo.CommandLine } else { '' }
+        $executable = if ($processInfo -and $processInfo.ExecutablePath) { [string]$processInfo.ExecutablePath } else { '' }
+        $ownerKind = 'unknown'; $processCategory = 'unknown'
+        if (-not $processInfo) { $ownerKind = 'unknown' }
+        elseif ($Port -eq 8791 -and $DeepSeekBridgeRoot -and ($commandLine -like ('*' + $DeepSeekBridgeRoot + '*') -or ($script:DeepSeekLauncherRuntime -and [string]$script:DeepSeekLauncherRuntime.process_id -eq [string]$ownerPid))) {
+            $ownerKind = if ($script:DeepSeekLauncherRuntime -and [string]$script:DeepSeekLauncherRuntime.process_id -eq [string]$ownerPid) { 'bridge_current' } else { 'bridge_stale' }; $processCategory = 'bridge'
+        }
+        elseif ($name -match '^(chrome|msedge)\.exe$' -and $commandLine -match '--remote-debugging-port') { $ownerKind = 'chrome_devtools'; $processCategory = 'chrome_devtools' }
+        elseif ($Port -eq 18789 -and $name -match 'python|node|router|codex') { $ownerKind = 'router'; $processCategory = 'router' }
+        elseif ($processInfo) { $ownerKind = 'unknown'; $processCategory = 'non_bridge' }
+        [pscustomobject]@{
+            port = $Port; port_listening = 'YES'; pid = [string]$ownerPid; process_name = $name
+            command_line_sanitized = Redact-Text $commandLine
+            executable_path_sanitized = Redact-Text $executable
+            cwd_sanitized = ''
+            owner_kind = $ownerKind; process_category = $processCategory
+        }
+    }
+    $first = @($rows)[0]
+    if (@($rows).Count -gt 1) { $first | Add-Member -NotePropertyName all_owners -NotePropertyValue @($rows) -Force }
+    return $first
+}
+function Clear-DeepSeekStaleBridge {
+    $owner = Get-DeepSeekPortOwner 8791
+    if ($owner.owner_kind -ne 'bridge_stale') { return [pscustomobject]@{ error_code = 'BRIDGE_PORT_OWNER_NOT_STALE'; owner = $owner } }
+    try {
+        Stop-Process -Id ([int]$owner.pid) -Force -ErrorAction Stop
+        Start-Sleep -Milliseconds 300
+        return [pscustomobject]@{ error_code = 'BRIDGE_STALE_CLEARED'; owner = $owner; port_owner_after = Get-DeepSeekPortOwner 8791 }
+    } catch {
+        return [pscustomobject]@{ error_code = 'BRIDGE_STALE_CLEANUP_FAILED'; owner = $owner }
+    }
+}
 function Wait-DeepSeekLoopbackPort([int]$Port,[int]$TimeoutSeconds = 8) {
     for ($attempt = 0; $attempt -lt ($TimeoutSeconds * 4); $attempt++) {
         if ((Get-DeepSeekPortState $Port) -eq '127.0.0.1 本机监听') { return $true }
@@ -583,13 +644,18 @@ function Wait-DeepSeekLoopbackPort([int]$Port,[int]$TimeoutSeconds = 8) {
 }
 function Get-DeepSeekFixtureKey { return ('sk-' + ('a' * 43)) }
 function Get-DeepSeekBridgeSnapshot {
-    $snapshot = [ordered]@{ bridge_port = Get-DeepSeekPortState 8791; worker_port = Get-DeepSeekPortState 8792; fixture_port = Get-DeepSeekPortState 8793; bridge = '未运行'; worker = '未运行'; chrome = '未知'; page = '未知'; busy = '未知' }
+    $owner = Get-DeepSeekPortOwner 8791
+    $snapshot = [ordered]@{ bridge_port = Get-DeepSeekPortState 8791; bridge_port_owner = $owner.owner_kind; worker_port = Get-DeepSeekPortState 8792; fixture_port = Get-DeepSeekPortState 8793; bridge = '未运行'; worker = '未运行'; chrome = '未知'; chrome_kind = 'unknown'; controlled_attached = 'NO'; page = '未知'; composer_found = 'NO'; toolbar_found = 'NO'; busy = '未知' }
     if ($snapshot.bridge_port -ne '未监听') {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8791/health' -TimeoutSec 3
             $health = $response.Content | ConvertFrom-Json
             $snapshot.bridge = if ($health.ok -eq $true) { 'READY' } else { '响应异常' }
             $snapshot.chrome = if ($health.browser.connected -eq $true) { '已连接' } else { '未连接' }
+            $snapshot.chrome_kind = if ($health.browser.chromeKind) { [string]$health.browser.chromeKind } else { 'unknown' }
+            $snapshot.controlled_attached = if ($health.browser.controlledAttached -eq $true) { 'YES' } else { 'NO' }
+            $snapshot.composer_found = if ($health.browser.composerFound -eq $true) { 'YES' } else { 'NO' }
+            $snapshot.toolbar_found = if ($health.browser.toolbarFound -eq $true) { 'YES' } else { 'NO' }
             $snapshot.page = if ($health.deepseek.loginRequired -eq $true) { 'LOGIN_REQUIRED' } elseif ($health.deepseek.inputReady -eq $true) { '输入框可用' } elseif ($health.deepseek.pageReady -eq $true) { '页面已打开，输入框不可用' } else { 'PAGE_NOT_READY' }
             $snapshot.busy = if ($health.busy -eq $true) { 'BUSY' } else { '空闲/未知' }
         } catch { $snapshot.bridge = 'BRIDGE_HTTP_UNREACHABLE'; $snapshot.chrome = '未知'; $snapshot.page = '未知'; $snapshot.busy = '未知' }
@@ -656,12 +722,20 @@ function Wait-DeepSeekBridgeHttpReady([object]$Process,[int]$TimeoutSeconds=10) 
     $last | Add-Member -NotePropertyName process_exited_early -NotePropertyValue $false -Force
     return $last
 }
+function Get-DeepSeekBridgeHealthData {
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8791/health' -TimeoutSec 3
+        if ($response.StatusCode -ne 200) { return $null }
+        return ($response.Content | ConvertFrom-Json)
+    } catch { return $null }
+}
 function New-DeepSeekLauncherResult([string]$Action,[int]$ExitCode,[string]$ErrorType,[object]$Diagnostic=$null,[string]$ExpectedPath='',[string]$CommandKind='') {
     if (-not $Diagnostic) { $Diagnostic = Test-LauncherPrerequisites }
     $start = $Diagnostic.bridge_start_command
     $commandSpec = if ($Action -eq 'open-deepseek-web') { $Diagnostic.deepseek_open_command } else { $start }
     $evidence = Get-DeepSeekLauncherRuntimeEvidence
     $stage = switch ($Action) { 'start-bridge' { if($ErrorType -eq 'PASS' -or $ErrorType -eq 'ALREADY_RUNNING'){'wait_http_ready'}else{'start_process'} }; 'health-check' {'wait_http_ready'}; 'start-worker' {'resolve_paths'}; default {'resolve_paths'} }
+    $health = Get-DeepSeekBridgeHealthData
     return [pscustomobject]@{
         action = $Action; exit_code = $ExitCode; error_type = $ErrorType; error_code = $ErrorType
         expected_path = if ($ExpectedPath) { $ExpectedPath } else { $commandSpec.expected_path }
@@ -672,6 +746,10 @@ function New-DeepSeekLauncherResult([string]$Action,[int]$ExitCode,[string]$Erro
         bridge_command_sanitized = if ($start.command_line_sanitized) { $start.command_line_sanitized } else { 'not available' }; stage = $stage
         bridge_process_id = $evidence.process_id; bridge_exit_code = if($evidence.exit_code){$evidence.exit_code}else{[string]$ExitCode}; bridge_stdout_tail = $evidence.stdout_tail; bridge_stderr_tail = $evidence.stderr_tail
         bridge_port_listening = $evidence.port_listening; bridge_http_ready = $evidence.http_ready; last_health_endpoint = $evidence.last_health_endpoint; last_health_error = $evidence.last_health_error
+        port_owner_kind = $Diagnostic.bridge_port_owner.owner_kind; port_owner_category = $Diagnostic.bridge_port_owner.process_category; port_owner_pid = $Diagnostic.bridge_port_owner.pid; port_owner_process_name = $Diagnostic.bridge_port_owner.process_name; port_owner_command_line_sanitized = $Diagnostic.bridge_port_owner.command_line_sanitized
+        chrome_kind = if ($health -and $health.browser) { [string]$health.browser.chromeKind } else { 'unknown' }; controlled_chrome_attached = if ($health -and $health.browser) { [bool]$health.browser.controlledAttached } else { $false }
+        chrome_debug_port = if ($health -and $health.browser) { $health.browser.debugPort } else { $commandSpec.debug_port }; chrome_user_data_dir_sanitized = if ($health -and $health.browser -and $health.browser.userDataDir) { '[LOCAL_PROFILE]' } else { '[LOCAL_PROFILE]' }
+        active_page_url_kind = if ($health -and $health.browser) { [string]$health.browser.activePageUrlKind } else { 'unknown' }; composer_found = if ($health -and $health.browser) { [bool]$health.browser.composerFound } else { $false }; toolbar_found = if ($health -and $health.browser) { [bool]$health.browser.toolbarFound } else { $false }
         bridge_required = if ($Action -eq 'open-deepseek-web') { 'NO' } else { 'YES' }; worker_required = if ($Action -eq 'open-deepseek-web') { 'NO' } else { $Diagnostic.worker_required }; router_required = 'NO'; router_status = Get-DeepSeekPortState 18789; prompt_sent = $false; model_call_sent = $false
     }
 }
@@ -679,7 +757,19 @@ function Start-DeepSeekBridgeProcess {
     $diagnostic = Test-LauncherPrerequisites
     $script:DeepSeekLauncherLast = $diagnostic
     $start = $diagnostic.bridge_start_command
-    if ($diagnostic.bridge_port -eq '127.0.0.1 本机监听') {
+    $owner = $diagnostic.bridge_port_owner
+    if ($owner.owner_kind -eq 'unknown' -or $owner.owner_kind -eq 'chrome_devtools') {
+        $existingHealth = Get-DeepSeekBridgeHealthData
+        if ($existingHealth -and $existingHealth.service -eq 'deepseek-web-browser-bridge') {
+            $owner.owner_kind = 'bridge_current'
+        } elseif ($owner.owner_kind -eq 'unknown' -and $owner.process_category -ne 'non_bridge') {
+            return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_PORT_OCCUPIED_BY_UNKNOWN_PROCESS' $diagnostic)
+        } else {
+            return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_PORT_OCCUPIED_BY_NON_BRIDGE' $diagnostic)
+        }
+    }
+    if ($owner.owner_kind -eq 'bridge_stale') { return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_PORT_OCCUPIED_BY_STALE_BRIDGE' $diagnostic) }
+    if ($owner.owner_kind -eq 'bridge_current' -or $diagnostic.bridge_port -eq '127.0.0.1 本机监听') {
         $ready = Test-DeepSeekBridgeHttpReady
         $script:DeepSeekLauncherRuntime = [pscustomobject]@{ process_id = ''; process = $null; stdout_path = ''; stderr_path = ''; http_ready = $ready.http_ready; last_health_error = $ready.error_code }
         if ($ready.http_ready) { return (New-DeepSeekLauncherResult 'start-bridge' 0 'ALREADY_RUNNING' $diagnostic) }
@@ -743,18 +833,40 @@ function Invoke-DeepSeekLegacyWorker {
         return (New-DeepSeekLauncherResult 'start-worker' 0 'LEGACY_WORKER_STARTED_OPTIONAL' $diagnostic $entry 'LEGACY_OPTIONAL')
     } catch { return (New-DeepSeekLauncherResult 'start-worker' 1 'WORKER_START_FAILED' $diagnostic $entry 'LEGACY_OPTIONAL') }
 }
-function Invoke-DeepSeekLocalScript([ValidateSet('start-bridge','start-worker','health-check','smoke','stop','open-deepseek-web')][string]$Action) {
+function Open-DeepSeekControlledChrome {
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    if ($diagnostic.deepseek_open_command.error_code -ne 'NONE') { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 ([string]$diagnostic.deepseek_open_command.error_code) $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME') }
+    $ready = Test-DeepSeekBridgeHttpReady
+    if (-not $ready.http_ready) {
+        $started = Start-DeepSeekBridgeProcess
+        if ($started.error_type -notin @('PASS','ALREADY_RUNNING')) {
+            return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 ([string]$started.error_code) $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME')
+        }
+    }
+    $health = Get-DeepSeekBridgeHealthData
+    if (-not $health -or -not $health.browser -or $health.browser.chromeKind -ne 'controlled' -or $health.browser.controlledAttached -ne $true) {
+        return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'DEEPSEEK_CONTROLLED_CHROME_NOT_ATTACHED' $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME')
+    }
+    if ($health.browser.activePageUrlKind -ne 'deepseek_chat') { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'DEEPSEEK_OPENED_IN_DEFAULT_BROWSER_NOT_CONTROLLED' $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME') }
+    if ($health.browser.composerFound -ne $true) { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'DEEPSEEK_COMPOSER_NOT_FOUND' $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME') }
+    if ($health.browser.toolbarFound -ne $true) { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'DEEPSEEK_TOOLBAR_NOT_FOUND' $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME') }
+    return (New-DeepSeekLauncherResult 'open-deepseek-web' 0 'OPENED_CONTROLLED_CHROME' $diagnostic $DeepSeekWebUrl 'CONTROLLED_CHROME')
+}
+function Invoke-DeepSeekLocalScript([ValidateSet('start-bridge','start-worker','health-check','smoke','stop','clear-stale-bridge','open-deepseek-web')][string]$Action) {
     switch ($Action) {
         'start-bridge' { return (Start-DeepSeekBridgeProcess) }
         'start-worker' { return (Invoke-DeepSeekLegacyWorker) }
         'health-check' { return (Invoke-DeepSeekBridgeHealth) }
         'stop' { return (Stop-DeepSeekBridgeProcess) }
-        'open-deepseek-web' {
-            $diagnostic = Test-LauncherPrerequisites; $script:DeepSeekLauncherLast = $diagnostic; $open = $diagnostic.deepseek_open_command
-            if ($open.error_code -ne 'NONE' -or [string]::IsNullOrWhiteSpace([string]$open.executable)) { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 ([string]$open.error_code) $diagnostic $DeepSeekWebUrl 'CHROME_OPEN') }
-            try { Start-Process -FilePath ([string]$open.executable) -ArgumentList @('--new-window',$DeepSeekWebUrl); return (New-DeepSeekLauncherResult 'open-deepseek-web' 0 'OPENED' $diagnostic $DeepSeekWebUrl 'CHROME_OPEN') }
-            catch { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'CHROME_OPEN_FAILED' $diagnostic $DeepSeekWebUrl 'CHROME_OPEN') }
+        'clear-stale-bridge' {
+            $diagnostic = Test-LauncherPrerequisites
+            $cleanup = Clear-DeepSeekStaleBridge
+            $script:DeepSeekLauncherLast = Test-LauncherPrerequisites
+            $code = [string]$cleanup.error_code
+            return (New-DeepSeekLauncherResult 'clear-stale-bridge' $(if($code -eq 'BRIDGE_STALE_CLEARED'){0}else{1}) $code $diagnostic)
         }
+        'open-deepseek-web' { return (Open-DeepSeekControlledChrome) }
         'smoke' { return (New-DeepSeekLauncherResult 'smoke' 1 'SMOKE_REQUIRES_EXPLICIT_DIRECT_BRIDGE_FLOW' (Test-LauncherPrerequisites)) }
     }
 }
@@ -1339,7 +1451,7 @@ function Refresh-DeepSeekPanel {
     $snapshot = Get-DeepSeekBridgeSnapshot
     $diagnostic = Test-LauncherPrerequisites
     $evidence = Get-DeepSeekLauncherRuntimeEvidence
-    $deepSeekStatus.Text = (("模式：本地 Bridge 直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`nBridge 进程运行：{7}`r`nBridge 端口 8791：{8}`r`nBridge HTTP ready：{9}`r`n最近健康端点：{10}`r`n最近健康错误：{11}`r`nWorker required：NO`r`nRouter required for Bridge-only action：NO`r`n`r`n端口 8792：{12}`r`n端口 8793：{13}`r`n`r`n{14}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。Bridge-only 三合一探测不要求 Worker 或 Router。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$evidence.process_running,$evidence.port_listening,$evidence.http_ready,$evidence.last_health_endpoint,$evidence.last_health_error,$snapshot.worker_port,$snapshot.fixture_port,(Format-DeepSeekLauncherDiagnostic $diagnostic)))
+    $deepSeekStatus.Text = (("模式：本地 Bridge 直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`nBridge 进程运行：{7}`r`nBridge 端口 8791：{8}`r`n8791 owner kind：{9}`r`nBridge HTTP ready：{10}`r`nChrome kind：{11}`r`n受控 Chrome attached：{12}`r`nComposer：{13}`r`nToolbar：{14}`r`n最近健康端点：{15}`r`n最近健康错误：{16}`r`nWorker required：NO`r`nRouter required for Bridge-only action：NO`r`n`r`n端口 8792：{17}`r`n端口 8793：{18}`r`n`r`n{19}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。Bridge-only 三合一探测不要求 Worker 或 Router。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$evidence.process_running,$evidence.port_listening,$snapshot.bridge_port_owner,$evidence.http_ready,$snapshot.chrome_kind,$snapshot.controlled_attached,$snapshot.composer_found,$snapshot.toolbar_found,$evidence.last_health_endpoint,$evidence.last_health_error,$snapshot.worker_port,$snapshot.fixture_port,(Format-DeepSeekLauncherDiagnostic $diagnostic)))
     Refresh-DeepSeekModePanel
 }
 function Invoke-DeepSeekPanelAction([string]$Action) {
@@ -1360,10 +1472,14 @@ function Invoke-DeepSeekPanelAction([string]$Action) {
         ("file_exists：{0}；runtime_exists：{1}" -f $result.file_exists,$result.runtime_exists),
         ("bridge_process_id：{0}；bridge_exit_code：{1}" -f $result.bridge_process_id,$result.bridge_exit_code),
         ("bridge_port_listening：{0}；bridge_http_ready：{1}" -f $result.bridge_port_listening,$result.bridge_http_ready),
+        ("port_owner_kind：{0}；port_owner_pid/name：{1}/{2}" -f $result.port_owner_kind,$result.port_owner_pid,$result.port_owner_process_name),
+        ("chrome_kind：{0}；controlled_chrome_attached：{1}" -f $result.chrome_kind,$result.controlled_chrome_attached),
+        ("chrome_debug_port：{0}；chrome_user_data_dir：{1}" -f $result.chrome_debug_port,$result.chrome_user_data_dir_sanitized),
+        ("active_page_url_kind：{0}；composer_found：{1}；toolbar_found：{2}" -f $result.active_page_url_kind,$result.composer_found,$result.toolbar_found),
         ("last_health_endpoint：{0}；last_health_error：{1}" -f $result.last_health_endpoint,$result.last_health_error),
         ("router_required：{0}；router_status：{1}" -f $result.router_required,$result.router_status),
         ("suggested_fix：{0}" -f $result.suggested_fix),
-        'bridge_required=YES；worker_required=NO；prompt_sent=false；model_call_sent=false',
+        ("bridge_required={0}；worker_required={1}；prompt_sent=false；model_call_sent=false" -f $result.bridge_required,$result.worker_required),
         '不会显示或保存提示词、响应、密钥、Cookie 或 Token。'
     ) -join "`r`n"
     [System.Windows.Forms.MessageBox]::Show((Redact-Text $details),'DeepSeek 本地桥接')
@@ -1856,6 +1972,7 @@ Add-DeepSeekButton '启动 Bridge' { Invoke-DeepSeekPanelAction 'start-bridge' }
 Add-DeepSeekButton '启动 Worker（旧兼容，可选）' { Invoke-DeepSeekPanelAction 'start-worker' } 205
 Add-DeepSeekButton '健康检查（无 prompt）' { Invoke-DeepSeekPanelAction 'health-check' } 180
 Add-DeepSeekButton '打开 DeepSeek Web' { Invoke-DeepSeekPanelAction 'open-deepseek-web' } 175
+Add-DeepSeekButton '清理陈旧 Bridge' { Invoke-DeepSeekPanelAction 'clear-stale-bridge' } 170
 Add-DeepSeekButton '检查启动器路径' { Show-DeepSeekLauncherDiagnostic } 170
 Add-DeepSeekButton '复制启动器诊断' { Copy-DeepSeekLauncherDiagnostic } 170
 Add-DeepSeekButton '打开 Bridge 项目目录' { Open-DeepSeekBridgeDirectory } 190
@@ -2027,7 +2144,13 @@ if ($SelfTest) {
     Write-Output ('BRIDGE_LAUNCHER_WORKER_REQUIRED=' + $launcherDiagnostic.worker_required)
     Write-Output ('CHROME_OPEN_COMMAND=' + $launcherDiagnostic.deepseek_open_command.command_kind)
     Write-Output ('CHROME_RUNTIME_DISCOVERY=' + $launcherDiagnostic.deepseek_open_command.runtime_exists)
-    Write-Output 'DEEPSEEK_OPEN_USES_CHROME=YES'
+    Write-Output ('CONTROLLED_CHROME_PROFILE=' + $launcherDiagnostic.deepseek_open_command.user_data_dir)
+    Write-Output ('CONTROLLED_CHROME_DEBUG_PORT=' + $launcherDiagnostic.deepseek_open_command.debug_port)
+    Write-Output ('BRIDGE_PORT_OWNER_KIND=' + $launcherDiagnostic.bridge_port_owner.owner_kind)
+    Write-Output 'PORT_OWNER_DIAGNOSTICS=YES'
+    Write-Output 'UNKNOWN_PORT_OWNER_SAFE_STOP=YES'
+    Write-Output 'STALE_BRIDGE_CLEANUP_GUARDED=YES'
+    Write-Output 'DEEPSEEK_OPEN_USES_CONTROLLED_CHROME=YES'
     Write-Output 'BRIDGE_ONLY_HEALTH_NO_WORKER=YES'
     Write-Output 'THREE_IN_ONE_PROBE_NO_WORKER_REQUIRED=YES'
     Write-Output 'BRIDGE_HTTP_READY_GATE=YES'
