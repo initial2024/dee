@@ -92,10 +92,34 @@ LEGACY_PROFILE_MAP: dict[str, DeepSeekCapabilityProfile] = {
     "file_extract": DeepSeekCapabilityProfile("file_extract", base_model_family="pro", reasoning_strength="high", search_mode="off", vision_mode="off", file_mode="requires_attachment", mode_switch_strategy="legacy_buttons"),
 }
 
+# The new UI has no quick/expert base-mode axis.  Keep the old public aliases,
+# but normalize them to capability-first profiles whenever the probe reports
+# the three-in-one generation.
+THREE_IN_ONE_PROFILE_MAP: dict[str, tuple[str, ReasoningStrength, SearchMode]] = {
+    "quick_plain": ("low_reasoning", "low", "off"),
+    "quick_thinking": ("medium_reasoning", "medium", "off"),
+    "expert_thinking": ("high_reasoning", "high", "off"),
+    "expert_max_review": ("max_reasoning_review", "max", "off"),
+    "quick_search": ("medium_search", "medium", "on"),
+    "expert_thinking_search": ("high_search", "high", "on"),
+}
+
 
 def capability_profile(profile_id: str, *, ui_generation: UiGeneration = "unknown", probe: dict[str, Any] | None = None) -> DeepSeekCapabilityProfile:
     """Return a stable capability profile for a legacy alias or new profile id."""
     base = LEGACY_PROFILE_MAP.get(profile_id, DeepSeekCapabilityProfile(profile_id))
+    if ui_generation == "three_in_one" and profile_id in THREE_IN_ONE_PROFILE_MAP:
+        canonical, strength, search = THREE_IN_ONE_PROFILE_MAP[profile_id]
+        base = DeepSeekCapabilityProfile(
+            canonical,
+            ui_generation="three_in_one",
+            base_model_family="web_default",
+            reasoning_strength=strength,
+            search_mode=search,
+            vision_mode="off",
+            file_mode="off",
+            mode_switch_strategy="unified_menu",
+        )
     if not isinstance(probe, dict):
         return DeepSeekCapabilityProfile(**{**base.as_dict(), "ui_generation": ui_generation if ui_generation != "unknown" else base.ui_generation})
     values = base.as_dict()
@@ -186,21 +210,58 @@ def probe_deepseek_modes(*, health_url: str = DEEPSEEK_HEALTH, probe_url: str = 
         result[field] = bool(payload.get(field, controls[name]["status"] == "AVAILABLE" and controls[name]["controllable"]))
     for name in ("current_base_mode", "current_thinking", "current_search", "current_modality", "ui_changed", "login_required", "captcha_required"):
         result[name] = payload.get(name)
-    # New three-in-one metadata is additive.  Old bridges remain readable and
-    # are normalized to an explicit unknown value instead of being guessed.
+    # New three-in-one metadata is additive.  Old bridges remain readable; when
+    # thinking and search are both visible without quick/expert controls, the
+    # shape itself is sufficient evidence for the new generation.
     for name, default in (
         ("ui_generation", "unknown"), ("three_in_one_available", False),
         ("legacy_buttons_available", bool(result.get("quick_available") or result.get("expert_available"))),
         ("profile_menu_available", False), ("reasoning_strength_available", bool(result.get("thinking_available"))),
         ("reasoning_strength_options", []), ("current_reasoning_strength", "unknown"),
+        ("reasoning_strength_options_status", "unknown"), ("reasoning_strength_warning", None),
         ("search_combo_supported", "unknown"), ("vision_available", False),
         ("file_upload_available", False), ("current_profile_label", "unknown"),
+        ("base_mode_available", bool(result.get("quick_available") or result.get("expert_available"))),
+        ("base_mode_required", True), ("base_mode_axis", "available"),
+        ("base_mode_status", "available"),
     ):
         result[name] = payload.get(name, default)
+    inferred_three_in_one = bool(
+        (result.get("thinking_available") and result.get("search_available") and not result.get("legacy_buttons_available"))
+        or result.get("three_in_one_available")
+        or result.get("profile_menu_available")
+    )
+    if inferred_three_in_one:
+        result["ui_generation"] = "three_in_one"
+        result["three_in_one_available"] = True
+        result["legacy_buttons_available"] = False
+        result["base_mode_available"] = False
+        result["base_mode_required"] = False
+        result["base_mode_axis"] = "absent"
+        result["base_mode_status"] = "not_applicable_for_three_in_one"
     if result.get("ui_generation") not in {"legacy", "three_in_one", "unknown"}:
         result["ui_generation"] = "unknown"
-    if not result["reasoning_strength_options"] and result.get("thinking_available"):
-        result["reasoning_strength_options"] = ["off", "low", "medium", "high"]
+    current_strength = str(result.get("current_reasoning_strength") or "unknown")
+    if current_strength == "unknown" and result.get("current_thinking") is True:
+        current_strength = "medium"
+        result["current_reasoning_strength"] = current_strength
+    options = result.get("reasoning_strength_options")
+    if not isinstance(options, list):
+        options = []
+        result["reasoning_strength_options"] = options
+    if options:
+        result["reasoning_strength_options_status"] = "complete"
+        result["reasoning_strength_warning"] = None
+    elif current_strength != "unknown" and result.get("reasoning_strength_available"):
+        result["reasoning_strength_options_status"] = "partial"
+        result["reasoning_strength_warning"] = "REASONING_OPTIONS_PARTIAL"
+    if result.get("ui_generation") == "three_in_one":
+        result["reasoning_strength_available"] = bool(result.get("thinking_available") or result.get("reasoning_strength_available"))
+        if result.get("current_profile_label") in {None, "", "unknown"}:
+            result["current_profile_label"] = f"{current_strength}/{('search' if result.get('current_search') else 'no-search')}"
+    if result.get("ui_generation") == "legacy":
+        result["base_mode_axis"] = "available"
+        result["base_mode_required"] = True
     result["capability_profile"] = capability_profile(
         str(result.get("current_profile_label") or "web_default"),
         ui_generation=result["ui_generation"],
@@ -226,8 +287,9 @@ def _combo_supported(availability: dict[str, Any] | None) -> bool | None:
 
 
 def _profile_available(profile: str, availability: dict[str, Any] | None, has_image: bool, has_file: bool) -> tuple[bool, str | None]:
-    checks: list[tuple[str, str]] = [("quick", "UI_CHANGED")]
-    if profile.startswith("expert") or profile in {"vision_expert", "vision_expert_thinking", "file_extract"}: checks = [("expert", "DEEPSEEK_EXPERT_MODE_UNAVAILABLE")]
+    three_in_one = isinstance(availability, dict) and availability.get("ui_generation") == "three_in_one"
+    checks: list[tuple[str, str]] = [] if three_in_one else [("quick", "UI_CHANGED")]
+    if not three_in_one and (profile.startswith("expert") or profile in {"vision_expert", "vision_expert_thinking", "file_extract"}): checks = [("expert", "DEEPSEEK_EXPERT_MODE_UNAVAILABLE")]
     if "thinking" in profile or profile == "expert_max_review": checks.append(("thinking", "DEEPSEEK_THINKING_UNAVAILABLE"))
     if "search" in profile: checks.append(("search", "DEEPSEEK_SEARCH_UNAVAILABLE"))
     if profile.startswith("vision"):
@@ -320,13 +382,13 @@ def select_deepseek_mode(task_text: str, *, codex_mode: str = "CUSTOM_DEEPSEEK_T
         reason = fallback_reason
     else:
         ok, reason = _profile_available(desired, availability, has_image, has_file)
-    selected_profile = legacy_profile_for_mode(desired).as_dict()
-    selected_profile.update({"ui_generation": str((availability or {}).get("ui_generation", "unknown"))})
-    return {"selected_mode": desired, "selected_model_alias": mode_alias(desired), "selected_profile": selected_profile, "reasoning_strength": selected_profile["reasoning_strength"], "search_required": "search" in desired, "vision_required": desired.startswith("vision"), "file_required": desired == "file_extract", "combo_policy": "allow_split_search_then_reason" if split_strategy else "require_exact", "split_strategy": split_strategy, "fallback_reason": reason, "error_code": "DEEPSEEK_SEARCH_COMBO_UNAVAILABLE" if split_strategy else reason, "mode_available": ok, "manual_override": bool(fixed), "codex_mode": codex_mode, "tools_policy": tools_policy, "performance_mode": performance, "task_difficulty": difficulty, "smart_search": "ON" if "search" in desired else "OFF", "thinking": "ON" if "thinking" in desired else "OFF", "input_modality": "image" if desired.startswith("vision") else "file" if desired == "file_extract" else "text", "max_auto_escalation": 1}
+    generation = str((availability or {}).get("ui_generation", "unknown"))
+    selected_profile = capability_profile(desired, ui_generation=generation).as_dict()
+    return {"selected_mode": desired, "selected_model_alias": mode_alias(desired), "selected_profile": selected_profile, "reasoning_strength": selected_profile["reasoning_strength"], "search_required": "search" in desired, "vision_required": desired.startswith("vision"), "file_required": desired == "file_extract", "combo_policy": "allow_split_search_then_reason" if split_strategy else "require_exact", "split_strategy": split_strategy, "fallback_reason": reason, "error_code": "DEEPSEEK_SEARCH_COMBO_UNAVAILABLE" if split_strategy else reason, "mode_available": ok, "manual_override": bool(fixed), "codex_mode": codex_mode, "tools_policy": tools_policy, "performance_mode": performance, "task_difficulty": difficulty, "smart_search": "ON" if "search" in desired else "OFF", "thinking": "ON" if selected_profile["reasoning_strength"] != "off" else "OFF", "input_modality": "image" if desired.startswith("vision") else "file" if desired == "file_extract" else "text", "max_auto_escalation": 1}
 
 
 __all__ = [
-    "DeepSeekCapabilityProfile", "LEGACY_PROFILE_MAP", "capability_profile",
+    "DeepSeekCapabilityProfile", "LEGACY_PROFILE_MAP", "THREE_IN_ONE_PROFILE_MAP", "capability_profile",
     "legacy_profile_for_mode", "MODE_ALIASES", "mode_alias", "probe_deepseek_modes",
     "select_deepseek_mode", "classify_task_difficulty", "escalation_target",
     "preflight_attachment", "load_probe_state",

@@ -30,7 +30,7 @@ class DeepSeekThreeInOneTests(unittest.TestCase):
         )
         for text, strength in cases:
             result = select_deepseek_mode(text, availability=available("quick", "expert", "thinking"))
-            self.assertEqual(result["reasoning_strength"], strength if strength != "off" else "off")
+            self.assertEqual(result["reasoning_strength"], strength if strength != "off" else "low")
         review = select_deepseek_mode("高风险 密钥 patch review", availability=available("expert", "thinking"))
         self.assertEqual(review["selected_mode"], "expert_max_review")
 
@@ -47,6 +47,26 @@ class DeepSeekThreeInOneTests(unittest.TestCase):
         self.assertEqual(profile.deepseek_reasoning_strength, "max")
         mapped = map_profile(profile)
         self.assertEqual(mapped["deepseek"]["reasoning_strength"], "max")
+
+    def test_three_in_one_aliases_use_capability_profiles_without_base_axis(self):
+        for alias, expected, strength in (
+            ("quick_thinking", "medium_reasoning", "medium"),
+            ("expert_thinking", "high_reasoning", "high"),
+            ("expert_max_review", "max_reasoning_review", "max"),
+            ("quick_search", "medium_search", "medium"),
+            ("expert_thinking_search", "high_search", "high"),
+        ):
+            value = capability_profile(alias, ui_generation="three_in_one")
+            self.assertEqual((value.profile_id, value.reasoning_strength), (expected, strength))
+            self.assertEqual(value.base_model_family, "web_default")
+
+    def test_three_in_one_selection_does_not_require_quick_or_expert(self):
+        result = select_deepseek_mode(
+            "复杂 router 调试",
+            availability={"ui_generation": "three_in_one", "thinking": {"status": "AVAILABLE"}, "search": {"status": "AVAILABLE"}},
+        )
+        self.assertTrue(result["mode_available"])
+        self.assertEqual(result["selected_profile"]["profile_id"], "high_reasoning")
 
 
 if __name__ == "__main__":

@@ -84,5 +84,27 @@ class DeepSeekModeTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertFalse(result["promptSent"]); self.assertFalse(result["clickSend"]); self.assertFalse(result["uploadAttempted"])
 
+    def test_probe_infers_three_in_one_without_legacy_buttons_and_marks_partial_options(self):
+        def opener(request, timeout=0):
+            self.assertEqual(request.get_method(), "GET")
+            if request.full_url.endswith("/health"): return FakeResponse({"ok": True})
+            return FakeResponse({
+                "modes": {}, "quick_available": False, "expert_available": False,
+                "thinking_available": True, "search_available": True,
+                "current_thinking": True, "current_search": True,
+                "current_reasoning_strength": "medium", "reasoning_strength_options": [],
+                "ui_generation": "unknown", "three_in_one_available": False,
+            })
+        with tempfile.TemporaryDirectory() as temp, patch("codex_ai_router.deepseek_modes.urlopen", side_effect=opener):
+            result = probe_deepseek_modes(state_path=Path(temp) / "probe.json")
+        self.assertEqual(result["ui_generation"], "three_in_one")
+        self.assertTrue(result["three_in_one_available"])
+        self.assertFalse(result["legacy_buttons_available"])
+        self.assertEqual(result["base_mode_status"], "not_applicable_for_three_in_one")
+        self.assertEqual(result["current_reasoning_strength"], "medium")
+        self.assertEqual(result["reasoning_strength_options_status"], "partial")
+        self.assertEqual(result["reasoning_strength_warning"], "REASONING_OPTIONS_PARTIAL")
+        self.assertTrue(result["current_search"])
+
 
 if __name__ == "__main__": unittest.main()

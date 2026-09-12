@@ -1234,9 +1234,21 @@ function Get-DeepSeekModeStatusText([object]$Probe) {
     }
     if ($Probe.error_code) { $lines += ("错误码：{0}；说明：{1}" -f $Probe.error_code,(Get-UiErrorExplanation ([string]$Probe.error_code))) }
     if ($script:DeepSeekLastSelection) { $lines += ("最近推荐模式：{0}（{1}）" -f $script:DeepSeekLastSelection.selected_mode,$script:DeepSeekLastSelection.selected_model_alias) }
-    $lines += ("当前网页模式：generation={0}；profile={1}；思考强度={2}；可用强度={3}；搜索={4}；视觉={5}；文件={6}" -f $Probe.ui_generation,$Probe.current_profile_label,$Probe.current_reasoning_strength,(([string[]]$Probe.reasoning_strength_options) -join ','),$Probe.current_search,$Probe.vision_available,$Probe.file_upload_available)
+    $generation = [string]$Probe.ui_generation
+    $options = ([string[]]$Probe.reasoning_strength_options) -join ','
+    $optionsStatus = if ($Probe.reasoning_strength_options_status) { [string]$Probe.reasoning_strength_options_status } else { 'unknown' }
+    $baseAxis = if ($Probe.base_mode_axis) { [string]$Probe.base_mode_axis } else { if ($generation -eq 'three_in_one') { 'absent' } else { 'available' } }
+    $lines += ("当前网页模式：generation={0}；profile={1}；基础模式轴={2}；思考强度={3}；可用强度={4}（{5}）；搜索={6}；视觉={7}；文件={8}" -f $generation,$Probe.current_profile_label,$baseAxis,$Probe.current_reasoning_strength,$options,$optionsStatus,$Probe.current_search,$Probe.vision_available,$Probe.file_upload_available)
+    if ($Probe.reasoning_strength_warning) { $lines += ("提示：{0}" -f $Probe.reasoning_strength_warning) }
+    elseif ($optionsStatus -eq 'partial') { $lines += '提示：REASONING_OPTIONS_PARTIAL' }
     $lines += 'Codex 推理强度与 DeepSeek 思考强度是两个独立轴；二者不会互相自动同步。模式切换只操作可见模式控件，不发送 prompt、不上传文件。'
-    $lines += '本地项目任务默认“专家 + 深度思考 + 不联网搜索”；截图任务默认“视觉 + 专家 + 深度思考”；仅最新资料、官网、价格、新闻才开启搜索。'
+    if ($generation -eq 'legacy') {
+        $lines += '本地项目任务默认“专家 + 深度思考 + 不联网搜索”；截图任务默认“视觉 + 专家 + 深度思考”；仅最新资料、官网、价格、新闻才开启搜索。'
+    } elseif ($generation -eq 'three_in_one') {
+        $lines += '本地项目任务默认“高思考或最高思考，并关闭联网搜索”；截图任务需要显式图片附件，视觉入口可用时使用高思考并关闭搜索。'
+    } else {
+        $lines += '无法确认 DeepSeek 模式结构，仅允许只读探测，不发送 prompt。'
+    }
     return ($lines -join "`r`n")
 }
 function Refresh-DeepSeekModePanel {
