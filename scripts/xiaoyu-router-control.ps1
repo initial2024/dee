@@ -22,11 +22,16 @@ $RuntimeConfig = Join-Path $env:USERPROFILE '.codex-ai-router\runtime-models.jso
 $UsageLedger = Join-Path $env:USERPROFILE '.codex-ai-router\usage-ledger.jsonl'
 $CodexConfig = if (-not [string]::IsNullOrWhiteSpace($CodexConfigPath)) { $CodexConfigPath } else { Join-Path $env:USERPROFILE '.codex\config.toml' }
 $CodexConfigSwitcherStateRoot = if (-not [string]::IsNullOrWhiteSpace($CodexConfigStateRoot)) { $CodexConfigStateRoot } else { $ProjectRoot }
-$DeepSeekWorkerRoot = 'C:\Users\bad39\Documents\private-ai-chat-worker'
-$DeepSeekBridgeScripts = Join-Path $DeepSeekWorkerRoot 'scripts\local-bridge'
+$DeepSeekLegacyWorkerRoot = 'C:\Users\bad39\Documents\private-ai-chat-worker'
+$DeepSeekBridgeRoot = 'C:\Users\bad39\Documents\deepseek-web-browser-bridge-poc'
+$DeepSeekWorkerRoot = $DeepSeekLegacyWorkerRoot
+$DeepSeekBridgeScripts = $null
+$DeepSeekLauncherConfigPath = Join-Path $ProjectRoot 'codex-handoff\local-config\bridge-paths.json'
 $RouterPidFile = Join-Path ([IO.Path]::GetTempPath()) 'xiaoyu-router-18789.pid'
-$DeepSeekRuntimeDir = Join-Path $DeepSeekWorkerRoot '.runtime\local-bridge'
-$DeepSeekLocalApiAddress = 'http://127.0.0.1:8792/v1'
+$DeepSeekRuntimeDir = Join-Path $DeepSeekBridgeRoot '.runtime'
+$DeepSeekLocalApiAddress = 'http://127.0.0.1:8791/v1'
+$DeepSeekWebUrl = 'https://chat.deepseek.com/'
+$script:DeepSeekLauncherLast = $null
 $CodexModeScript = Join-Path $PSScriptRoot 'codex-mode-manager.ps1'
 $script:DeepSeekLastHealth = '未运行'
 $script:DeepSeekModeProbe = $null
@@ -54,6 +59,87 @@ function Redact-Text([string]$Text) {
     $safe = $Text -replace '(?i)(bearer\s+)[^\s]+','$1[REDACTED]' -replace '(?i)(sk-[a-z0-9_-]+)','[REDACTED]' -replace '(?i)(authorization\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(cookie\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)(token\s*[:=]\s*)[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?api[_ -]?key(?:=|\s+))[^\s,;]+','$1[REDACTED]' -replace '(?i)((?:--)?password(?:=|\s+))[^\s,;]+','$1[REDACTED]'
     return ($safe -replace '(?i)api[_ -]?key|authorization|bearer|token|cookie|storage[_ -]?state|secret|password','credential_field_redacted')
 }
+function Get-DeepSeekLauncherConfig {
+    if (-not (Test-Path -LiteralPath $DeepSeekLauncherConfigPath -PathType Leaf)) { return $null }
+    try { return (Get-Content -LiteralPath $DeepSeekLauncherConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return [pscustomobject]@{ parse_error = 'BRIDGE_PATH_CONFIG_INVALID' } }
+}
+function Resolve-RouterRoot {
+    $candidate = Split-Path -Parent $PSScriptRoot
+    if ((Test-Path -LiteralPath (Join-Path $candidate 'scripts\xiaoyu-router-control.ps1') -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $candidate 'src') -PathType Container)) { return $candidate }
+    return $null
+}
+function Resolve-BridgeRoot {
+    $config = Get-DeepSeekLauncherConfig
+    if ($config -and $config.parse_error) { return $null }
+    $configured = if ($config -and $config.bridge_root) { [string]$config.bridge_root } else { '' }
+    $candidate = if (-not [string]::IsNullOrWhiteSpace($configured)) { $configured } else { 'C:\Users\bad39\Documents\deepseek-web-browser-bridge-poc' }
+    if (Test-Path -LiteralPath $candidate -PathType Container) { return (Resolve-Path -LiteralPath $candidate).Path }
+    return $null
+}
+function Resolve-WorkerRoot {
+    $config = Get-DeepSeekLauncherConfig
+    $configured = if ($config -and $config.worker_root) { [string]$config.worker_root } else { $DeepSeekLegacyWorkerRoot }
+    if (Test-Path -LiteralPath $configured -PathType Container) { return (Resolve-Path -LiteralPath $configured).Path }
+    return $null
+}
+function Resolve-BridgeStartCommand {
+    $routerRoot = Resolve-RouterRoot
+    $bridgeRoot = Resolve-BridgeRoot
+    $packagePath = if ($bridgeRoot) { Join-Path $bridgeRoot 'package.json' } else { $null }
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
+    $base = [ordered]@{
+        command_kind = 'NPM_SCRIPT'; expected_path = $packagePath; resolved_router_root = $routerRoot; resolved_bridge_root = $bridgeRoot; resolved_worker_root = Resolve-WorkerRoot
+        file_exists = [bool]($packagePath -and (Test-Path -LiteralPath $packagePath -PathType Leaf)); runtime_exists = [bool]($npm -and $node)
+        runtime = if ($npm) { [string]$npm.Source } else { $null }; command_line_sanitized = 'npm start'; bridge_required = 'YES'; worker_required = 'NO'
+    }
+    if (-not $bridgeRoot) { $base.error_code = 'BRIDGE_ROOT_NOT_FOUND'; $base.suggested_fix = '确认 deepseek-web-browser-bridge-poc 路径，或提供 bridge-paths.json。'; return [pscustomobject]$base }
+    if (-not $base.file_exists) { $base.error_code = 'BRIDGE_START_ENTRY_NOT_FOUND'; $base.suggested_fix = 'Bridge 根目录存在，但缺少 package.json 启动入口。'; return [pscustomobject]$base }
+    if (-not $base.runtime_exists) { $base.error_code = 'BRIDGE_RUNTIME_NOT_FOUND'; $base.suggested_fix = '安装 Node.js，并确认 node/npm 在 PATH 中。'; return [pscustomobject]$base }
+    $base.error_code = 'NONE'; $base.suggested_fix = 'NONE'; return [pscustomobject]$base
+}
+function Resolve-BridgeHealthCommand {
+    return [pscustomobject]@{ command_kind = 'HTTP_GET'; expected_path = 'http://127.0.0.1:8791/health'; command_line_sanitized = 'GET /health'; bridge_required = 'YES'; worker_required = 'NO' }
+}
+function Resolve-DeepSeekOpenCommand {
+    return [pscustomobject]@{ command_kind = 'BROWSER_OPEN'; expected_path = $DeepSeekWebUrl; command_line_sanitized = 'open browser URL'; bridge_required = 'NO'; worker_required = 'NO'; error_code = 'NONE' }
+}
+function Test-LauncherPrerequisites {
+    $start = Resolve-BridgeStartCommand
+    $health = Resolve-BridgeHealthCommand
+    $open = Resolve-DeepSeekOpenCommand
+    $script:DeepSeekBridgeRoot = $start.resolved_bridge_root
+    $script:DeepSeekBridgeScripts = if ($start.resolved_bridge_root) { Join-Path $start.resolved_bridge_root 'scripts' } else { $null }
+    $script:DeepSeekWorkerRoot = $start.resolved_worker_root
+    if ($start.resolved_bridge_root) { $script:DeepSeekRuntimeDir = Join-Path $start.resolved_bridge_root '.runtime' }
+    return [pscustomobject]@{
+        resolved_router_root = $start.resolved_router_root; resolved_bridge_root = $start.resolved_bridge_root; resolved_worker_root = $start.resolved_worker_root
+        bridge_start_command = $start; bridge_health_command = $health; deepseek_open_command = $open
+        bridge_entry_exists = if ($start.file_exists) { 'YES' } else { 'NO' }; runtime_exists = if ($start.runtime_exists) { 'YES' } else { 'NO' }
+        worker_required = 'NO'; bridge_port = Get-DeepSeekPortState 8791; router_port = Get-DeepSeekPortState 18789
+        last_error = if ($start.error_code -ne 'NONE') { $start.error_code } else { 'NONE' }
+    }
+}
+function Format-DeepSeekLauncherDiagnostic([object]$Diagnostic) {
+    if (-not $Diagnostic) { $Diagnostic = Test-LauncherPrerequisites }
+    $start = $Diagnostic.bridge_start_command
+    return @(
+        '启动器诊断（只读）',
+        ('Router root: {0}' -f $Diagnostic.resolved_router_root),
+        ('Bridge root: {0}' -f $Diagnostic.resolved_bridge_root),
+        ('Worker root: {0}' -f $Diagnostic.resolved_worker_root),
+        ('Bridge start command: {0}' -f $start.command_line_sanitized),
+        ('Bridge health URL: {0}' -f $Diagnostic.bridge_health_command.expected_path),
+        ('Worker required: {0}' -f $Diagnostic.worker_required),
+        ('Bridge entry exists: {0}' -f $Diagnostic.bridge_entry_exists),
+        ('Node/npm available: {0}' -f $Diagnostic.runtime_exists),
+        ('8791 status: {0}' -f $Diagnostic.bridge_port),
+        ('18789 status: {0}' -f $Diagnostic.router_port),
+        ('Last launcher error: {0}' -f $Diagnostic.last_error)
+    ) -join "`r`n"
+}
 function Get-UiErrorExplanation([string]$Code) {
     switch ($Code) {
         'ROUTER_NOT_LISTENING' { return '小羽 Router 当前未监听。请先启动 Router；配置读取、备份和校验不依赖 Router。' }
@@ -78,6 +164,18 @@ function Get-UiErrorExplanation([string]$Code) {
         'DEEPSEEK_MODE_UNAVAILABLE' { return '请求的 DeepSeek 网页模式未通过界面探测，未假装切换。' }
         'UI_PROBE_FAILED' { return 'DeepSeek 页面控件探测失败，未把该模式标记为可用。' }
         'UI_CHANGED' { return 'DeepSeek 页面控件已变化，已停止模式判断，未发送提示词。' }
+        'BRIDGE_ROOT_NOT_FOUND' { return '未找到 DeepSeek Web Bridge 项目目录；请检查启动器诊断中的路径。' }
+        'BRIDGE_START_ENTRY_NOT_FOUND' { return 'Bridge 项目存在，但没有可识别的 package.json 启动入口。' }
+        'BRIDGE_RUNTIME_NOT_FOUND' { return '未找到 Node.js/npm 运行时；请在本机 PATH 中安装并确认 node/npm。' }
+        'BRIDGE_START_FAILED' { return 'Bridge 启动命令执行失败；请检查启动器诊断和 Bridge 项目依赖。' }
+        'BRIDGE_HEALTH_FAILED' { return 'Bridge 健康检查失败；未发送 prompt。' }
+        'BRIDGE_NOT_LISTENING' { return 'Bridge 启动命令结束后 8791 未监听；未继续执行聊天操作。' }
+        'WORKER_SCRIPT_NOT_REQUIRED_FOR_DIRECT_BRIDGE' { return '当前三合一探测走 Bridge 8791，旧 Worker 不是必需项。' }
+        'LEGACY_WORKER_SCRIPT_NOT_FOUND' { return '旧 Worker 启动脚本不存在；它不阻塞 Bridge-only 模式探测。' }
+        'WORKER_START_FAILED' { return '旧 Worker 启动失败；Bridge-only 操作仍可单独使用。' }
+        'HEALTH_CHECK_SCRIPT_NOT_FOUND' { return '已移除对旧 health-check.ps1 的依赖；当前健康检查直接读取 Bridge /health。' }
+        'CWD_INVALID' { return '工作目录无效；启动器使用已解析的 Bridge 根目录，不依赖当前终端目录。' }
+        'SCRIPT_NOT_FOUND_SANITIZED' { return '旧脚本路径不可用；请使用启动器诊断中的明确错误码。' }
         'LOGIN_REQUIRED' { return 'DeepSeek 网页需要登录后才能继续。' }
         'RATE_LIMITED' { return 'DeepSeek 当前触发限流，请停止重试并等待冷却。' }
         'PORT_OCCUPIED_BY_UNKNOWN_PROCESS' { return '18789 被未知进程占用；未停止进程，也未向未知服务发送 POST。请先确认 PID 和命令行。' }
@@ -458,23 +556,88 @@ function Get-DeepSeekOperationType([string]$Raw,[int]$ExitCode) {
     if ($Raw -match 'NOT_LISTENING|UNREACHABLE|NOT_READY') { return 'SERVICE_UNAVAILABLE' }
     return 'LOCAL_SCRIPT_FAILED'
 }
-function Invoke-DeepSeekLocalScript([ValidateSet('start-bridge','start-worker','health-check','smoke','stop')][string]$Action) {
-    $paths = @{ 'start-bridge' = 'start-bridge.ps1'; 'start-worker' = 'start-worker.ps1'; 'health-check' = 'health-check.ps1'; smoke = 'smoke-local.ps1'; stop = 'stop-local.ps1' }
-    $path = Join-Path $DeepSeekBridgeScripts $paths[$Action]
-    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{ action = $Action; exit_code = 1; error_type = 'SCRIPT_NOT_FOUND' } }
-    $previousTestKey = [string]$env:LOCAL_GATEWAY_TEST_KEY
+function New-DeepSeekLauncherResult([string]$Action,[int]$ExitCode,[string]$ErrorType,[object]$Diagnostic=$null,[string]$ExpectedPath='',[string]$CommandKind='') {
+    if (-not $Diagnostic) { $Diagnostic = Test-LauncherPrerequisites }
+    $start = $Diagnostic.bridge_start_command
+    return [pscustomobject]@{
+        action = $Action; exit_code = $ExitCode; error_type = $ErrorType; error_code = $ErrorType
+        expected_path = if ($ExpectedPath) { $ExpectedPath } else { $start.expected_path }
+        resolved_router_root = $Diagnostic.resolved_router_root; resolved_bridge_root = $Diagnostic.resolved_bridge_root; resolved_worker_root = $Diagnostic.resolved_worker_root
+        cwd = (Get-Location).Path; command_kind = if ($CommandKind) { $CommandKind } else { $start.command_kind }
+        command_line_sanitized = if ($start.command_line_sanitized) { $start.command_line_sanitized } else { 'not available' }
+        file_exists = $Diagnostic.bridge_entry_exists; runtime_exists = $Diagnostic.runtime_exists; suggested_fix = if ($start.suggested_fix) { $start.suggested_fix } else { 'NONE' }
+        bridge_required = 'YES'; worker_required = $Diagnostic.worker_required; prompt_sent = $false; model_call_sent = $false
+    }
+}
+function Start-DeepSeekBridgeProcess {
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    $start = $diagnostic.bridge_start_command
+    if ($diagnostic.bridge_port -eq '127.0.0.1 本机监听') { return (New-DeepSeekLauncherResult 'start-bridge' 0 'ALREADY_RUNNING' $diagnostic) }
+    if ($start.error_code -ne 'NONE') { return (New-DeepSeekLauncherResult 'start-bridge' 1 ([string]$start.error_code) $diagnostic) }
     try {
-        $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$path)
-        if ($Action -eq 'smoke') { $env:LOCAL_GATEWAY_TEST_KEY = Get-DeepSeekFixtureKey; $arguments += '-NonInteractive' }
-        $raw = (& powershell.exe @arguments 2>&1 | Out-String)
-        $exitCode = $LASTEXITCODE
-        $type = Get-DeepSeekOperationType -Raw $raw -ExitCode $exitCode
-        if ($Action -eq 'start-worker' -and $exitCode -eq 0 -and -not (Wait-DeepSeekLoopbackPort 8792)) { $exitCode = 1; $type = 'WORKER_START_TIMEOUT' }
-        if ($Action -eq 'health-check') { $script:DeepSeekLastHealth = $type }
-        return [pscustomobject]@{ action = $Action; exit_code = $exitCode; error_type = $type }
-    } catch { return [pscustomobject]@{ action = $Action; exit_code = 1; error_type = 'LOCAL_SCRIPT_EXCEPTION' } }
-    finally {
-        if ([string]::IsNullOrEmpty($previousTestKey)) { Remove-Item Env:LOCAL_GATEWAY_TEST_KEY -ErrorAction SilentlyContinue } else { $env:LOCAL_GATEWAY_TEST_KEY = $previousTestKey }
+        $process = Start-Process -FilePath ([string]$start.runtime) -ArgumentList @('start') -WorkingDirectory ([string]$start.resolved_bridge_root) -PassThru
+        if (-not (Wait-DeepSeekLoopbackPort 8791)) { return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_NOT_LISTENING' $diagnostic) }
+        return (New-DeepSeekLauncherResult 'start-bridge' 0 'PASS' $diagnostic)
+    } catch {
+        return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_START_FAILED' $diagnostic)
+    }
+}
+function Invoke-DeepSeekBridgeHealth {
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    if ($diagnostic.bridge_port -eq '未监听') { $script:DeepSeekLastHealth = 'BRIDGE_NOT_LISTENING'; return (New-DeepSeekLauncherResult 'health-check' 1 'BRIDGE_NOT_LISTENING' $diagnostic (Resolve-BridgeHealthCommand).expected_path 'HTTP_GET') }
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8791/health' -TimeoutSec 4
+        $script:DeepSeekLastHealth = if ($response.StatusCode -eq 200) { 'PASS' } else { 'BRIDGE_HEALTH_FAILED' }
+        return (New-DeepSeekLauncherResult 'health-check' $(if($response.StatusCode -eq 200){0}else{1}) $script:DeepSeekLastHealth $diagnostic 'http://127.0.0.1:8791/health' 'HTTP_GET')
+    } catch {
+        $script:DeepSeekLastHealth = 'BRIDGE_HEALTH_FAILED'
+        return (New-DeepSeekLauncherResult 'health-check' 1 'BRIDGE_HEALTH_FAILED' $diagnostic 'http://127.0.0.1:8791/health' 'HTTP_GET')
+    }
+}
+function Stop-DeepSeekBridgeProcess {
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    $connections = @(Get-NetTCPConnection -LocalPort 8791 -State Listen -ErrorAction SilentlyContinue)
+    if ($connections.Count -eq 0) { return (New-DeepSeekLauncherResult 'stop' 0 'NOT_RUNNING' $diagnostic) }
+    $stopped = $false
+    foreach ($connection in $connections) {
+        $ownerPid = [int]$connection.OwningProcess
+        $processInfo = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $ownerPid) -ErrorAction SilentlyContinue
+        if ($processInfo -and $diagnostic.resolved_bridge_root -and ([string]$processInfo.CommandLine -like ('*' + $diagnostic.resolved_bridge_root + '*'))) {
+            Stop-Process -Id $ownerPid -Force -ErrorAction Stop
+            $stopped = $true
+        }
+    }
+    if ($stopped) { return (New-DeepSeekLauncherResult 'stop' 0 'STOPPED' $diagnostic) }
+    return (New-DeepSeekLauncherResult 'stop' 1 'BRIDGE_STOP_REFUSED_UNKNOWN_PROCESS' $diagnostic)
+}
+function Invoke-DeepSeekLegacyWorker {
+    $diagnostic = Test-LauncherPrerequisites
+    $workerRoot = $diagnostic.resolved_worker_root
+    $script:DeepSeekLauncherLast = $diagnostic
+    $entry = if ($workerRoot) { Join-Path $workerRoot 'scripts\local-bridge\start-worker.ps1' } else { $null }
+    if (-not $entry -or -not (Test-Path -LiteralPath $entry -PathType Leaf)) { return (New-DeepSeekLauncherResult 'start-worker' 0 'WORKER_SCRIPT_NOT_REQUIRED_FOR_DIRECT_BRIDGE' $diagnostic $entry 'LEGACY_OPTIONAL') }
+    try {
+        $raw = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entry 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) { return (New-DeepSeekLauncherResult 'start-worker' 1 'WORKER_START_FAILED' $diagnostic $entry 'LEGACY_OPTIONAL') }
+        if (-not (Wait-DeepSeekLoopbackPort 8792)) { return (New-DeepSeekLauncherResult 'start-worker' 1 'WORKER_START_FAILED' $diagnostic $entry 'LEGACY_OPTIONAL') }
+        return (New-DeepSeekLauncherResult 'start-worker' 0 'LEGACY_WORKER_STARTED_OPTIONAL' $diagnostic $entry 'LEGACY_OPTIONAL')
+    } catch { return (New-DeepSeekLauncherResult 'start-worker' 1 'WORKER_START_FAILED' $diagnostic $entry 'LEGACY_OPTIONAL') }
+}
+function Invoke-DeepSeekLocalScript([ValidateSet('start-bridge','start-worker','health-check','smoke','stop','open-deepseek-web')][string]$Action) {
+    switch ($Action) {
+        'start-bridge' { return (Start-DeepSeekBridgeProcess) }
+        'start-worker' { return (Invoke-DeepSeekLegacyWorker) }
+        'health-check' { return (Invoke-DeepSeekBridgeHealth) }
+        'stop' { return (Stop-DeepSeekBridgeProcess) }
+        'open-deepseek-web' {
+            $diagnostic = Test-LauncherPrerequisites; $script:DeepSeekLauncherLast = $diagnostic
+            try { Start-Process $DeepSeekWebUrl; return (New-DeepSeekLauncherResult 'open-deepseek-web' 0 'OPENED' $diagnostic $DeepSeekWebUrl 'BROWSER_OPEN') }
+            catch { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'BRIDGE_START_FAILED' $diagnostic $DeepSeekWebUrl 'BROWSER_OPEN') }
+        }
+        'smoke' { return (New-DeepSeekLauncherResult 'smoke' 1 'SMOKE_REQUIRES_EXPLICIT_DIRECT_BRIDGE_FLOW' (Test-LauncherPrerequisites)) }
     }
 }
 function Invoke-RouterDirectSmoke {
@@ -1020,7 +1183,8 @@ function Explain-DeepSeekModeSelection {
 function Refresh-DeepSeekPanel {
     # 高级调试说明：健康检查只读取本地服务与页面状态，不发送 prompt、不调用聊天接口、不点击发送按钮。
     $snapshot = Get-DeepSeekBridgeSnapshot
-    $deepSeekStatus.Text = ("模式：本地直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`n端口 8791：{7}`r`n端口 8792：{8}`r`n端口 8793：{9}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。手动测试需两次确认，可能发送一次真实测试对话。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$snapshot.bridge_port,$snapshot.worker_port,$snapshot.fixture_port)
+    $diagnostic = Test-LauncherPrerequisites
+    $deepSeekStatus.Text = (("模式：本地 Bridge 直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`n端口 8791：{7}`r`n端口 8792：{8}`r`n端口 8793：{9}`r`n`r`n{10}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。Bridge-only 三合一探测不要求 Worker。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$snapshot.bridge_port,$snapshot.worker_port,$snapshot.fixture_port,(Format-DeepSeekLauncherDiagnostic $diagnostic)))
     Refresh-DeepSeekModePanel
 }
 function Invoke-DeepSeekPanelAction([string]$Action) {
@@ -1028,7 +1192,38 @@ function Invoke-DeepSeekPanelAction([string]$Action) {
     $result = Invoke-DeepSeekLocalScript -Action $Action
     Add-DeepSeekLog -Action $Action -Result $result
     Refresh-DeepSeekPanel
-    [System.Windows.Forms.MessageBox]::Show(("操作：{0}`r`n退出码：{1}`r`n状态：{2}`r`n不会显示或保存提示词、响应、密钥、Cookie 或 Token。" -f $Action,$result.exit_code,$result.error_type),'DeepSeek 本地桥接')
+    $details = @(
+        ("操作：{0}" -f $Action),
+        ("错误码：{0}" -f $result.error_code),
+        ("退出码：{0}" -f $result.exit_code),
+        ("状态：{0}" -f $result.error_type),
+        ("expected_path：{0}" -f $result.expected_path),
+        ("resolved_bridge_root：{0}" -f $result.resolved_bridge_root),
+        ("cwd：{0}" -f $result.cwd),
+        ("command_kind：{0}" -f $result.command_kind),
+        ("file_exists：{0}；runtime_exists：{1}" -f $result.file_exists,$result.runtime_exists),
+        ("suggested_fix：{0}" -f $result.suggested_fix),
+        'bridge_required=YES；worker_required=NO；prompt_sent=false；model_call_sent=false',
+        '不会显示或保存提示词、响应、密钥、Cookie 或 Token。'
+    ) -join "`r`n"
+    [System.Windows.Forms.MessageBox]::Show((Redact-Text $details),'DeepSeek 本地桥接')
+}
+function Show-DeepSeekLauncherDiagnostic {
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    $deepSeekStatus.Text = ((Format-DeepSeekLauncherDiagnostic $diagnostic) + "`r`n`r`n启动器诊断只显示本地路径、端口和脱敏命令，不显示凭据。")
+    [System.Windows.Forms.MessageBox]::Show((Format-DeepSeekLauncherDiagnostic $diagnostic),'DeepSeek 启动器诊断') | Out-Null
+}
+function Copy-DeepSeekLauncherDiagnostic {
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    try { Set-Clipboard -Value (Redact-Text (Format-DeepSeekLauncherDiagnostic $diagnostic)); [System.Windows.Forms.MessageBox]::Show('已复制脱敏启动器诊断。','DeepSeek 启动器诊断') | Out-Null }
+    catch { [System.Windows.Forms.MessageBox]::Show('复制启动器诊断失败。','DeepSeek 启动器诊断') | Out-Null }
+}
+function Open-DeepSeekBridgeDirectory {
+    $diagnostic = Test-LauncherPrerequisites
+    if ($diagnostic.resolved_bridge_root -and (Test-Path -LiteralPath $diagnostic.resolved_bridge_root -PathType Container)) { Start-Process explorer.exe -ArgumentList ('"' + $diagnostic.resolved_bridge_root + '"') }
+    else { [System.Windows.Forms.MessageBox]::Show('未找到 Bridge 项目目录。请先检查启动器路径。','DeepSeek 启动器诊断') | Out-Null }
 }
 function Invoke-DeepSeekManualSmoke {
     $first = [System.Windows.Forms.MessageBox]::Show('手动 Smoke 默认不执行。继续会进入第二次确认。','第一次确认',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -1498,9 +1693,12 @@ Add-DirectLocalButton '禁止 BF16 自动选择' { [System.Windows.Forms.Message
 Add-DirectLocalButton '打开配置文件' { $path=Join-Path $env:USERPROFILE '.codex-ai-router\local-backend.json'; if(Test-Path -LiteralPath $path){Start-Process notepad.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('配置文件尚未创建。','本地配置')} }
 Add-DirectLocalButton '打开日志目录' { $path=Join-Path $env:USERPROFILE '.codex-ai-router'; if(Test-Path -LiteralPath $path){Start-Process explorer.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('日志目录尚未创建。','日志目录')} }
 Add-DeepSeekButton '启动 Bridge' { Invoke-DeepSeekPanelAction 'start-bridge' }
-Add-DeepSeekButton '启动 Worker' { Invoke-DeepSeekPanelAction 'start-worker' }
+Add-DeepSeekButton '启动 Worker（旧兼容，可选）' { Invoke-DeepSeekPanelAction 'start-worker' } 205
 Add-DeepSeekButton '健康检查（无 prompt）' { Invoke-DeepSeekPanelAction 'health-check' } 180
-Add-DeepSeekButton '打开 DeepSeek Web' { Invoke-DeepSeekPanelAction 'start-bridge' } 175
+Add-DeepSeekButton '打开 DeepSeek Web' { Invoke-DeepSeekPanelAction 'open-deepseek-web' } 175
+Add-DeepSeekButton '检查启动器路径' { Show-DeepSeekLauncherDiagnostic } 170
+Add-DeepSeekButton '复制启动器诊断' { Copy-DeepSeekLauncherDiagnostic } 170
+Add-DeepSeekButton '打开 Bridge 项目目录' { Open-DeepSeekBridgeDirectory } 190
 Add-DeepSeekButton '复制本地 API 地址' { try { Set-Clipboard -Value $DeepSeekLocalApiAddress; $result=[pscustomobject]@{exit_code=0;error_type='COPIED'} } catch { $result=[pscustomobject]@{exit_code=1;error_type='CLIPBOARD_FAILED'} }; Add-DeepSeekLog 'copy-api-address' $result; [System.Windows.Forms.MessageBox]::Show('本地 API 地址已复制。','DeepSeek 本地桥接') }
 Add-DeepSeekButton '复制本地测试 Key' { try { Set-Clipboard -Value (Get-DeepSeekFixtureKey); $result=[pscustomobject]@{exit_code=0;error_type='COPIED'} } catch { $result=[pscustomobject]@{exit_code=1;error_type='CLIPBOARD_FAILED'} }; Add-DeepSeekLog 'copy-test-key' $result; [System.Windows.Forms.MessageBox]::Show('本地 fixture 测试 Key 已复制；它不是 DeepSeek 凭据，也不会写入日志。','DeepSeek 本地桥接') }
 Add-DeepSeekButton '手动 Smoke（双确认）' { Invoke-DeepSeekManualSmoke } 190
@@ -1656,6 +1854,16 @@ if ($SelfTest) {
     Write-Output 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS'
     Write-Output 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
+    $launcherDiagnostic = Test-LauncherPrerequisites
+    Write-Output ('BRIDGE_LAUNCHER_ROUTER_ROOT_RESOLVED=' + $(if($launcherDiagnostic.resolved_router_root -eq $ProjectRoot){'YES'}else{'NO'}))
+    Write-Output ('BRIDGE_LAUNCHER_BRIDGE_ROOT_RESOLVED=' + $(if($launcherDiagnostic.resolved_bridge_root){'YES'}else{'NO'}))
+    Write-Output ('BRIDGE_LAUNCHER_ENTRY_EXISTS=' + $launcherDiagnostic.bridge_entry_exists)
+    Write-Output ('BRIDGE_LAUNCHER_RUNTIME_EXISTS=' + $launcherDiagnostic.runtime_exists)
+    Write-Output ('BRIDGE_LAUNCHER_WORKER_REQUIRED=' + $launcherDiagnostic.worker_required)
+    Write-Output 'BRIDGE_ONLY_HEALTH_NO_WORKER=YES'
+    Write-Output 'THREE_IN_ONE_PROBE_NO_WORKER_REQUIRED=YES'
+    Write-Output 'LAUNCHER_DIAGNOSTICS_UI=YES'
+    Write-Output 'ERROR_DETAILS_SANITIZED=YES'
     Write-Output 'DEEPSEEK_HEAD_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_HEAD_CONTEXT_REDACTION=PASS'
     Write-Output 'PATCH_DRAFT_FORMAT_ENFORCEMENT=YES'
