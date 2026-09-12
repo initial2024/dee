@@ -17,7 +17,7 @@ DEEPSEEK_DIRECT_BASE = "http://127.0.0.1:8791"
 DEEPSEEK_DIRECT_HEALTH = DEEPSEEK_DIRECT_BASE + "/health"
 LOCAL_BASE = "http://127.0.0.1:1234/v1"
 BRIDGE_API_KEY_ENV = "XIAOYU_ROUTER_BRIDGE_API_KEY"
-DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", "deepseek-web-search", "deepseek-web-thinking", "deepseek-web-quick-thinking", "deepseek-web-expert", "deepseek-web-auto"}
+DEEPSEEK_KNOWN_ALIASES = {"deepseek-head", "deepseek-web", "deepseek-web-fast", "deepseek-web-search", "deepseek-web-thinking", "deepseek-web-quick-thinking", "deepseek-web-expert", "deepseek-web-expert-max-review", "deepseek-web-auto"}
 
 
 def _loopback(value: str) -> bool:

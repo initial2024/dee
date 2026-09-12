@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -22,6 +23,7 @@ MODE_ALIASES = {
     "quick_thinking": "deepseek-web-quick-thinking",
     "expert_plain": "deepseek-web-expert", "expert_thinking": "deepseek-web-expert-thinking",
     "expert_thinking_search": "deepseek-web-expert-thinking-search",
+    "expert_max_review": "deepseek-web-expert-max-review",
     "vision_quick": "deepseek-web-vision-quick", "vision_expert": "deepseek-web-vision-expert",
     "vision_expert_thinking": "deepseek-web-vision-expert-thinking", "vision_search": "deepseek-web-vision-search",
     "file_extract": "deepseek-web-file-extract",
@@ -43,6 +45,72 @@ SEARCH_TERMS = ("搜索", "最新", "当前", "官网", "文档最新版", "价�
 IMAGE_TERMS = ("截图", "图片", "识图", "视觉", "看图", "按钮被截断", "界面", "ui截图", "图表", "表格截图")
 FILE_TERMS = ("pdf", "docx", "文件上传", "提取文本", "附件")
 CONTROL_NAMES = ("quick", "expert", "thinking", "search", "vision", "file")
+
+UiGeneration = Literal["legacy", "three_in_one", "unknown"]
+ReasoningStrength = Literal["off", "low", "medium", "high", "max", "unsupported", "unknown"]
+SearchMode = Literal["off", "on", "tool_required", "unavailable", "unknown"]
+AttachmentMode = Literal["off", "available", "requires_attachment", "unavailable", "unknown"]
+ResponseProtocol = Literal["browser_dom", "responses_api_compatible", "chat_completions_compatible", "unknown"]
+ModeSwitchStrategy = Literal["legacy_buttons", "unified_menu", "profile_menu", "unsupported"]
+
+
+@dataclass(frozen=True)
+class DeepSeekCapabilityProfile:
+    """A capability description, never a credential or request description.
+
+    The values deliberately describe what a visible Browser Bridge reports.  A
+    profile can therefore be used by selectors and tests without implying that
+    a DeepSeek request was sent.
+    """
+
+    profile_id: str
+    ui_generation: UiGeneration = "unknown"
+    base_model_family: Literal["flash", "pro", "web_default", "unknown"] = "unknown"
+    reasoning_strength: ReasoningStrength = "unknown"
+    search_mode: SearchMode = "unknown"
+    vision_mode: AttachmentMode = "unknown"
+    file_mode: AttachmentMode = "unknown"
+    response_protocol: ResponseProtocol = "browser_dom"
+    supports_codex: bool | Literal["unknown"] = "unknown"
+    supports_tools: bool | Literal["unknown"] = "unknown"
+    supports_reasoning_items: bool | Literal["unknown"] = "unknown"
+    mode_switch_strategy: ModeSwitchStrategy = "unsupported"
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+LEGACY_PROFILE_MAP: dict[str, DeepSeekCapabilityProfile] = {
+    "quick_plain": DeepSeekCapabilityProfile("quick_plain", base_model_family="flash", reasoning_strength="off", search_mode="off", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "quick_thinking": DeepSeekCapabilityProfile("quick_thinking", base_model_family="flash", reasoning_strength="medium", search_mode="off", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "quick_search": DeepSeekCapabilityProfile("quick_search", base_model_family="flash", reasoning_strength="low", search_mode="on", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "expert_plain": DeepSeekCapabilityProfile("expert_plain", base_model_family="pro", reasoning_strength="off", search_mode="off", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "expert_thinking": DeepSeekCapabilityProfile("expert_thinking", base_model_family="pro", reasoning_strength="high", search_mode="off", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "expert_max_review": DeepSeekCapabilityProfile("expert_max_review", base_model_family="pro", reasoning_strength="max", search_mode="off", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "expert_thinking_search": DeepSeekCapabilityProfile("expert_thinking_search", base_model_family="pro", reasoning_strength="high", search_mode="on", vision_mode="off", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "vision_expert_thinking": DeepSeekCapabilityProfile("vision_expert_thinking", base_model_family="pro", reasoning_strength="high", search_mode="off", vision_mode="requires_attachment", file_mode="off", mode_switch_strategy="legacy_buttons"),
+    "file_extract": DeepSeekCapabilityProfile("file_extract", base_model_family="pro", reasoning_strength="high", search_mode="off", vision_mode="off", file_mode="requires_attachment", mode_switch_strategy="legacy_buttons"),
+}
+
+
+def capability_profile(profile_id: str, *, ui_generation: UiGeneration = "unknown", probe: dict[str, Any] | None = None) -> DeepSeekCapabilityProfile:
+    """Return a stable capability profile for a legacy alias or new profile id."""
+    base = LEGACY_PROFILE_MAP.get(profile_id, DeepSeekCapabilityProfile(profile_id))
+    if not isinstance(probe, dict):
+        return DeepSeekCapabilityProfile(**{**base.as_dict(), "ui_generation": ui_generation if ui_generation != "unknown" else base.ui_generation})
+    values = base.as_dict()
+    values["ui_generation"] = probe.get("ui_generation", ui_generation) or ui_generation
+    for field in ("base_model_family", "reasoning_strength", "search_mode", "vision_mode", "file_mode", "response_protocol", "mode_switch_strategy"):
+        if probe.get(field) is not None:
+            values[field] = probe[field]
+    for field in ("supports_codex", "supports_tools", "supports_reasoning_items"):
+        if field in probe:
+            values[field] = probe[field]
+    return DeepSeekCapabilityProfile(**values)
+
+
+def legacy_profile_for_mode(mode: str) -> DeepSeekCapabilityProfile:
+    return capability_profile(mode if mode in LEGACY_PROFILE_MAP else "quick_plain")
 _BLOCKED_ATTACHMENT_NAMES = {".env", "storage_state.json", "cookies.json", "token.json", "id_rsa"}
 _BLOCKED_ATTACHMENT_SUFFIXES = {".key", ".pem", ".pfx", ".p12", ".env", ".sqlite", ".har"}
 _ALLOWED_ATTACHMENT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".pdf", ".txt", ".md", ".docx"}
@@ -118,6 +186,26 @@ def probe_deepseek_modes(*, health_url: str = DEEPSEEK_HEALTH, probe_url: str = 
         result[field] = bool(payload.get(field, controls[name]["status"] == "AVAILABLE" and controls[name]["controllable"]))
     for name in ("current_base_mode", "current_thinking", "current_search", "current_modality", "ui_changed", "login_required", "captcha_required"):
         result[name] = payload.get(name)
+    # New three-in-one metadata is additive.  Old bridges remain readable and
+    # are normalized to an explicit unknown value instead of being guessed.
+    for name, default in (
+        ("ui_generation", "unknown"), ("three_in_one_available", False),
+        ("legacy_buttons_available", bool(result.get("quick_available") or result.get("expert_available"))),
+        ("profile_menu_available", False), ("reasoning_strength_available", bool(result.get("thinking_available"))),
+        ("reasoning_strength_options", []), ("current_reasoning_strength", "unknown"),
+        ("search_combo_supported", "unknown"), ("vision_available", False),
+        ("file_upload_available", False), ("current_profile_label", "unknown"),
+    ):
+        result[name] = payload.get(name, default)
+    if result.get("ui_generation") not in {"legacy", "three_in_one", "unknown"}:
+        result["ui_generation"] = "unknown"
+    if not result["reasoning_strength_options"] and result.get("thinking_available"):
+        result["reasoning_strength_options"] = ["off", "low", "medium", "high"]
+    result["capability_profile"] = capability_profile(
+        str(result.get("current_profile_label") or "web_default"),
+        ui_generation=result["ui_generation"],
+        probe={"reasoning_strength": result.get("current_reasoning_strength"), "search_mode": "on" if result.get("current_search") else "off"},
+    ).as_dict()
     _write_state(result, state_path); return result
 
 
@@ -130,10 +218,17 @@ def _available(availability: dict[str, Any] | None, name: str) -> bool:
     return isinstance(item, dict) and item.get("status") == "AVAILABLE" and item.get("controllable", True) is not False
 
 
+def _combo_supported(availability: dict[str, Any] | None) -> bool | None:
+    if not isinstance(availability, dict) or "search_combo_supported" not in availability:
+        return None
+    value = availability.get("search_combo_supported")
+    return value if isinstance(value, bool) else None
+
+
 def _profile_available(profile: str, availability: dict[str, Any] | None, has_image: bool, has_file: bool) -> tuple[bool, str | None]:
     checks: list[tuple[str, str]] = [("quick", "UI_CHANGED")]
     if profile.startswith("expert") or profile in {"vision_expert", "vision_expert_thinking", "file_extract"}: checks = [("expert", "DEEPSEEK_EXPERT_MODE_UNAVAILABLE")]
-    if "thinking" in profile: checks.append(("thinking", "DEEPSEEK_THINKING_UNAVAILABLE"))
+    if "thinking" in profile or profile == "expert_max_review": checks.append(("thinking", "DEEPSEEK_THINKING_UNAVAILABLE"))
     if "search" in profile: checks.append(("search", "DEEPSEEK_SEARCH_UNAVAILABLE"))
     if profile.startswith("vision"):
         checks.append(("vision", "DEEPSEEK_VISION_UNAVAILABLE"))
@@ -206,7 +301,7 @@ def select_deepseek_mode(task_text: str, *, codex_mode: str = "CUSTOM_DEEPSEEK_T
     elif has_image or any(term in text for term in IMAGE_TERMS): desired, why = "vision_expert_thinking", "包含截图/图片意图或显式图片附件"
     elif search_allowed and any(term in text for term in SEARCH_TERMS):
         desired, why = ("expert_thinking_search" if difficulty == "complex" else "quick_search"), "包含最新外部信息意图"
-    elif difficulty == "high_risk": desired, why = "expert_thinking", "高风险任务只能生成审查建议"
+    elif difficulty == "high_risk": desired, why = "expert_max_review", "高风险任务只能生成最高强度审查建议"
     else:
         table = {
             "economy": {"simple": "quick_plain", "medium": "quick_thinking", "complex": "expert_plain"},
@@ -214,5 +309,25 @@ def select_deepseek_mode(task_text: str, *, codex_mode: str = "CUSTOM_DEEPSEEK_T
             "accuracy": {"simple": "quick_thinking", "medium": "expert_plain", "complex": "expert_thinking"},
         }
         desired, why = table[performance][difficulty], f"{performance} 性能策略的 {difficulty} 任务"
-    ok, reason = _profile_available(desired, availability, has_image, has_file)
-    return {"selected_mode": desired, "selected_model_alias": mode_alias(desired), "why_selected": why, "fallback_reason": reason, "mode_available": ok, "manual_override": bool(fixed), "codex_mode": codex_mode, "tools_policy": tools_policy, "performance_mode": performance, "task_difficulty": difficulty, "smart_search": "ON" if "search" in desired else "OFF", "thinking": "ON" if "thinking" in desired else "OFF", "input_modality": "image" if desired.startswith("vision") else "file" if desired == "file_extract" else "text", "max_auto_escalation": 1}
+    split_strategy: dict[str, str] | None = None
+    combo = _combo_supported(availability)
+    if desired == "expert_thinking_search" and combo is False:
+        # A split is an explicit policy decision, not a successful expert+
+        # search combination.  Callers can reject it by checking the code.
+        split_strategy = {"first": "quick_search", "then": "expert_thinking"}
+        fallback_reason = "DEEPSEEK_THREE_IN_ONE_COMBO_UNAVAILABLE"
+        ok = _available(availability, "search") and _available(availability, "expert") and _available(availability, "thinking")
+        reason = fallback_reason
+    else:
+        ok, reason = _profile_available(desired, availability, has_image, has_file)
+    selected_profile = legacy_profile_for_mode(desired).as_dict()
+    selected_profile.update({"ui_generation": str((availability or {}).get("ui_generation", "unknown"))})
+    return {"selected_mode": desired, "selected_model_alias": mode_alias(desired), "selected_profile": selected_profile, "reasoning_strength": selected_profile["reasoning_strength"], "search_required": "search" in desired, "vision_required": desired.startswith("vision"), "file_required": desired == "file_extract", "combo_policy": "allow_split_search_then_reason" if split_strategy else "require_exact", "split_strategy": split_strategy, "fallback_reason": reason, "error_code": "DEEPSEEK_SEARCH_COMBO_UNAVAILABLE" if split_strategy else reason, "mode_available": ok, "manual_override": bool(fixed), "codex_mode": codex_mode, "tools_policy": tools_policy, "performance_mode": performance, "task_difficulty": difficulty, "smart_search": "ON" if "search" in desired else "OFF", "thinking": "ON" if "thinking" in desired else "OFF", "input_modality": "image" if desired.startswith("vision") else "file" if desired == "file_extract" else "text", "max_auto_escalation": 1}
+
+
+__all__ = [
+    "DeepSeekCapabilityProfile", "LEGACY_PROFILE_MAP", "capability_profile",
+    "legacy_profile_for_mode", "MODE_ALIASES", "mode_alias", "probe_deepseek_modes",
+    "select_deepseek_mode", "classify_task_difficulty", "escalation_target",
+    "preflight_attachment", "load_probe_state",
+]

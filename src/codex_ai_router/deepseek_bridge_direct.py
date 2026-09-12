@@ -82,6 +82,7 @@ _TEXT_MODE_PROFILES = {
     "quick_search": ("quick", False, True, "text"),
     "expert_plain": ("expert", False, False, "text"),
     "expert_thinking": ("expert", True, False, "text"),
+    "expert_max_review": ("expert", True, False, "text"),
     "expert_thinking_search": ("expert", True, True, "text"),
 }
 

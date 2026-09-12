@@ -194,7 +194,7 @@ function Invoke-RouterGet([string]$Uri) {
         return [pscustomobject]@{ status_code = $status; body = $null }
     }
 }
-function Invoke-RouterModeSwitch([ValidateSet('quick_plain','quick_thinking','expert_plain','expert_thinking','quick_search','expert_thinking_search','vision_expert_thinking','file_extract')][string]$TargetMode) {
+function Invoke-RouterModeSwitch([ValidateSet('quick_plain','quick_thinking','expert_plain','expert_thinking','expert_max_review','quick_search','expert_thinking_search','vision_expert_thinking','file_extract')][string]$TargetMode) {
     # This endpoint accepts only a mode name and verification flag.  It does not
     # accept task text, attachments, credentials, or any chat payload.
     $uri = 'http://127.0.0.1:18789/deepseek/mode-switch'
@@ -943,7 +943,8 @@ function Get-DeepSeekModeStatusText([object]$Probe) {
     }
     if ($Probe.error_code) { $lines += ("错误码：{0}；说明：{1}" -f $Probe.error_code,(Get-UiErrorExplanation ([string]$Probe.error_code))) }
     if ($script:DeepSeekLastSelection) { $lines += ("最近推荐模式：{0}（{1}）" -f $script:DeepSeekLastSelection.selected_mode,$script:DeepSeekLastSelection.selected_model_alias) }
-    $lines += ("当前网页模式：base={0}；深度思考={1}；智能搜索={2}；输入模态={3}" -f $Probe.current_base_mode,$Probe.current_thinking,$Probe.current_search,$Probe.current_modality)
+    $lines += ("当前网页模式：generation={0}；profile={1}；思考强度={2}；可用强度={3}；搜索={4}；视觉={5}；文件={6}" -f $Probe.ui_generation,$Probe.current_profile_label,$Probe.current_reasoning_strength,(([string[]]$Probe.reasoning_strength_options) -join ','),$Probe.current_search,$Probe.vision_available,$Probe.file_upload_available)
+    $lines += 'Codex 推理强度与 DeepSeek 思考强度是两个独立轴；二者不会互相自动同步。模式切换只操作可见模式控件，不发送 prompt、不上传文件。'
     $lines += '本地项目任务默认“专家 + 深度思考 + 不联网搜索”；截图任务默认“视觉 + 专家 + 深度思考”；仅最新资料、官网、价格、新闻才开启搜索。'
     return ($lines -join "`r`n")
 }
@@ -971,7 +972,7 @@ function Format-DeepSeekModeSwitchSummary([object]$Result) {
     $before = $Result.before; $after = $Result.after
     return ("目标模式：{0}`r`n切换前：base={1}；思考={2}；搜索={3}；模态={4}`r`n切换后：base={5}；思考={6}；搜索={7}；模态={8}`r`n状态匹配：{9}`r`n未发送提示词、未点击发送、未上传附件。" -f $Result.target_mode,$before.current_base_mode,$before.current_thinking,$before.current_search,$before.current_modality,$after.current_base_mode,$after.current_thinking,$after.current_search,$after.current_modality,$Result.matched)
 }
-function Invoke-DeepSeekModeSwitch([ValidateSet('quick_plain','quick_thinking','expert_plain','expert_thinking','quick_search','expert_thinking_search','vision_expert_thinking','file_extract')][string]$TargetMode) {
+function Invoke-DeepSeekModeSwitch([ValidateSet('quick_plain','quick_thinking','expert_plain','expert_thinking','expert_max_review','quick_search','expert_thinking_search','vision_expert_thinking','file_extract')][string]$TargetMode) {
     $result = Invoke-RouterModeSwitch $TargetMode
     $errorType = if ($result.error_code) { [string]$result.error_code } elseif ($result.matched) { 'PASS' } else { 'MODE_SWITCH_VERIFY_FAILED' }
     Add-DeepSeekLog 'mode-switch' ([pscustomobject]@{ exit_code = if($result.matched){0}else{1}; error_type = $errorType })
@@ -992,7 +993,7 @@ function Invoke-DeepSeekModeSwitch([ValidateSet('quick_plain','quick_thinking','
     }
     [System.Windows.Forms.MessageBox]::Show((Format-DeepSeekModeSwitchSummary $result),'DeepSeek 仅模式切换') | Out-Null
 }
-function Set-DeepSeekModePreference([ValidateSet('auto','quick_plain','quick_thinking','quick_search','expert_plain','expert_thinking','expert_thinking_search','vision_expert_thinking','file_extract')][string]$Preference) {
+function Set-DeepSeekModePreference([ValidateSet('auto','quick_plain','quick_thinking','quick_search','expert_plain','expert_thinking','expert_max_review','expert_thinking_search','vision_expert_thinking','file_extract')][string]$Preference) {
     $script:DeepSeekModePreference = $Preference
     Refresh-DeepSeekModePanel
     [System.Windows.Forms.MessageBox]::Show(("已设置 DeepSeek 模式策略：{0}`r`n这只影响本地选择说明，不会发送请求，也不会修改 Codex 配置。" -f $Preference),'DeepSeek 模式策略') | Out-Null
@@ -1003,7 +1004,7 @@ function Set-DeepSeekPerformanceMode([ValidateSet('economy','balanced','accuracy
     [System.Windows.Forms.MessageBox]::Show("已设置性能策略：$Performance。仅影响自动选择，不会发送请求。",'DeepSeek 模式策略') | Out-Null
 }
 function Format-DeepSeekSelectionSummary([object]$Record) {
-    $labels = @{ quick_plain = '快速'; quick_thinking = '快速 + 深度思考'; quick_search = '快速 + 搜索'; expert_plain = '专家'; expert_thinking = '专家 + 深度思考'; expert_thinking_search = '专家 + 深度思考 + 搜索'; vision_expert_thinking = '视觉 + 专家 + 深度思考'; file_extract = '文件提取' }
+    $labels = @{ quick_plain = '快速'; quick_thinking = '快速 + 深度思考'; quick_search = '快速 + 搜索'; expert_plain = '专家'; expert_thinking = '专家 + 深度思考'; expert_max_review = '专家 + 最高思考审查'; expert_thinking_search = '专家 + 深度思考 + 搜索'; vision_expert_thinking = '视觉 + 专家 + 深度思考'; file_extract = '文件提取' }
     $mode = if ($labels.ContainsKey([string]$Record.selected_mode)) { $labels[[string]$Record.selected_mode] } else { [string]$Record.selected_mode }
     $fallback = if ($Record.fallback_reason) { [string]$Record.fallback_reason } else { '无' }
     return ("推荐模式：{0}`r`n模型别名：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`n模式可用：{4}" -f $mode,$Record.selected_model_alias,$Record.why_selected,$fallback,$Record.mode_available)
@@ -1514,18 +1515,26 @@ Add-DeepSeekModeButton '固定快速+思考' { Set-DeepSeekModePreference 'quick
 Add-DeepSeekModeButton '固定快速+搜索' { Set-DeepSeekModePreference 'quick_search' }
 Add-DeepSeekModeButton '固定专家' { Set-DeepSeekModePreference 'expert_plain' }
 Add-DeepSeekModeButton '固定专家+深度思考' { Set-DeepSeekModePreference 'expert_thinking' } 190
+Add-DeepSeekModeButton '固定专家+最高思考审查' { Set-DeepSeekModePreference 'expert_max_review' } 210
 Add-DeepSeekModeButton '固定专家+深度思考+搜索' { Set-DeepSeekModePreference 'expert_thinking_search' } 220
 Add-DeepSeekModeButton '固定视觉+专家+深度思考' { Set-DeepSeekModePreference 'vision_expert_thinking' } 225
 Add-DeepSeekModeButton '固定文件提取' { Set-DeepSeekModePreference 'file_extract' }
 Add-DeepSeekModeButton '仅切换：快速' { Invoke-DeepSeekModeSwitch 'quick_plain' } 145
 Add-DeepSeekModeButton '仅切换：快速+思考' { Invoke-DeepSeekModeSwitch 'quick_thinking' } 165
+Add-DeepSeekModeButton '切到低思考' { Invoke-DeepSeekModeSwitch 'quick_plain' } 145
+Add-DeepSeekModeButton '切到中思考' { Invoke-DeepSeekModeSwitch 'quick_thinking' } 145
 Add-DeepSeekModeButton '仅切换：专家' { Invoke-DeepSeekModeSwitch 'expert_plain' } 145
 Add-DeepSeekModeButton '仅切换：专家+深度思考' { Invoke-DeepSeekModeSwitch 'expert_thinking' } 190
+Add-DeepSeekModeButton '切到高思考' { Invoke-DeepSeekModeSwitch 'expert_thinking' } 145
+Add-DeepSeekModeButton '仅切换：最高思考' { Invoke-DeepSeekModeSwitch 'expert_max_review' } 170
+Add-DeepSeekModeButton '切到最高思考审查' { Invoke-DeepSeekModeSwitch 'expert_max_review' } 180
 Add-DeepSeekModeButton '仅切换：快速+搜索' { Invoke-DeepSeekModeSwitch 'quick_search' } 165
 Add-DeepSeekModeButton '仅切换：专家+深度思考+搜索' { Invoke-DeepSeekModeSwitch 'expert_thinking_search' } 220
 Add-DeepSeekModeButton '仅预检：视觉+专家+思考' { Invoke-DeepSeekModeSwitch 'vision_expert_thinking' } 210
 Add-DeepSeekModeButton '仅预检：文件提取' { Invoke-DeepSeekModeSwitch 'file_extract' } 165
 Add-DeepSeekModeButton '探测 DeepSeek 模式' { Invoke-DeepSeekModeProbe } 165
+Add-DeepSeekModeButton '探测 DeepSeek 三合一模式' { Invoke-DeepSeekModeProbe } 190
+Add-DeepSeekModeButton '三合一兼容自检（只读）' { Invoke-DeepSeekModeProbe } 190 '模式切换不发送 prompt，不上传文件。'
 Add-DeepSeekModeButton '查看模式选择原因' { Explain-DeepSeekModeSelection } 165
 Add-DeepSeekHeadButton '自动选择辅助脑' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只读分类和健康门控，不发送 DeepSeek prompt。'
 Add-DeepSeekHeadButton '收集项目上下文' { Invoke-DeepSeekHeadCoordinate $false 'auto' } 205 '只运行固定只读检查，不修改文件、不运行测试。'

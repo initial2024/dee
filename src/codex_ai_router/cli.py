@@ -199,7 +199,7 @@ def main() -> None:
         if action == "coordinate":
             item.add_argument("--invoke-brain", action="store_true", help="explicitly send redacted context to the selected local brain")
             item.add_argument("--patch-draft", action="store_true", help="require a project-relative unified diff; never apply it")
-            item.add_argument("--selected-mode", choices=("quick_plain", "quick_thinking", "quick_search", "expert_plain", "expert_thinking", "expert_thinking_search"), help="require a previously verified local DeepSeek text mode")
+            item.add_argument("--selected-mode", choices=("quick_plain", "quick_thinking", "quick_search", "expert_plain", "expert_thinking", "expert_max_review", "expert_thinking_search"), help="require a previously verified local DeepSeek text mode")
             item.add_argument("--no-search", action="store_true", help="require search=false for a local project task")
             item.add_argument("--task-session-id", help="reuse a local sanitized task-session binding")
             item.add_argument("--use-session-context", action="store_true", help="include only the local session's sanitized summaries")

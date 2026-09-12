@@ -44,12 +44,26 @@ class WorkProfile:
     commit_policy: str
     risk_level: str
     target_executor: str = "xiaoyu_local"
+    # These are DeepSeek's web/API capability axes.  They are deliberately
+    # separate from codex_reasoning_strength and never imply a model call.
+    deepseek_ui_generation_preference: str = "unknown"
+    deepseek_reasoning_strength: str = "unknown"
+    deepseek_search_required: bool = False
+    deepseek_vision_required: bool = False
+    deepseek_file_required: bool = False
+    deepseek_combo_policy: str = "require_exact"
 
     def __post_init__(self) -> None:
         if self.codex_reasoning_strength not in REASONING_STRENGTHS:
             raise ValueError("INVALID_REASONING_STRENGTH")
         if self.desired_reasoning not in REASONING_STRENGTHS:
             raise ValueError("INVALID_DESIRED_REASONING")
+        if self.deepseek_ui_generation_preference not in {"legacy", "three_in_one", "unknown"}:
+            raise ValueError("INVALID_DEEPSEEK_UI_GENERATION")
+        if self.deepseek_reasoning_strength not in {"off", "low", "medium", "high", "max", "unsupported", "unknown"}:
+            raise ValueError("INVALID_DEEPSEEK_REASONING_STRENGTH")
+        if self.deepseek_combo_policy not in {"require_exact", "allow_split_search_then_reason", "reject_if_unavailable"}:
+            raise ValueError("INVALID_DEEPSEEK_COMBO_POLICY")
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +83,7 @@ DEFAULT_WORK_PROFILES: dict[str, WorkProfile] = {
         local_agent_policy="readonly", search_policy="disabled_by_default", vision_policy="disabled",
         file_policy="disabled", apply_policy="disabled", test_policy="disabled", commit_policy="disabled",
         risk_level="low",
+        deepseek_reasoning_strength="off",
     ),
     "medium_analysis": _profile(
         profile_id="medium_analysis", task_difficulty="medium", desired_reasoning="medium",
@@ -77,6 +92,7 @@ DEFAULT_WORK_PROFILES: dict[str, WorkProfile] = {
         local_agent_policy="readonly_plus_plan", search_policy="on_demand", vision_policy="explicit_only",
         file_policy="explicit_only", apply_policy="disabled", test_policy="disabled", commit_policy="disabled",
         risk_level="medium",
+        deepseek_reasoning_strength="medium",
     ),
     "medium_patch_draft": _profile(
         profile_id="medium_patch_draft", task_difficulty="medium", desired_reasoning="high",
@@ -85,6 +101,7 @@ DEFAULT_WORK_PROFILES: dict[str, WorkProfile] = {
         local_agent_policy="review_only_patch_draft", search_policy="disabled_by_default", vision_policy="explicit_only",
         file_policy="explicit_only", apply_policy="disabled", test_policy="disabled", commit_policy="disabled",
         risk_level="medium",
+        deepseek_reasoning_strength="high",
     ),
     "complex_debug": _profile(
         profile_id="complex_debug", task_difficulty="complex", desired_reasoning="high",
@@ -93,14 +110,15 @@ DEFAULT_WORK_PROFILES: dict[str, WorkProfile] = {
         local_agent_policy="readonly_plus_patch_draft", search_policy="on_demand", vision_policy="explicit_only",
         file_policy="explicit_only", apply_policy="user_confirm_required", test_policy="user_confirm_required",
         commit_policy="disabled", risk_level="complex",
+        deepseek_reasoning_strength="high",
     ),
     "patch_review_high_risk": _profile(
         profile_id="patch_review_high_risk", task_difficulty="high_risk", desired_reasoning="very_high",
-        codex_custom_mode="CUSTOM", codex_reasoning_strength="very_high", deepseek_mode="expert_thinking",
+        codex_custom_mode="CUSTOM", codex_reasoning_strength="very_high",
         local_model_policy="not_final_reviewer", external_api_policy="disabled",
         local_agent_policy="static_review_only", search_policy="disabled_by_default", vision_policy="explicit_only",
         file_policy="explicit_only", apply_policy="disabled", test_policy="disabled", commit_policy="disabled",
-        risk_level="high_risk",
+        risk_level="high_risk", deepseek_mode="expert_max_review", deepseek_reasoning_strength="max",
     ),
     "official_codex_handoff": _profile(
         profile_id="official_codex_handoff", task_difficulty="complex", desired_reasoning="max",
@@ -109,6 +127,7 @@ DEFAULT_WORK_PROFILES: dict[str, WorkProfile] = {
         local_agent_policy="context_pack_only", search_policy="on_demand", vision_policy="explicit_only",
         file_policy="explicit_only", apply_policy="codex_official_only", test_policy="codex_official_only",
         commit_policy="codex_official_only", risk_level="complex", target_executor="codex_official",
+        deepseek_reasoning_strength="max",
     ),
 }
 
@@ -165,7 +184,7 @@ def map_profile(profile: WorkProfile | str) -> dict[str, Any]:
     value = get_work_profile(profile) if isinstance(profile, str) else profile
     data = value.as_dict()
     data.update({
-        "deepseek": {"mode": value.deepseek_mode, "search": value.search_policy == "always", "search_policy": value.search_policy},
+        "deepseek": {"mode": value.deepseek_mode, "search": value.deepseek_search_required or value.search_policy == "always", "search_policy": value.search_policy, "ui_generation": value.deepseek_ui_generation_preference, "reasoning_strength": value.deepseek_reasoning_strength, "vision_required": value.deepseek_vision_required, "file_required": value.deepseek_file_required, "combo_policy": value.deepseek_combo_policy},
         "local_model": {"policy": value.local_model_policy},
         "external_api": {"policy": value.external_api_policy, "enabled": False},
         "local_agent": {"policy": value.local_agent_policy},
@@ -185,7 +204,8 @@ def generate_codex_handoff(profile: WorkProfile | str, *, task: str | None = Non
         "确认当前 Codex 输入框右下角为官方模型后，再执行任务。\n"
         "小羽不会读取或点击 Codex UI。\n"
         f"推荐 Work Profile：{value.profile_id}；任务难度：{value.task_difficulty}。\n"
-        f"辅助 DeepSeek 模式：{value.deepseek_mode}；本地 Agent 策略：{value.local_agent_policy}。\n"
+        f"辅助 DeepSeek 模式：{value.deepseek_mode}；DeepSeek 思考强度：{value.deepseek_reasoning_strength}；本地 Agent 策略：{value.local_agent_policy}。\n"
+        "Codex 推理强度是 Codex 官方自定义模式设置；DeepSeek 思考强度是 DeepSeek 网页/API 能力设置；二者不会互相自动同步。\n"
         "小羽只提供脱敏计划、只读结果或 review-only 草案；不会读取或操控 Codex 官方 UI。\n"
         "需要真实写入、测试或提交时，由 Codex 官方工具在人工确认后执行。"
     )

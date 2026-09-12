@@ -47,5 +47,12 @@ class ModeSwitchProxyTests(unittest.TestCase):
         status, body = proxy_mode_switch({"target_mode": "quick_plain", "verify": True}, opener=lambda *_, **__: Response(bad))
         self.assertEqual(status, 502); self.assertEqual(body["error_code"], "MODE_SWITCH_VERIFY_FAILED")
 
+    def test_three_in_one_payload_is_allowlisted_without_prompt_fields(self):
+        payload = validate_mode_switch_payload({"ui_generation": "three_in_one", "reasoning_strength": "high", "search": True, "vision": False, "file": False, "verify": True})
+        self.assertEqual(payload["reasoning_strength"], "high")
+        self.assertTrue(payload["search"])
+        with self.assertRaises(ModeSwitchProxyError):
+            validate_mode_switch_payload({"target_profile": "expert_thinking", "verify": True, "messages": []})
+
 
 if __name__ == "__main__": unittest.main()

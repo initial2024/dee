@@ -149,7 +149,7 @@ class SessionContextHub:
     def _safe_profile(value: Any) -> dict[str, Any] | None:
         if not isinstance(value, dict):
             return None
-        allowed = {"profile_id", "task_difficulty", "desired_reasoning", "codex_custom_mode", "codex_reasoning_strength", "deepseek_mode", "local_model_policy", "external_api_policy", "local_agent_policy", "search_policy", "vision_policy", "file_policy", "apply_policy", "test_policy", "commit_policy", "risk_level", "target_executor", "recommended_codex_mode", "recommended_codex_reasoning_strength", "user_confirmed_codex_mode", "handoff_created_at"}
+        allowed = {"profile_id", "task_difficulty", "desired_reasoning", "codex_custom_mode", "codex_reasoning_strength", "deepseek_mode", "deepseek_ui_generation_preference", "deepseek_reasoning_strength", "deepseek_search_required", "deepseek_vision_required", "deepseek_file_required", "deepseek_combo_policy", "local_model_policy", "external_api_policy", "local_agent_policy", "search_policy", "vision_policy", "file_policy", "apply_policy", "test_policy", "commit_policy", "risk_level", "target_executor", "recommended_codex_mode", "recommended_codex_reasoning_strength", "user_confirmed_codex_mode", "handoff_created_at"}
         return {key: _safe_summary(value[key], limit=120) if isinstance(value[key], str) else value[key] for key in allowed if key in value}
 
     def append_codex_status_from_file(self, session_id: str, file_path: Path) -> dict[str, Any]:
@@ -193,6 +193,7 @@ class SessionContextHub:
         allowed = {
             "profile_id", "task_difficulty", "desired_reasoning", "codex_custom_mode",
             "codex_reasoning_strength", "deepseek_mode", "local_model_policy",
+            "deepseek_ui_generation_preference", "deepseek_reasoning_strength", "deepseek_search_required", "deepseek_vision_required", "deepseek_file_required", "deepseek_combo_policy",
             "external_api_policy", "local_agent_policy", "search_policy", "vision_policy",
             "file_policy", "apply_policy", "test_policy", "commit_policy", "risk_level",
             "target_executor",
