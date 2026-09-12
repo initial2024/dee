@@ -145,7 +145,9 @@ Assert-True ($source -match "Invoke-WebRequest.*127\.0\.0\.1:8791/mode-probe" -a
 Assert-True ($source -match 'ROUTER_CLI_RUNTIME_NOT_FOUND' -and $source -match 'ROUTER_RUNTIME_NOT_FOUND' -and $source -match 'ACTION_ERROR_SANITIZED_UNKNOWN') 'router_runtime_error_is_classified'
 Assert-True ($source -match 'Get-Command py\.exe' -and $source -match 'Get-Command python\.exe') 'router_runtime_discovery_includes_windows_launchers'
 Assert-True ($source -match 'stage：' -and $source -match 'bridge_http_ready：' -and $source -match 'router_required：') 'ui_error_summary_contains_runtime_diagnostics'
-Assert-True ($source -match 'open-deepseek-web' -and $source -match 'Start-Process \$DeepSeekWebUrl') 'deepseek_open_web_button_is_browser_only'
+Assert-True ($source -match 'Resolve-ChromeExecutable' -and $source -match 'CHROME_OPEN' -and $source -match 'Start-Process -FilePath \(\[string\]\$open\.executable\)' -and $source -match '--new-window' -and $source -notmatch 'Start-Process \$DeepSeekWebUrl') 'deepseek_open_web_uses_chrome_only'
+Assert-True ($source -match 'CHROME_NOT_FOUND' -and $source -match '拒绝回退到 Firefox 或系统默认浏览器') 'deepseek_open_web_has_no_firefox_fallback'
+Assert-True ($source -match 'Chrome executable:' -and $source -match 'Chrome available:') 'deepseek_launcher_reports_chrome_diagnostics'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
 . (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
 Assert-True (Use-DefaultNoCustomHeader 'https://api.groq.com/openai/v1') 'groq_runtime_default_header_is_no'

@@ -103,8 +103,18 @@ function Resolve-BridgeStartCommand {
 function Resolve-BridgeHealthCommand {
     return [pscustomobject]@{ command_kind = 'HTTP_GET'; expected_path = 'http://127.0.0.1:8791/health'; command_line_sanitized = 'GET /health'; bridge_required = 'YES'; worker_required = 'NO' }
 }
+function Resolve-ChromeExecutable {
+    $command = Get-Command chrome.exe -ErrorAction SilentlyContinue
+    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) { return (Resolve-Path -LiteralPath $command.Source).Path }
+    $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    $candidates = @($roots | ForEach-Object { Join-Path ([string]$_) 'Google\Chrome\Application\chrome.exe' })
+    foreach ($candidate in $candidates) { if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return (Resolve-Path -LiteralPath $candidate).Path } }
+    return $null
+}
 function Resolve-DeepSeekOpenCommand {
-    return [pscustomobject]@{ command_kind = 'BROWSER_OPEN'; expected_path = $DeepSeekWebUrl; command_line_sanitized = 'open browser URL'; bridge_required = 'NO'; worker_required = 'NO'; error_code = 'NONE' }
+    $chrome = Resolve-ChromeExecutable
+    if ($chrome) { return [pscustomobject]@{ command_kind = 'CHROME_OPEN'; expected_path = $DeepSeekWebUrl; executable = $chrome; command_line_sanitized = 'chrome.exe --new-window <DeepSeek URL>'; file_exists = 'YES'; runtime_exists = 'YES'; bridge_required = 'NO'; worker_required = 'NO'; error_code = 'NONE'; suggested_fix = 'NONE' } }
+    return [pscustomobject]@{ command_kind = 'CHROME_OPEN'; expected_path = $DeepSeekWebUrl; executable = ''; command_line_sanitized = 'chrome.exe --new-window <DeepSeek URL>'; file_exists = 'NO'; runtime_exists = 'NO'; bridge_required = 'NO'; worker_required = 'NO'; error_code = 'CHROME_NOT_FOUND'; suggested_fix = '安装 Google Chrome，或确认 chrome.exe 位于标准安装路径。' }
 }
 function Test-LauncherPrerequisites {
     $start = Resolve-BridgeStartCommand
@@ -132,6 +142,8 @@ function Format-DeepSeekLauncherDiagnostic([object]$Diagnostic) {
         ('Worker root: {0}' -f $Diagnostic.resolved_worker_root),
         ('Bridge start command: {0}' -f $start.command_line_sanitized),
         ('Bridge health URL: {0}' -f $Diagnostic.bridge_health_command.expected_path),
+        ('Chrome executable: {0}' -f $Diagnostic.deepseek_open_command.executable),
+        ('Chrome available: {0}' -f $Diagnostic.deepseek_open_command.runtime_exists),
         ('Worker required: {0}' -f $Diagnostic.worker_required),
         ('Bridge entry exists: {0}' -f $Diagnostic.bridge_entry_exists),
         ('Node/npm available: {0}' -f $Diagnostic.runtime_exists),
@@ -177,6 +189,8 @@ function Get-UiErrorExplanation([string]$Code) {
         'BRIDGE_NOT_RUNNING' { return 'Bridge 未运行；请先启动本机 127.0.0.1:8791 Bridge。' }
         'BRIDGE_MODE_PROBE_FAILED' { return 'Bridge /mode-probe 只读检查失败；未调用 Router、未发送 prompt。' }
         'ROUTER_CLI_RUNTIME_NOT_FOUND' { return '未找到可用的 Router Python 运行时；已尝试项目环境和 Windows Python Launcher。' }
+        'CHROME_NOT_FOUND' { return '未找到 Google Chrome；已拒绝回退到 Firefox 或系统默认浏览器。请安装 Chrome 或检查 chrome.exe 路径。' }
+        'CHROME_OPEN_FAILED' { return '已找到 Chrome，但启动新窗口失败；请检查 Chrome 安装或进程状态。' }
         'ACTION_ERROR_SANITIZED_UNKNOWN' { return '本地操作发生未分类错误；详情已脱敏，请查看高级诊断字段。' }
         'WORKER_SCRIPT_NOT_REQUIRED_FOR_DIRECT_BRIDGE' { return '当前三合一探测走 Bridge 8791，旧 Worker 不是必需项。' }
         'LEGACY_WORKER_SCRIPT_NOT_FOUND' { return '旧 Worker 启动脚本不存在；它不阻塞 Bridge-only 模式探测。' }
@@ -194,6 +208,7 @@ function Get-UiErrorExplanation([string]$Code) {
 }
 function Get-UiActionErrorCode([string]$Detail) {
     if ($Detail -match '(ROUTER_RUNTIME_NOT_FOUND|ROUTER_CLI_RUNTIME_NOT_FOUND)') { return 'ROUTER_CLI_RUNTIME_NOT_FOUND' }
+    if ($Detail -match '(CHROME_NOT_FOUND|CHROME_RUNTIME_NOT_FOUND|CHROME_OPEN_FAILED)') { return $Matches[1] -replace 'CHROME_RUNTIME_NOT_FOUND','CHROME_NOT_FOUND' }
     if ($Detail -match '(BRIDGE_STARTED_BUT_HTTP_UNREACHABLE|BRIDGE_PROCESS_EXITED_EARLY|BRIDGE_PORT_NOT_LISTENING|BRIDGE_HTTP_UNREACHABLE|BRIDGE_NOT_RUNNING|BRIDGE_MODE_PROBE_FAILED)') { return $Matches[1] }
     if ($Detail -match '(ROUTER_NOT_LISTENING|ROUTER_NOT_RUNNING|actively refused|connection refused)') { return 'ROUTER_NOT_LISTENING' }
     if ($Detail -match '(LOCAL_LIGHT_UNAVAILABLE|LOCAL_DIRECT_BACKEND_ERROR|LOCAL_BACKEND_UNAVAILABLE)') { return 'LOCAL_LIGHT_UNAVAILABLE' }
@@ -644,19 +659,20 @@ function Wait-DeepSeekBridgeHttpReady([object]$Process,[int]$TimeoutSeconds=10) 
 function New-DeepSeekLauncherResult([string]$Action,[int]$ExitCode,[string]$ErrorType,[object]$Diagnostic=$null,[string]$ExpectedPath='',[string]$CommandKind='') {
     if (-not $Diagnostic) { $Diagnostic = Test-LauncherPrerequisites }
     $start = $Diagnostic.bridge_start_command
+    $commandSpec = if ($Action -eq 'open-deepseek-web') { $Diagnostic.deepseek_open_command } else { $start }
     $evidence = Get-DeepSeekLauncherRuntimeEvidence
     $stage = switch ($Action) { 'start-bridge' { if($ErrorType -eq 'PASS' -or $ErrorType -eq 'ALREADY_RUNNING'){'wait_http_ready'}else{'start_process'} }; 'health-check' {'wait_http_ready'}; 'start-worker' {'resolve_paths'}; default {'resolve_paths'} }
     return [pscustomobject]@{
         action = $Action; exit_code = $ExitCode; error_type = $ErrorType; error_code = $ErrorType
-        expected_path = if ($ExpectedPath) { $ExpectedPath } else { $start.expected_path }
+        expected_path = if ($ExpectedPath) { $ExpectedPath } else { $commandSpec.expected_path }
         resolved_router_root = $Diagnostic.resolved_router_root; resolved_bridge_root = $Diagnostic.resolved_bridge_root; resolved_worker_root = $Diagnostic.resolved_worker_root
-        cwd = (Get-Location).Path; command_kind = if ($CommandKind) { $CommandKind } else { $start.command_kind }
-        command_line_sanitized = if ($start.command_line_sanitized) { $start.command_line_sanitized } else { 'not available' }
-        file_exists = $Diagnostic.bridge_entry_exists; runtime_exists = $Diagnostic.runtime_exists; suggested_fix = if ($start.suggested_fix) { $start.suggested_fix } else { 'NONE' }
+        cwd = (Get-Location).Path; command_kind = if ($CommandKind) { $CommandKind } else { $commandSpec.command_kind }
+        command_line_sanitized = if ($commandSpec.command_line_sanitized) { $commandSpec.command_line_sanitized } else { 'not available' }
+        file_exists = if ($Action -eq 'open-deepseek-web') { $commandSpec.file_exists } else { $Diagnostic.bridge_entry_exists }; runtime_exists = if ($Action -eq 'open-deepseek-web') { $commandSpec.runtime_exists } else { $Diagnostic.runtime_exists }; suggested_fix = if ($commandSpec.suggested_fix) { $commandSpec.suggested_fix } elseif ($start.suggested_fix) { $start.suggested_fix } else { 'NONE' }
         bridge_command_sanitized = if ($start.command_line_sanitized) { $start.command_line_sanitized } else { 'not available' }; stage = $stage
         bridge_process_id = $evidence.process_id; bridge_exit_code = if($evidence.exit_code){$evidence.exit_code}else{[string]$ExitCode}; bridge_stdout_tail = $evidence.stdout_tail; bridge_stderr_tail = $evidence.stderr_tail
         bridge_port_listening = $evidence.port_listening; bridge_http_ready = $evidence.http_ready; last_health_endpoint = $evidence.last_health_endpoint; last_health_error = $evidence.last_health_error
-        bridge_required = 'YES'; worker_required = $Diagnostic.worker_required; router_required = 'NO'; router_status = Get-DeepSeekPortState 18789; prompt_sent = $false; model_call_sent = $false
+        bridge_required = if ($Action -eq 'open-deepseek-web') { 'NO' } else { 'YES' }; worker_required = if ($Action -eq 'open-deepseek-web') { 'NO' } else { $Diagnostic.worker_required }; router_required = 'NO'; router_status = Get-DeepSeekPortState 18789; prompt_sent = $false; model_call_sent = $false
     }
 }
 function Start-DeepSeekBridgeProcess {
@@ -734,9 +750,10 @@ function Invoke-DeepSeekLocalScript([ValidateSet('start-bridge','start-worker','
         'health-check' { return (Invoke-DeepSeekBridgeHealth) }
         'stop' { return (Stop-DeepSeekBridgeProcess) }
         'open-deepseek-web' {
-            $diagnostic = Test-LauncherPrerequisites; $script:DeepSeekLauncherLast = $diagnostic
-            try { Start-Process $DeepSeekWebUrl; return (New-DeepSeekLauncherResult 'open-deepseek-web' 0 'OPENED' $diagnostic $DeepSeekWebUrl 'BROWSER_OPEN') }
-            catch { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'BRIDGE_START_FAILED' $diagnostic $DeepSeekWebUrl 'BROWSER_OPEN') }
+            $diagnostic = Test-LauncherPrerequisites; $script:DeepSeekLauncherLast = $diagnostic; $open = $diagnostic.deepseek_open_command
+            if ($open.error_code -ne 'NONE' -or [string]::IsNullOrWhiteSpace([string]$open.executable)) { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 ([string]$open.error_code) $diagnostic $DeepSeekWebUrl 'CHROME_OPEN') }
+            try { Start-Process -FilePath ([string]$open.executable) -ArgumentList @('--new-window',$DeepSeekWebUrl); return (New-DeepSeekLauncherResult 'open-deepseek-web' 0 'OPENED' $diagnostic $DeepSeekWebUrl 'CHROME_OPEN') }
+            catch { return (New-DeepSeekLauncherResult 'open-deepseek-web' 1 'CHROME_OPEN_FAILED' $diagnostic $DeepSeekWebUrl 'CHROME_OPEN') }
         }
         'smoke' { return (New-DeepSeekLauncherResult 'smoke' 1 'SMOKE_REQUIRES_EXPLICIT_DIRECT_BRIDGE_FLOW' (Test-LauncherPrerequisites)) }
     }
@@ -1996,6 +2013,9 @@ if ($SelfTest) {
     Write-Output ('BRIDGE_LAUNCHER_ENTRY_EXISTS=' + $launcherDiagnostic.bridge_entry_exists)
     Write-Output ('BRIDGE_LAUNCHER_RUNTIME_EXISTS=' + $launcherDiagnostic.runtime_exists)
     Write-Output ('BRIDGE_LAUNCHER_WORKER_REQUIRED=' + $launcherDiagnostic.worker_required)
+    Write-Output ('CHROME_OPEN_COMMAND=' + $launcherDiagnostic.deepseek_open_command.command_kind)
+    Write-Output ('CHROME_RUNTIME_DISCOVERY=' + $launcherDiagnostic.deepseek_open_command.runtime_exists)
+    Write-Output 'DEEPSEEK_OPEN_USES_CHROME=YES'
     Write-Output 'BRIDGE_ONLY_HEALTH_NO_WORKER=YES'
     Write-Output 'THREE_IN_ONE_PROBE_NO_WORKER_REQUIRED=YES'
     Write-Output 'BRIDGE_HTTP_READY_GATE=YES'
