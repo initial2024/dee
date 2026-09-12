@@ -170,6 +170,14 @@ function Get-UiErrorExplanation([string]$Code) {
         'BRIDGE_START_FAILED' { return 'Bridge 启动命令执行失败；请检查启动器诊断和 Bridge 项目依赖。' }
         'BRIDGE_HEALTH_FAILED' { return 'Bridge 健康检查失败；未发送 prompt。' }
         'BRIDGE_NOT_LISTENING' { return 'Bridge 启动命令结束后 8791 未监听；未继续执行聊天操作。' }
+        'BRIDGE_STARTED_BUT_HTTP_UNREACHABLE' { return 'Bridge 进程返回成功但健康 HTTP 不可达；已拒绝把启动标记为 PASS。' }
+        'BRIDGE_PROCESS_EXITED_EARLY' { return 'Bridge 进程在健康检查完成前退出；请查看脱敏 stdout/stderr 尾部。' }
+        'BRIDGE_PORT_NOT_LISTENING' { return 'Bridge 启动后 8791 未监听；请检查启动入口、端口配置和依赖。' }
+        'BRIDGE_HTTP_UNREACHABLE' { return '8791 已有监听或启动命令返回，但 /health HTTP 检查失败；未继续执行模式探测。' }
+        'BRIDGE_NOT_RUNNING' { return 'Bridge 未运行；请先启动本机 127.0.0.1:8791 Bridge。' }
+        'BRIDGE_MODE_PROBE_FAILED' { return 'Bridge /mode-probe 只读检查失败；未调用 Router、未发送 prompt。' }
+        'ROUTER_CLI_RUNTIME_NOT_FOUND' { return '未找到可用的 Router Python 运行时；已尝试项目环境和 Windows Python Launcher。' }
+        'ACTION_ERROR_SANITIZED_UNKNOWN' { return '本地操作发生未分类错误；详情已脱敏，请查看高级诊断字段。' }
         'WORKER_SCRIPT_NOT_REQUIRED_FOR_DIRECT_BRIDGE' { return '当前三合一探测走 Bridge 8791，旧 Worker 不是必需项。' }
         'LEGACY_WORKER_SCRIPT_NOT_FOUND' { return '旧 Worker 启动脚本不存在；它不阻塞 Bridge-only 模式探测。' }
         'WORKER_START_FAILED' { return '旧 Worker 启动失败；Bridge-only 操作仍可单独使用。' }
@@ -185,15 +193,19 @@ function Get-UiErrorExplanation([string]$Code) {
     }
 }
 function Get-UiActionErrorCode([string]$Detail) {
+    if ($Detail -match '(ROUTER_RUNTIME_NOT_FOUND|ROUTER_CLI_RUNTIME_NOT_FOUND)') { return 'ROUTER_CLI_RUNTIME_NOT_FOUND' }
+    if ($Detail -match '(BRIDGE_STARTED_BUT_HTTP_UNREACHABLE|BRIDGE_PROCESS_EXITED_EARLY|BRIDGE_PORT_NOT_LISTENING|BRIDGE_HTTP_UNREACHABLE|BRIDGE_NOT_RUNNING|BRIDGE_MODE_PROBE_FAILED)') { return $Matches[1] }
     if ($Detail -match '(ROUTER_NOT_LISTENING|ROUTER_NOT_RUNNING|actively refused|connection refused)') { return 'ROUTER_NOT_LISTENING' }
     if ($Detail -match '(LOCAL_LIGHT_UNAVAILABLE|LOCAL_DIRECT_BACKEND_ERROR|LOCAL_BACKEND_UNAVAILABLE)') { return 'LOCAL_LIGHT_UNAVAILABLE' }
     if ($Detail -match '(CODEX_CONFIG_NOT_FOUND|OFFICIAL_PROFILE_NOT_CAPTURED|CODEX_CONFIG_TOML_PARSE_FAILED|CODEX_CONFIG_TOML_INVALID|CODEX_CONFIG_READ_PERMISSION_DENIED|CODEX_CONFIG_CLI_ENTRYPOINT_FAILED|CODEX_CONFIG_CLI_JSON_PARSE_FAILED|CODEX_CONFIG_PYTHON_IMPORT_FAILED|CODEX_CONFIG_WORKDIR_INVALID|NON_LOOPBACK_ENDPOINT_BLOCKED)') { return $Matches[1] }
     if ($Detail -match '(DOWNSTREAM_UNAVAILABLE|EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED|EXTERNAL_MODEL_NOT_ELIGIBLE|LIVE_CONFIRMATION_REQUIRED|AUTH_MISSING|DEEPSEEK_MODE_UNAVAILABLE|UI_PROBE_FAILED|UI_CHANGED|LOGIN_REQUIRED|RATE_LIMITED|PORT_OCCUPIED_BY_UNKNOWN_PROCESS|STOP_OLD_ROUTER_CONFIRMATION_REQUIRED|STALE_OR_INCOMPATIBLE_ROUTER)') { return $Matches[1] }
-    return 'ACTION_ERROR_UNCLASSIFIED'
+    return 'ACTION_ERROR_SANITIZED_UNKNOWN'
 }
 function New-UiActionFailure([string]$Name,[string]$Code,[string]$Detail) {
     $routerStatus = if ($SelfTest) { 'NOT_LISTENING' } else { 'UNKNOWN' }
     if (-not $SelfTest) { try { $routerStatus = (Get-RouterStatus).listener_status } catch {} }
+    $bridgeEvidence = try { Get-DeepSeekLauncherRuntimeEvidence } catch { $null }
+    $stage = if ($Code -match '^ROUTER_CLI_RUNTIME_NOT_FOUND$') { 'resolve_paths' } elseif ($Code -match '^ROUTER_NOT_LISTENING$') { 'router_proxy' } elseif ($Code -match '^BRIDGE_MODE_PROBE_FAILED$') { 'mode_probe' } elseif ($Code -match '^BRIDGE_') { 'wait_http_ready' } else { 'resolve_paths' }
     return [pscustomobject]@{
         status = 'ERROR'
         action_name = $Name
@@ -210,6 +222,18 @@ function New-UiActionFailure([string]$Name,[string]$Code,[string]$Detail) {
         stdout_summary = ''
         config_exists = Test-Path -LiteralPath $CodexConfig
         router_required = 'NO'
+        stage = $stage
+        resolved_bridge_root = $DeepSeekBridgeRoot
+        bridge_command_sanitized = 'npm start'
+        bridge_process_id = if($bridgeEvidence){$bridgeEvidence.process_id}else{''}
+        bridge_exit_code = if($bridgeEvidence){$bridgeEvidence.exit_code}else{''}
+        bridge_stdout_tail = if($bridgeEvidence){$bridgeEvidence.stdout_tail}else{''}
+        bridge_stderr_tail = if($bridgeEvidence){$bridgeEvidence.stderr_tail}else{''}
+        bridge_port_listening = if($bridgeEvidence){$bridgeEvidence.port_listening}else{(Get-DeepSeekPortState 8791)}
+        bridge_http_ready = if($bridgeEvidence){$bridgeEvidence.http_ready}else{'NO'}
+        last_health_endpoint = if($bridgeEvidence){$bridgeEvidence.last_health_endpoint}else{'http://127.0.0.1:8791/health'}
+        last_health_error = if($bridgeEvidence){$bridgeEvidence.last_health_error}else{'NOT_CHECKED'}
+        prompt_sent = 'NO'
     }
 }
 function Add-UiDebugInfo([string]$Name,[string]$Code,[string]$Detail) {
@@ -224,7 +248,7 @@ function Invoke-SafeUiAction([string]$Name,[scriptblock]$Action) {
         $code = Get-UiActionErrorCode $detail
         Add-UiDebugInfo -Name $Name -Code $code -Detail $detail
         $failure = New-UiActionFailure $Name $code $detail
-        $summary = "操作失败`r`n操作：$($failure.action_name)`r`n错误码：$($failure.error_code)`r`n原因：$($failure.sanitized_reason)`r`n建议：$($failure.suggested_fix)`r`nRouter：$($failure.router_status)`r`n配置：$($failure.config_path)`r`n真实配置已修改：$($failure.real_config_was_modified)`r`n模型调用已发送：$($failure.model_call_was_sent)"
+        $summary = "操作失败`r`n操作：$($failure.action_name)`r`n错误码：$($failure.error_code)`r`n阶段：$($failure.stage)`r`n原因：$($failure.sanitized_reason)`r`n建议：$($failure.suggested_fix)`r`nRouter：$($failure.router_status)`r`nRouter required：$($failure.router_required)`r`nBridge HTTP ready：$($failure.bridge_http_ready)`r`n配置：$($failure.config_path)`r`n真实配置已修改：$($failure.real_config_was_modified)`r`n模型调用已发送：$($failure.model_call_was_sent)"
         if (-not $SelfTest) { [System.Windows.Forms.MessageBox]::Show($summary,'小羽 Router 控制台',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null }
         return $failure
     }
@@ -355,7 +379,7 @@ function Get-RouterListenerInfo {
     $addresses = @($entries | ForEach-Object { [string]$_.LocalAddress } | Sort-Object -Unique)
     $listenerPid = [int]$entry.OwningProcess; $metadata = Get-ProcessMetadata $listenerPid
     $identityText = ($metadata.process_name + ' ' + $metadata.executable_path + ' ' + $metadata.command_line)
-    $identityMatch = $identityText -match '(?i)(codex[_-]ai[_-]router|xiaoyu[-_]router|python(?:\.exe)?\s+.*-m\s+codex_ai_router\.cli\s+serve)'
+    $identityMatch = $identityText -match '(?i)(codex[_-]ai[_-]router|xiaoyu[-_]router|run-router\.py|python(?:\d+(?:\.\d+)?)?\.exe\s+.*-m\s+codex_ai_router\.cli\s+serve)'
     $ownerKind = if ($identityMatch) { 'XIAOYU_ROUTER' } else { 'UNKNOWN_PROCESS' }
     $loopback = (@($addresses | Where-Object { $_ -notin @('127.0.0.1','::1','localhost') }).Count -eq 0)
     return [pscustomobject]@{
@@ -415,6 +439,16 @@ function Get-RouterLaunchSpec {
     $candidates = @()
     if ($env:XIAOYU_ROUTER_PYTHON) { $candidates += $env:XIAOYU_ROUTER_PYTHON }
     $candidates += @((Join-Path $ProjectRoot '.venv\Scripts\python.exe'),(Join-Path $ProjectRoot 'venv\Scripts\python.exe'))
+    $pythonLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($pythonLauncher -and $pythonLauncher.Source) {
+        try {
+            $resolvedPython = (& $pythonLauncher.Source -3 -c 'import sys; print(sys.executable)' 2>$null | Select-Object -Last 1).ToString().Trim()
+            if ($resolvedPython) { $candidates += $resolvedPython }
+        } catch {}
+        $candidates += $pythonLauncher.Source
+    }
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($pythonCommand -and $pythonCommand.Source) { $candidates += $pythonCommand.Source }
     foreach ($root in @((Join-Path $env:LOCALAPPDATA 'Programs\Python'),(Join-Path $env:USERPROFILE 'miniconda3'),(Join-Path $env:USERPROFILE 'anaconda3'),'C:\ProgramData\Anaconda3','C:\EasyDiffusion\installer_files\env')) {
         if (Test-Path -LiteralPath $root) { $candidates += @(Get-ChildItem -LiteralPath $root -Filter 'python.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName) }
     }
@@ -556,9 +590,62 @@ function Get-DeepSeekOperationType([string]$Raw,[int]$ExitCode) {
     if ($Raw -match 'NOT_LISTENING|UNREACHABLE|NOT_READY') { return 'SERVICE_UNAVAILABLE' }
     return 'LOCAL_SCRIPT_FAILED'
 }
+function Get-DeepSeekLogTail([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try { return (Redact-Text ((Get-Content -LiteralPath $Path -Tail 20 -Encoding UTF8 -ErrorAction Stop) -join "`n")) } catch { return '' }
+}
+function Get-DeepSeekLauncherRuntimeEvidence {
+    $runtime = $script:DeepSeekLauncherRuntime
+    if (-not $runtime) {
+        return [pscustomobject]@{ process_id = ''; process_running = 'NO'; exit_code = ''; stdout_tail = ''; stderr_tail = ''; port_listening = (Get-DeepSeekPortState 8791); http_ready = 'NO'; last_health_endpoint = 'http://127.0.0.1:8791/health'; last_health_error = 'NOT_CHECKED' }
+    }
+    $process = $runtime.process
+    $running = $false; $exitCode = ''
+    try { $running = -not $process.HasExited; if (-not $running) { $exitCode = [string]$process.ExitCode } } catch {}
+    return [pscustomobject]@{
+        process_id = [string]$runtime.process_id; process_running = if ($running) { 'YES' } else { 'NO' }; exit_code = $exitCode
+        stdout_tail = Get-DeepSeekLogTail $runtime.stdout_path; stderr_tail = Get-DeepSeekLogTail $runtime.stderr_path
+        port_listening = if ((Get-DeepSeekPortState 8791) -eq '127.0.0.1 本机监听') { 'YES' } else { Get-DeepSeekPortState 8791 }
+        http_ready = if ($runtime.http_ready) { 'YES' } else { 'NO' }; last_health_endpoint = 'http://127.0.0.1:8791/health'; last_health_error = if ($runtime.last_health_error) { $runtime.last_health_error } else { 'NOT_CHECKED' }
+    }
+}
+function Test-DeepSeekBridgeHttpReady {
+    $endpoint = 'http://127.0.0.1:8791/health'
+    if ((Get-DeepSeekPortState 8791) -ne '127.0.0.1 本机监听') { return [pscustomobject]@{ port_listening = $false; http_ready = $false; status_code = ''; error_code = 'BRIDGE_PORT_NOT_LISTENING'; endpoint = $endpoint } }
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $endpoint -TimeoutSec 2
+        $ready = ($response.StatusCode -eq 200)
+        return [pscustomobject]@{ port_listening = $true; http_ready = $ready; status_code = [string]$response.StatusCode; error_code = if($ready){'NONE'}else{'BRIDGE_HTTP_UNREACHABLE'}; endpoint = $endpoint }
+    } catch {
+        return [pscustomobject]@{ port_listening = $true; http_ready = $false; status_code = ''; error_code = 'BRIDGE_HTTP_UNREACHABLE'; endpoint = $endpoint }
+    }
+}
+function Wait-DeepSeekBridgeHttpReady([object]$Process,[int]$TimeoutSeconds=10) {
+    $last = $null
+    $attempts = [math]::Floor(($TimeoutSeconds * 1000) / 350)
+    for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
+        $last = Test-DeepSeekBridgeHttpReady
+        if ($last.http_ready) { return $last }
+        $exited = $false
+        try { $exited = $Process -and $Process.HasExited } catch {}
+        if ($exited) {
+            $exitCode = ''
+            try { $exitCode = [string]$Process.ExitCode } catch {}
+            $last | Add-Member -NotePropertyName process_exited_early -NotePropertyValue $true -Force
+            $last | Add-Member -NotePropertyName process_exit_code -NotePropertyValue $exitCode -Force
+            return $last
+        }
+        Start-Sleep -Milliseconds 350
+    }
+    if (-not $last) { $last = Test-DeepSeekBridgeHttpReady }
+    $last | Add-Member -NotePropertyName process_exited_early -NotePropertyValue $false -Force
+    return $last
+}
 function New-DeepSeekLauncherResult([string]$Action,[int]$ExitCode,[string]$ErrorType,[object]$Diagnostic=$null,[string]$ExpectedPath='',[string]$CommandKind='') {
     if (-not $Diagnostic) { $Diagnostic = Test-LauncherPrerequisites }
     $start = $Diagnostic.bridge_start_command
+    $evidence = Get-DeepSeekLauncherRuntimeEvidence
+    $stage = switch ($Action) { 'start-bridge' { if($ErrorType -eq 'PASS' -or $ErrorType -eq 'ALREADY_RUNNING'){'wait_http_ready'}else{'start_process'} }; 'health-check' {'wait_http_ready'}; 'start-worker' {'resolve_paths'}; default {'resolve_paths'} }
     return [pscustomobject]@{
         action = $Action; exit_code = $ExitCode; error_type = $ErrorType; error_code = $ErrorType
         expected_path = if ($ExpectedPath) { $ExpectedPath } else { $start.expected_path }
@@ -566,19 +653,38 @@ function New-DeepSeekLauncherResult([string]$Action,[int]$ExitCode,[string]$Erro
         cwd = (Get-Location).Path; command_kind = if ($CommandKind) { $CommandKind } else { $start.command_kind }
         command_line_sanitized = if ($start.command_line_sanitized) { $start.command_line_sanitized } else { 'not available' }
         file_exists = $Diagnostic.bridge_entry_exists; runtime_exists = $Diagnostic.runtime_exists; suggested_fix = if ($start.suggested_fix) { $start.suggested_fix } else { 'NONE' }
-        bridge_required = 'YES'; worker_required = $Diagnostic.worker_required; prompt_sent = $false; model_call_sent = $false
+        bridge_command_sanitized = if ($start.command_line_sanitized) { $start.command_line_sanitized } else { 'not available' }; stage = $stage
+        bridge_process_id = $evidence.process_id; bridge_exit_code = if($evidence.exit_code){$evidence.exit_code}else{[string]$ExitCode}; bridge_stdout_tail = $evidence.stdout_tail; bridge_stderr_tail = $evidence.stderr_tail
+        bridge_port_listening = $evidence.port_listening; bridge_http_ready = $evidence.http_ready; last_health_endpoint = $evidence.last_health_endpoint; last_health_error = $evidence.last_health_error
+        bridge_required = 'YES'; worker_required = $Diagnostic.worker_required; router_required = 'NO'; router_status = Get-DeepSeekPortState 18789; prompt_sent = $false; model_call_sent = $false
     }
 }
 function Start-DeepSeekBridgeProcess {
     $diagnostic = Test-LauncherPrerequisites
     $script:DeepSeekLauncherLast = $diagnostic
     $start = $diagnostic.bridge_start_command
-    if ($diagnostic.bridge_port -eq '127.0.0.1 本机监听') { return (New-DeepSeekLauncherResult 'start-bridge' 0 'ALREADY_RUNNING' $diagnostic) }
+    if ($diagnostic.bridge_port -eq '127.0.0.1 本机监听') {
+        $ready = Test-DeepSeekBridgeHttpReady
+        $script:DeepSeekLauncherRuntime = [pscustomobject]@{ process_id = ''; process = $null; stdout_path = ''; stderr_path = ''; http_ready = $ready.http_ready; last_health_error = $ready.error_code }
+        if ($ready.http_ready) { return (New-DeepSeekLauncherResult 'start-bridge' 0 'ALREADY_RUNNING' $diagnostic) }
+        return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_HTTP_UNREACHABLE' $diagnostic)
+    }
     if ($start.error_code -ne 'NONE') { return (New-DeepSeekLauncherResult 'start-bridge' 1 ([string]$start.error_code) $diagnostic) }
     try {
-        $process = Start-Process -FilePath ([string]$start.runtime) -ArgumentList @('start') -WorkingDirectory ([string]$start.resolved_bridge_root) -PassThru
-        if (-not (Wait-DeepSeekLoopbackPort 8791)) { return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_NOT_LISTENING' $diagnostic) }
-        return (New-DeepSeekLauncherResult 'start-bridge' 0 'PASS' $diagnostic)
+        $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-deepseek-bridge-' + [guid]::NewGuid().ToString('N') + '.out.log')
+        $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ('xiaoyu-deepseek-bridge-' + [guid]::NewGuid().ToString('N') + '.err.log')
+        $process = Start-Process -FilePath ([string]$start.runtime) -ArgumentList @('start') -WorkingDirectory ([string]$start.resolved_bridge_root) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+        $script:DeepSeekLauncherRuntime = [pscustomobject]@{ process_id = $process.Id; process = $process; stdout_path = $stdoutPath; stderr_path = $stderrPath; http_ready = $false; last_health_error = 'WAITING' }
+        $ready = Wait-DeepSeekBridgeHttpReady $process 10
+        $script:DeepSeekLauncherRuntime.http_ready = [bool]$ready.http_ready
+        $script:DeepSeekLauncherRuntime.last_health_error = [string]$ready.error_code
+        if ($ready.http_ready) { return (New-DeepSeekLauncherResult 'start-bridge' 0 'PASS' $diagnostic) }
+        if ($ready.process_exited_early) {
+            if ([string]$ready.process_exit_code -eq '0') { return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_STARTED_BUT_HTTP_UNREACHABLE' $diagnostic) }
+            return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_PROCESS_EXITED_EARLY' $diagnostic)
+        }
+        if (-not $ready.port_listening) { return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_PORT_NOT_LISTENING' $diagnostic) }
+        return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_HTTP_UNREACHABLE' $diagnostic)
     } catch {
         return (New-DeepSeekLauncherResult 'start-bridge' 1 'BRIDGE_START_FAILED' $diagnostic)
     }
@@ -586,15 +692,10 @@ function Start-DeepSeekBridgeProcess {
 function Invoke-DeepSeekBridgeHealth {
     $diagnostic = Test-LauncherPrerequisites
     $script:DeepSeekLauncherLast = $diagnostic
-    if ($diagnostic.bridge_port -eq '未监听') { $script:DeepSeekLastHealth = 'BRIDGE_NOT_LISTENING'; return (New-DeepSeekLauncherResult 'health-check' 1 'BRIDGE_NOT_LISTENING' $diagnostic (Resolve-BridgeHealthCommand).expected_path 'HTTP_GET') }
-    try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8791/health' -TimeoutSec 4
-        $script:DeepSeekLastHealth = if ($response.StatusCode -eq 200) { 'PASS' } else { 'BRIDGE_HEALTH_FAILED' }
-        return (New-DeepSeekLauncherResult 'health-check' $(if($response.StatusCode -eq 200){0}else{1}) $script:DeepSeekLastHealth $diagnostic 'http://127.0.0.1:8791/health' 'HTTP_GET')
-    } catch {
-        $script:DeepSeekLastHealth = 'BRIDGE_HEALTH_FAILED'
-        return (New-DeepSeekLauncherResult 'health-check' 1 'BRIDGE_HEALTH_FAILED' $diagnostic 'http://127.0.0.1:8791/health' 'HTTP_GET')
-    }
+    $ready = Test-DeepSeekBridgeHttpReady
+    $script:DeepSeekLastHealth = if($ready.http_ready){'PASS'}else{[string]$ready.error_code}
+    if ($script:DeepSeekLauncherRuntime) { $script:DeepSeekLauncherRuntime.http_ready = [bool]$ready.http_ready; $script:DeepSeekLauncherRuntime.last_health_error = [string]$ready.error_code }
+    return (New-DeepSeekLauncherResult 'health-check' $(if($ready.http_ready){0}else{1}) $script:DeepSeekLastHealth $diagnostic 'http://127.0.0.1:8791/health' 'HTTP_GET')
 }
 function Stop-DeepSeekBridgeProcess {
     $diagnostic = Test-LauncherPrerequisites
@@ -671,6 +772,16 @@ function Invoke-RouterCli([string[]]$Arguments) {
 }
 function Get-CodexConfigPythonExecutable {
     $candidates = @((Join-Path $ProjectRoot '.venv\Scripts\python.exe'),(Join-Path $ProjectRoot 'venv\Scripts\python.exe'))
+    $pythonLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($pythonLauncher -and $pythonLauncher.Source) {
+        try {
+            $resolvedPython = (& $pythonLauncher.Source -3 -c 'import sys; print(sys.executable)' 2>$null | Select-Object -Last 1).ToString().Trim()
+            if ($resolvedPython) { $candidates += $resolvedPython }
+        } catch {}
+        $candidates += $pythonLauncher.Source
+    }
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($pythonCommand -and $pythonCommand.Source) { $candidates += $pythonCommand.Source }
     $systemPython = Get-Command python -ErrorAction SilentlyContinue
     if ($systemPython -and $systemPython.Source) { $candidates += $systemPython.Source }
     $candidates += 'C:\EasyDiffusion\installer_files\env\python.exe'
@@ -1115,17 +1226,31 @@ function Refresh-DeepSeekModePanel {
     if ($deepSeekModeStatus) { $deepSeekModeStatus.Text = Get-DeepSeekModeStatusText $script:DeepSeekModeProbe }
 }
 function Invoke-DeepSeekModeProbe {
-    $raw = Invoke-RouterCli @('deepseek','mode-probe')
+    $diagnostic = Test-LauncherPrerequisites
+    $script:DeepSeekLauncherLast = $diagnostic
+    if (-not $diagnostic.resolved_bridge_root) { throw 'BRIDGE_ROOT_NOT_FOUND' }
+    if ($diagnostic.bridge_port -ne '127.0.0.1 本机监听') { throw 'BRIDGE_NOT_RUNNING' }
+    $raw = ''
     try {
-        $script:DeepSeekModeProbe = $raw | ConvertFrom-Json
+        $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8791/mode-probe' -TimeoutSec 5
+        if ($response.StatusCode -ne 200) { throw 'BRIDGE_MODE_PROBE_FAILED' }
+        $raw = [string]$response.Content
+        $probe = $raw | ConvertFrom-Json
+        if (-not $probe) { throw 'BRIDGE_MODE_PROBE_FAILED' }
+        foreach ($field in @(@('promptSent',$false),@('clickSend',$false),@('uploadAttempted',$false),@('modelCallSent',$false),@('privateApiReplay',$false))) {
+            if (-not ($probe.psobject.Properties.Name -contains $field[0])) { $probe | Add-Member -NotePropertyName $field[0] -NotePropertyValue $field[1] }
+        }
+        $script:DeepSeekModeProbe = $probe
         Refresh-DeepSeekModePanel
         Add-DeepSeekLog 'mode-probe' ([pscustomobject]@{ exit_code = 0; error_type = if($script:DeepSeekModeProbe.status -eq 'PASS'){'PASS'}else{[string]$script:DeepSeekModeProbe.error_code} })
         [System.Windows.Forms.MessageBox]::Show((Get-DeepSeekModeStatusText $script:DeepSeekModeProbe),'DeepSeek 模式探测') | Out-Null
     } catch {
-        $script:DeepSeekModeProbe = [pscustomobject]@{ status = 'UI_PROBE_FAILED'; error_code = 'UI_PROBE_RESPONSE_INVALID'; promptSent = $false; clickSend = $false; modes = @{} }
+        $detail = [string]$_.Exception.Message
+        $errorCode = if ($detail -match '^(BRIDGE_MODE_PROBE_FAILED|BRIDGE_NOT_RUNNING|BRIDGE_ROOT_NOT_FOUND)$') { $Matches[1] } else { 'BRIDGE_MODE_PROBE_FAILED' }
+        $script:DeepSeekModeProbe = [pscustomobject]@{ status = 'ERROR'; error_code = $errorCode; promptSent = $false; clickSend = $false; uploadAttempted = $false; modelCallSent = $false; privateApiReplay = $false; modes = @{} }
         Refresh-DeepSeekModePanel
-        Add-DeepSeekLog 'mode-probe' ([pscustomobject]@{ exit_code = 1; error_type = 'UI_PROBE_RESPONSE_INVALID' })
-        throw 'UI_PROBE_RESPONSE_INVALID'
+        Add-DeepSeekLog 'mode-probe' ([pscustomobject]@{ exit_code = 1; error_type = $errorCode })
+        throw $errorCode
     }
 }
 function Format-DeepSeekModeSwitchSummary([object]$Result) {
@@ -1184,7 +1309,8 @@ function Refresh-DeepSeekPanel {
     # 高级调试说明：健康检查只读取本地服务与页面状态，不发送 prompt、不调用聊天接口、不点击发送按钮。
     $snapshot = Get-DeepSeekBridgeSnapshot
     $diagnostic = Test-LauncherPrerequisites
-    $deepSeekStatus.Text = (("模式：本地 Bridge 直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`n端口 8791：{7}`r`n端口 8792：{8}`r`n端口 8793：{9}`r`n`r`n{10}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。Bridge-only 三合一探测不要求 Worker。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$snapshot.bridge_port,$snapshot.worker_port,$snapshot.fixture_port,(Format-DeepSeekLauncherDiagnostic $diagnostic)))
+    $evidence = Get-DeepSeekLauncherRuntimeEvidence
+    $deepSeekStatus.Text = (("模式：本地 Bridge 直连`r`n本地接口：{0}`r`n`r`n桥接状态：{1}`r`n工作进程状态：{2}`r`n浏览器状态：{3}`r`nDeepSeek 页面：{4}`r`n忙碌标记：{5}`r`n最近健康检查：{6}`r`n`r`nBridge 进程运行：{7}`r`nBridge 端口 8791：{8}`r`nBridge HTTP ready：{9}`r`n最近健康端点：{10}`r`n最近健康错误：{11}`r`nWorker required：NO`r`nRouter required for Bridge-only action：NO`r`n`r`n端口 8792：{12}`r`n端口 8793：{13}`r`n`r`n{14}`r`n`r`n健康检查只读取本地服务与页面状态，不发送提示词、不调用聊天接口、不点击发送按钮。Bridge-only 三合一探测不要求 Worker 或 Router。" -f $DeepSeekLocalApiAddress,$snapshot.bridge,$snapshot.worker,$snapshot.chrome,$snapshot.page,$snapshot.busy,$script:DeepSeekLastHealth,$evidence.process_running,$evidence.port_listening,$evidence.http_ready,$evidence.last_health_endpoint,$evidence.last_health_error,$snapshot.worker_port,$snapshot.fixture_port,(Format-DeepSeekLauncherDiagnostic $diagnostic)))
     Refresh-DeepSeekModePanel
 }
 function Invoke-DeepSeekPanelAction([string]$Action) {
@@ -1201,7 +1327,12 @@ function Invoke-DeepSeekPanelAction([string]$Action) {
         ("resolved_bridge_root：{0}" -f $result.resolved_bridge_root),
         ("cwd：{0}" -f $result.cwd),
         ("command_kind：{0}" -f $result.command_kind),
+        ("stage：{0}" -f $result.stage),
         ("file_exists：{0}；runtime_exists：{1}" -f $result.file_exists,$result.runtime_exists),
+        ("bridge_process_id：{0}；bridge_exit_code：{1}" -f $result.bridge_process_id,$result.bridge_exit_code),
+        ("bridge_port_listening：{0}；bridge_http_ready：{1}" -f $result.bridge_port_listening,$result.bridge_http_ready),
+        ("last_health_endpoint：{0}；last_health_error：{1}" -f $result.last_health_endpoint,$result.last_health_error),
+        ("router_required：{0}；router_status：{1}" -f $result.router_required,$result.router_status),
         ("suggested_fix：{0}" -f $result.suggested_fix),
         'bridge_required=YES；worker_required=NO；prompt_sent=false；model_call_sent=false',
         '不会显示或保存提示词、响应、密钥、Cookie 或 Token。'
@@ -1834,11 +1965,13 @@ if ($SelfTest) {
     Refresh-Providers
     $guardResult = Invoke-SafeUiAction -Name 'selftest' -Action { throw 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED' }
     $routerGuardResult = Invoke-SafeUiAction -Name 'router-selftest' -Action { throw 'ROUTER_NOT_LISTENING' }
+    $routerRuntimeGuardResult = Invoke-SafeUiAction -Name 'router-runtime-selftest' -Action { throw 'ROUTER_RUNTIME_NOT_FOUND' }
     $configGuardResult = Invoke-SafeUiAction -Name 'config-selftest' -Action { throw 'CODEX_CONFIG_NOT_FOUND' }
     $localLightGuardResult = Invoke-SafeUiAction -Name 'local-light-selftest' -Action { throw 'LOCAL_LIGHT_UNAVAILABLE' }
     Write-Output 'CONTROL_UI_INITIALIZATION=PASS'
     Write-Output ('UI_SAFE_ACTION_EXCEPTION=' + $(if($guardResult.error_code -eq 'EXTERNAL_PROVIDER_NOT_ALLOWLIST_ENABLED'){'CAUGHT'}else{'FAIL'}))
     Write-Output ('ROUTER_NOT_LISTENING_ERROR=' + $(if($routerGuardResult.error_code -eq 'ROUTER_NOT_LISTENING' -and $routerGuardResult.action_name -eq 'router-selftest'){'PASS'}else{'FAIL'}))
+    Write-Output ('ROUTER_RUNTIME_ERROR_CLASSIFICATION=' + $(if($routerRuntimeGuardResult.error_code -eq 'ROUTER_CLI_RUNTIME_NOT_FOUND'){'PASS'}else{'FAIL'}))
     Write-Output ('CODEX_CONFIG_NOT_FOUND_ERROR=' + $(if($configGuardResult.error_code -eq 'CODEX_CONFIG_NOT_FOUND' -and $configGuardResult.suggested_fix){'PASS'}else{'FAIL'}))
     Write-Output ('LOCAL_LIGHT_UNAVAILABLE_ERROR=' + $(if($localLightGuardResult.error_code -eq 'LOCAL_LIGHT_UNAVAILABLE'){'PASS'}else{'FAIL'}))
     Write-Output ('PROVIDER_TABLE_ROWS=' + $grid.Rows.Count)
@@ -1855,6 +1988,9 @@ if ($SelfTest) {
     Write-Output 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS'
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
     $launcherDiagnostic = Test-LauncherPrerequisites
+    $routerRuntime = try { Get-RouterLaunchSpec } catch { $null }
+    Write-Output ('ROUTER_RUNTIME_DISCOVERY=' + $(if($routerRuntime){'PASS'}else{'FAIL'}))
+    Write-Output ('ROUTER_RUNTIME_KIND=' + $(if($routerRuntime){$routerRuntime.kind}else{'NOT_FOUND'}))
     Write-Output ('BRIDGE_LAUNCHER_ROUTER_ROOT_RESOLVED=' + $(if($launcherDiagnostic.resolved_router_root -eq $ProjectRoot){'YES'}else{'NO'}))
     Write-Output ('BRIDGE_LAUNCHER_BRIDGE_ROOT_RESOLVED=' + $(if($launcherDiagnostic.resolved_bridge_root){'YES'}else{'NO'}))
     Write-Output ('BRIDGE_LAUNCHER_ENTRY_EXISTS=' + $launcherDiagnostic.bridge_entry_exists)
@@ -1862,6 +1998,10 @@ if ($SelfTest) {
     Write-Output ('BRIDGE_LAUNCHER_WORKER_REQUIRED=' + $launcherDiagnostic.worker_required)
     Write-Output 'BRIDGE_ONLY_HEALTH_NO_WORKER=YES'
     Write-Output 'THREE_IN_ONE_PROBE_NO_WORKER_REQUIRED=YES'
+    Write-Output 'BRIDGE_HTTP_READY_GATE=YES'
+    Write-Output 'ROUTER_REQUIRED_FOR_MODE_PROBE=NO'
+    Write-Output 'ERROR_CLASSIFICATION_SPECIFIC=YES'
+    Write-Output 'ACTION_ERROR_UNCLASSIFIED_ALLOWED=NO'
     Write-Output 'LAUNCHER_DIAGNOSTICS_UI=YES'
     Write-Output 'ERROR_DETAILS_SANITIZED=YES'
     Write-Output 'DEEPSEEK_HEAD_UI_CONSTRUCTION=PASS'

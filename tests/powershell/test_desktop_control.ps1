@@ -30,6 +30,7 @@ Assert-True ($text -match 'DANGEROUS_ACTIONS_STILL_CONFIRM=YES' -and $text -matc
   $ui = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $control -SelfTest 2>&1
 Assert-True (($ui -join "`n") -match 'CONTROL_UI_INITIALIZATION=PASS') 'desktop_control_initializes_without_home_variable_error'
 Assert-True (($ui -join "`n") -match 'UI_SAFE_ACTION_EXCEPTION=CAUGHT') 'desktop_control_button_exception_is_caught'
+Assert-True (($ui -join "`n") -match 'ROUTER_RUNTIME_ERROR_CLASSIFICATION=PASS' -and ($ui -join "`n") -match 'ROUTER_RUNTIME_DISCOVERY=PASS') 'router_runtime_discovery_and_error_classification_selftest_reported'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match '本控制台不会伪造额度') 'official_quota_not_faked'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match 'Router 直连测试') 'safe_router_smoke_button_present'
 Assert-True ((Get-Content -LiteralPath $control -Raw -Encoding UTF8) -match '使用 OpenAI Luna（低）') 'desktop_control_exposes_handoff_openai_profile'
@@ -85,6 +86,7 @@ Assert-True (($ui -join "`n") -match 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS') 'local
 Assert-True (($ui -join "`n") -match 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS') 'deepseek_local_bridge_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'BRIDGE_LAUNCHER_ROUTER_ROOT_RESOLVED=YES' -and ($ui -join "`n") -match 'BRIDGE_LAUNCHER_BRIDGE_ROOT_RESOLVED=YES' -and ($ui -join "`n") -match 'BRIDGE_LAUNCHER_ENTRY_EXISTS=YES') 'deepseek_launcher_roots_and_entry_selftest_reported'
 Assert-True (($ui -join "`n") -match 'BRIDGE_LAUNCHER_WORKER_REQUIRED=NO' -and ($ui -join "`n") -match 'THREE_IN_ONE_PROBE_NO_WORKER_REQUIRED=YES') 'deepseek_launcher_bridge_only_selftest_reported'
+Assert-True (($ui -join "`n") -match 'BRIDGE_HTTP_READY_GATE=YES' -and ($ui -join "`n") -match 'ROUTER_REQUIRED_FOR_MODE_PROBE=NO' -and ($ui -join "`n") -match 'ERROR_CLASSIFICATION_SPECIFIC=YES') 'deepseek_bridge_http_ready_and_specific_errors_selftest_reported'
 Assert-True (($ui -join "`n") -match 'DEEPSEEK_HEAD_UI_CONSTRUCTION=PASS' -and ($ui -join "`n") -match 'DEEPSEEK_HEAD_CONTEXT_REDACTION=PASS') 'deepseek_head_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'TOOLS_POLICY_UI_CONSTRUCTION=PASS') 'tools_policy_ui_selftest_reported'
 Assert-True (($ui -join "`n") -match 'LOCAL_AGENT_UI_CONSTRUCTION=PASS' -and ($ui -join "`n") -match 'LOCAL_AGENT_CONFIRMATION_GATES=PASS') 'local_agent_ui_selftest_reported'
@@ -138,6 +140,11 @@ Assert-True ($source -match '不会显示或保存 prompt、response、key、Coo
 Assert-True ($source -notmatch '/api/v0/chat/completion' -and $source -notmatch 'x-ds-pow-response' -and $source -notmatch 'storageState') 'deepseek_panel_has_no_private_api_or_browser_state_export'
 Assert-True ($source -match '检查启动器路径' -and $source -match '复制启动器诊断' -and $source -match '打开 Bridge 项目目录' -and $source -match 'ERROR_DETAILS_SANITIZED=YES') 'deepseek_launcher_diagnostics_ui_present'
 Assert-True ($source -match 'BRIDGE_ROOT_NOT_FOUND' -and $source -match 'BRIDGE_START_ENTRY_NOT_FOUND' -and $source -match 'BRIDGE_RUNTIME_NOT_FOUND' -and $source -match 'SCRIPT_NOT_FOUND_SANITIZED') 'deepseek_launcher_specific_errors_present'
+Assert-True ($source -match 'Wait-DeepSeekBridgeHttpReady' -and $source -match 'bridge_http_ready' -and $source -match 'BRIDGE_STARTED_BUT_HTTP_UNREACHABLE' -and $source -match 'BRIDGE_PROCESS_EXITED_EARLY' -and $source -match 'BRIDGE_PORT_NOT_LISTENING' -and $source -match 'BRIDGE_HTTP_UNREACHABLE') 'deepseek_bridge_start_requires_http_ready'
+Assert-True ($source -match "Invoke-WebRequest.*127\.0\.0\.1:8791/mode-probe" -and $source -match 'BRIDGE_MODE_PROBE_FAILED' -and $source -notmatch "Invoke-RouterCli @\('deepseek','mode-probe'\)") 'deepseek_mode_probe_is_bridge_only'
+Assert-True ($source -match 'ROUTER_CLI_RUNTIME_NOT_FOUND' -and $source -match 'ROUTER_RUNTIME_NOT_FOUND' -and $source -match 'ACTION_ERROR_SANITIZED_UNKNOWN') 'router_runtime_error_is_classified'
+Assert-True ($source -match 'Get-Command py\.exe' -and $source -match 'Get-Command python\.exe') 'router_runtime_discovery_includes_windows_launchers'
+Assert-True ($source -match 'stage：' -and $source -match 'bridge_http_ready：' -and $source -match 'router_required：') 'ui_error_summary_contains_runtime_diagnostics'
 Assert-True ($source -match 'open-deepseek-web' -and $source -match 'Start-Process \$DeepSeekWebUrl') 'deepseek_open_web_button_is_browser_only'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts\configure-provider.ps1') -Raw -Encoding UTF8) -match 'Use-DefaultNoCustomHeader') 'groq_custom_header_defaults_to_no'
 . (Join-Path $root 'scripts\configure-provider.ps1') -NonInteractive
