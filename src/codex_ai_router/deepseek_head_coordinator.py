@@ -261,6 +261,7 @@ class DeepSeekHeadCoordinator:
         bridge_send_attempted = "NO"
         bridge_ui_send_attempt_count = 0
         model_output_available = "NO"
+        adapter_diagnostics: dict[str, Any] = {}
         if invoke and (classify_risk(task) == "high" or contains_high_risk_intent(task) or contains_real_secret_value(task) or bool(bundle.get("secret_value_detected"))):
             error_code = "LOCAL_AGENT_HIGH_RISK_STOP"
             provider_error_stage = "before_bridge_send"
@@ -289,6 +290,7 @@ class DeepSeekHeadCoordinator:
                 bridge_send_attempted = str(exc.metadata.get("bridge_send_attempted") or "NO")
                 bridge_ui_send_attempt_count = int(exc.metadata.get("bridge_ui_send_attempt_count") or 0)
                 model_output_available = str(exc.metadata.get("model_output_available") or "NO")
+                adapter_diagnostics = {key: value for key, value in exc.metadata.items() if key in {"provider_error_code", "bridge_error_code", "bridge_stage", "bridge_reason", "requested_profile", "resolved_profile", "reasoning_axis_type", "available_reasoning_strengths", "max_available_reasoning_strength", "high_reasoning_supported", "max_reasoning_supported", "actual_reasoning", "actual_search", "http_post_to_bridge_attempted"}}
             except DeepSeekHeadCoordinatorError as exc:
                 error_code = exc.code
                 provider_error_stage = "before_bridge_send"
@@ -366,6 +368,7 @@ class DeepSeekHeadCoordinator:
                 "files_modified": "NO", "write_commands_executed": "NO", "tests_executed": "NO", "commit_created": "NO",
                 "loopback_only": "YES", "worker_required": "NO", "wrangler_required": "NO", "tools_forwarded": "NO",
                 "prompt_response_logged": "NO", "sensitive_data_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO"}
+        result.update(adapter_diagnostics)
         if task_session_id:
             try:
                 self.session_hub.record_deepseek_outcome(task_session_id, result)

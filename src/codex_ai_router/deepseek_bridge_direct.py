@@ -136,8 +136,9 @@ def _bridge_error(
     stage: str = "before_bridge_send",
     bridge_send_attempted: bool = False,
     ui_send_attempt_count: int = 0,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "request_id": request_id,
         "status": code,
         "error_code": code,
@@ -151,6 +152,25 @@ def _bridge_error(
         "prompt_response_logged": "NO",
         "secrets_logged": "NO",
         "failed_before_bridge_send": "YES" if not bridge_send_attempted and int(ui_send_attempt_count) == 0 else "NO",
+    }
+    if diagnostics:
+        result.update(diagnostics)
+    return result
+
+
+def _presend_diagnostics(capability: DeepSeekWebCapability | None, *, requested_profile: str, resolved_profile: str | None = None, exception: Exception | None = None) -> dict[str, Any]:
+    values = capability.as_dict() if capability else {}
+    return {
+        "provider_error_code": "DEEPSEEK_BRIDGE_ADAPTER_PRESEND_ERROR",
+        "bridge_error_code": "DEEPSEEK_BRIDGE_REQUEST_BUILD_FAILED",
+        "bridge_stage": "before_bridge_send",
+        "bridge_reason": "adapter_request_build_failed" if exception else "pre_send_validation_failed",
+        "requested_profile": requested_profile,
+        "resolved_profile": resolved_profile or "unknown",
+        "actual_reasoning": values.get("current_reasoning_strength", "unknown"), "actual_search": values.get("current_search", False),
+        "http_post_to_bridge_attempted": "NO", "sanitized_exception_type": type(exception).__name__ if exception else "",
+        "sanitized_exception_message": type(exception).__name__ if exception else "",
+        **values,
     }
 
 
@@ -273,17 +293,17 @@ def run_deepseek_bridge_direct(
         return _bridge_error("DEEPSEEK_BRIDGE_DIRECT_CONTEXT_BUILD_FAILED", request_id, started, ui_send_attempt_count=ui_send_attempt_count)
     if not selected["mode_available"]:
         return _bridge_error(str(selected.get("fallback_reason") or "DEEPSEEK_MODE_UNAVAILABLE"), request_id, started, ui_send_attempt_count=ui_send_attempt_count)
-    if capability.ui_generation == "three_in_one" and capability.reasoning_axis_type == "binary_toggle":
-        selected = {**selected, "selected_mode": "best_available_reasoning", "selected_model_alias": "deepseek-web-quick-thinking", "selected_profile": capability.as_dict(), "reasoning_strength": "medium", "search_required": False, "smart_search": "OFF"}
-    selected_model = str(selected["selected_model_alias"])
-    payload = {
-        "model": selected_model,
-        "messages": [{"role": "system", "content": TEXT_ONLY_SYSTEM}, {"role": "user", "content": str(task).strip()}],
-        "stream": False,
-        "target_profile": "best_available_reasoning" if selected["selected_mode"] == "best_available_reasoning" else selected["selected_mode"],
-        "capability_snapshot": capability.as_dict(), "require_search": False, "allow_search": False, "allow_files": False, "allow_vision": False,
-        "requested_reasoning_policy": "best_available", "disallow_silent_high_max_fallback": True,
-    }
+    try:
+        if capability.ui_generation == "three_in_one" and capability.reasoning_axis_type == "binary_toggle":
+            selected = {**selected, "selected_mode": "best_available_reasoning", "selected_model_alias": "deepseek-web-quick-thinking", "selected_profile": capability.as_dict(), "reasoning_strength": "medium", "search_required": False, "smart_search": "OFF"}
+        selected_model = str(selected["selected_model_alias"])
+        resolved_profile = str(selected["selected_mode"])
+        payload = {"model": selected_model, "messages": [{"role": "system", "content": TEXT_ONLY_SYSTEM}, {"role": "user", "content": str(task).strip()}], "stream": False,
+                   "target_profile": "best_available_reasoning" if resolved_profile == "best_available_reasoning" else resolved_profile,
+                   "capability_snapshot": capability.as_dict(), "require_search": False, "allow_search": False, "allow_files": False, "allow_vision": False,
+                   "requested_reasoning_policy": "best_available", "disallow_silent_high_max_fallback": True}
+    except Exception as exc:
+        return _bridge_error("DEEPSEEK_BRIDGE_ADAPTER_PRESEND_ERROR", request_id, started, ui_send_attempt_count=ui_send_attempt_count, diagnostics=_presend_diagnostics(capability, requested_profile="best_available_reasoning", exception=exc))
     request = Request(completion_url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
     try:
         _status, upstream = _read_json(request, timeout, opener)
