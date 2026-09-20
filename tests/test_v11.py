@@ -29,6 +29,15 @@ class FakeLocal:
     def ask(self, prompt): return "local result: " + prompt
 
 
+LOCALHOST_TEST_CATALOG = [{
+    "id": "xiaoyu-api-groq-2",
+    "object": "model",
+    "owned_by": "test-fixture",
+    "provider": "deterministic-local-stub",
+    "provider_type": "TEST",
+}]
+
+
 class RouterV11Tests(unittest.TestCase):
     def test_101_virtual_models_are_stable_profiles(self):
         self.assertEqual(VIRTUAL_MODELS, ("xiaoyu-auto", "xiaoyu-local", "xiaoyu-api-auto", "xiaoyu-api-local", "xiaoyu-lightboat"))
@@ -36,7 +45,9 @@ class RouterV11Tests(unittest.TestCase):
     def test_102_localhost_server_rejects_public_bind(self):
         with self.assertRaises(ValueError): RouterResponsesServer(host="0.0.0.0")
 
-    def test_103_localhost_server_lists_virtual_models(self):
+    @patch("codex_ai_router.server.model_catalog", return_value=LOCALHOST_TEST_CATALOG)
+    @patch("codex_ai_router.server.allowlisted_providers", return_value=[])
+    def test_103_localhost_server_lists_virtual_models(self, *_mocks):
         server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal(False)), port=0)
         server.start()
         try:
@@ -121,7 +132,9 @@ class RouterV11Tests(unittest.TestCase):
         value = [{"role": "user", "content": [{"type": "input_text", "text": "short"}]}]
         self.assertEqual((_input_text(value), _bounded_output_tokens({"max_output_tokens": 99})), ("short", 16))
 
-    def test_118_streaming_request_gets_basic_sse_completed_event(self):
+    @patch("codex_ai_router.server.model_catalog", return_value=LOCALHOST_TEST_CATALOG)
+    @patch("codex_ai_router.server.allowlisted_providers", return_value=[])
+    def test_118_streaming_request_gets_basic_sse_completed_event(self, *_mocks):
         server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal()), port=0)
         server.start()
         try:
@@ -142,7 +155,9 @@ class RouterV11Tests(unittest.TestCase):
         finally:
             server.stop()
 
-    def test_118b_non_stream_response_has_sanitized_compat_diagnostics(self):
+    @patch("codex_ai_router.server.model_catalog", return_value=LOCALHOST_TEST_CATALOG)
+    @patch("codex_ai_router.server.allowlisted_providers", return_value=[])
+    def test_118b_non_stream_response_has_sanitized_compat_diagnostics(self, *_mocks):
         server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal()), port=0)
         server.start()
         try:
@@ -157,7 +172,9 @@ class RouterV11Tests(unittest.TestCase):
         finally:
             server.stop()
 
-    def test_118c_completed_event_does_not_emit_partial_usage_object(self):
+    @patch("codex_ai_router.server.model_catalog", return_value=LOCALHOST_TEST_CATALOG)
+    @patch("codex_ai_router.server.allowlisted_providers", return_value=[])
+    def test_118c_completed_event_does_not_emit_partial_usage_object(self, *_mocks):
         server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal()), port=0)
         server.start()
         try:
@@ -184,7 +201,9 @@ class RouterV11Tests(unittest.TestCase):
         finally:
             server.stop()
 
-    def test_118d_text_only_server_returns_visible_text_without_tool_calls(self):
+    @patch("codex_ai_router.server.model_catalog", return_value=LOCALHOST_TEST_CATALOG)
+    @patch("codex_ai_router.server.allowlisted_providers", return_value=[])
+    def test_118d_text_only_server_returns_visible_text_without_tool_calls(self, *_mocks):
         server = RouterResponsesServer(RouterService(NetworkMode.OFFLINE, local=FakeLocal(), tools_policy="text_only_strip"), port=0)
         server.start()
         try:
