@@ -37,6 +37,13 @@ class DirectBridgeTests(unittest.TestCase):
     def ready_mode_probe():
         return {"quick_available": True, "expert_available": True, "thinking_available": True, "search_available": True, "vision_available": False, "file_upload_available": False, "current_base_mode": "quick", "current_thinking": False, "current_search": False, "current_modality": "text", "ui_changed": False, "modes": {name: {"status": "AVAILABLE" if name in {"quick", "expert", "thinking", "search"} else "UNAVAILABLE", "controllable": name in {"quick", "expert", "thinking", "search"}} for name in ("quick", "expert", "thinking", "search", "vision", "file")}}
 
+    @staticmethod
+    def binary_three_in_one_probe():
+        probe = DirectBridgeTests.ready_mode_probe()
+        probe.update(ui_generation="three_in_one", base_mode_axis="absent", reasoning_axis_type="binary_toggle", available_reasoning_strengths=["off", "medium"], max_available_reasoning_strength="medium", high_reasoning_supported=False, max_reasoning_supported=False, current_reasoning_strength="medium", current_search=False, current_profile_label="medium/no-search", reasoning_strength_options_status="binary")
+        probe["modes"]["quick"]["status"] = "UNAVAILABLE"; probe["modes"]["expert"]["status"] = "UNAVAILABLE"
+        return probe
+
     def test_non_loopback_endpoints_are_rejected(self):
         for url in ("https://127.0.0.1:8791/v1", "http://192.168.137.1:8791/v1", "http://127.0.0.1:8792/v1"):
             with self.subTest(url=url):
@@ -85,6 +92,19 @@ class DirectBridgeTests(unittest.TestCase):
         self.assertIn("TEXT_ONLY", payload["messages"][0]["content"])
         self.assertEqual(result["prompt_response_logged"], "NO")
         self.assertEqual(result["secrets_logged"], "NO")
+
+    def test_binary_three_in_one_preserves_capability_and_maps_ordinary_text_to_best_available(self):
+        requests = []
+        responses = iter((FakeResponse(self.ready_health()), FakeResponse(self.binary_three_in_one_probe()), FakeResponse({"choices": [{"message": {"content": "PLAN_OK"}}]})))
+        def opener(request, **_kwargs): requests.append(request); return next(responses)
+        result = run_deepseek_bridge_direct("只生成计划", search=False, opener=opener)
+        self.assertEqual((result["status"], result["selected_mode"], result["selected_profile"]), ("PASS", "best_available_reasoning", "best_available_reasoning"))
+        self.assertEqual(result["capability"]["available_reasoning_strengths"], ["off", "medium"])
+        self.assertFalse(result["capability"]["high_reasoning_supported"])
+        payload = json.loads(requests[2].data.decode("utf-8"))
+        self.assertEqual(payload["target_profile"], "best_available_reasoning")
+        self.assertFalse(payload["allow_search"])
+        self.assertTrue(payload["disallow_silent_high_max_fallback"])
 
     def test_empty_response_is_not_success(self):
         responses = iter((FakeResponse(self.ready_health()), FakeResponse(self.ready_mode_probe()), FakeResponse({"choices": [{"message": {"content": ""}}]})))
