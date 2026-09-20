@@ -20,6 +20,12 @@ from .local_profiles import local_profile_summaries
 
 
 LOCAL_PORT_FALLBACKS = (18791, 18792, 18793, 18794, 18795)
+STANDARD_RUNTIME_ID = "standard_llama_cpp"
+PRISM_RUNTIME_ID = "prism_bonsai"
+OFFICIAL_PRISMML_SOURCES = {
+    "https://github.com/PrismML-Eng/Bonsai-demo",
+    "https://github.com/PrismML-Eng/llama.cpp",
+}
 
 
 def router_user_dir() -> Path:
@@ -54,6 +60,15 @@ def default_local_backend_config() -> dict:
         "allow_slow_local": False,
         "allow_bf16_auto": False,
         "model_profiles": {},
+        "runtimes": {
+            STANDARD_RUNTIME_ID: {"runtime_id": STANDARD_RUNTIME_ID, "llama_server_path": ""},
+            PRISM_RUNTIME_ID: {
+                "runtime_id": PRISM_RUNTIME_ID,
+                "runtime_path": str(Path.cwd() / "tools" / "prism-bonsai-runtime"),
+                "llama_server_path": "",
+                "official_source": "https://github.com/PrismML-Eng/Bonsai-demo",
+            },
+        },
     }
 
 
@@ -70,9 +85,110 @@ def load_local_backend_config(path: Path | None = None) -> dict:
         raise ProviderError("LOCAL_BACKEND_CONFIG_INVALID") from exc
     if not isinstance(config.get("model_dirs"), list):
         config["model_dirs"] = [str(path) for path in default_lmstudio_model_dirs()]
+    if not isinstance(config.get("runtimes"), dict):
+        config["runtimes"] = default_local_backend_config()["runtimes"]
+    standard = config["runtimes"].setdefault(STANDARD_RUNTIME_ID, {"runtime_id": STANDARD_RUNTIME_ID, "llama_server_path": ""})
+    if not isinstance(standard, dict):
+        standard = config["runtimes"][STANDARD_RUNTIME_ID] = {"runtime_id": STANDARD_RUNTIME_ID, "llama_server_path": ""}
+    # Keep the pre-runtime-registry config key authoritative for existing installs.
+    standard["llama_server_path"] = str(config.get("llama_server_path") or standard.get("llama_server_path") or "")
+    prism = config["runtimes"].setdefault(PRISM_RUNTIME_ID, default_local_backend_config()["runtimes"][PRISM_RUNTIME_ID])
+    if not isinstance(prism, dict):
+        config["runtimes"][PRISM_RUNTIME_ID] = default_local_backend_config()["runtimes"][PRISM_RUNTIME_ID]
     config["host"] = "127.0.0.1"
     config["port"] = int(config.get("port") or 18790)
     return config
+
+
+def _runtime_server_path(runtime: dict) -> Path | None:
+    explicit = str(runtime.get("llama_server_path") or "")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit).resolve()
+    root = Path(str(runtime.get("runtime_path") or "")).expanduser()
+    for name in ("llama-server.exe", "llama-server", "bin/llama-server.exe", "bin/llama-server"):
+        candidate = root / name
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _runtime_probe_output(executable: Path | None) -> tuple[str, str]:
+    if executable is None:
+        return "", ""
+    try:
+        version = subprocess.run([str(executable), "--version"], capture_output=True, text=True, timeout=5, check=False)
+        help_result = subprocess.run([str(executable), "--help"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    # The bounded summary is diagnostics only; it never includes environment data.
+    return (version.stdout + version.stderr)[:1200], (help_result.stdout + help_result.stderr)[:4000]
+
+
+def _marker(runtime_path: Path) -> dict:
+    marker = runtime_path / "prism-bonsai-runtime.json"
+    try:
+        raw = json.loads(marker.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def prism_bonsai_runtime_status(config: dict | None = None) -> dict:
+    """Probe only the dedicated Bonsai runtime; never download or build."""
+    config = config or load_local_backend_config()
+    runtime = dict((config.get("runtimes") or {}).get(PRISM_RUNTIME_ID) or {})
+    runtime_path = Path(str(runtime.get("runtime_path") or Path.cwd() / "tools" / "prism-bonsai-runtime"))
+    executable = _runtime_server_path(runtime)
+    version, help_text = _runtime_probe_output(executable)
+    marker = _marker(runtime_path)
+    marker_source = str(marker.get("official_source") or "")
+    official_marker = marker_source in OFFICIAL_PRISMML_SOURCES and str(marker.get("runtime_id") or "") == PRISM_RUNTIME_ID
+    combined = (version + "\n" + help_text).lower()
+    marker_formats = {str(item).upper() for item in marker.get("supported_formats", []) if isinstance(item, str)}
+    supports = {
+        "pq2_0": "PQ2_0" in marker_formats or "pq2_0" in combined,
+        "ptq1_0": "PTQ1_0" in marker_formats or "ptq1_0" in combined,
+        "q2_0_g64": "Q2_0_G64" in marker_formats or "q2_0_g64" in combined or "q2-g64" in combined,
+    }
+    installed = runtime_path.is_dir() and executable is not None
+    supported = official_marker or all(supports.values())
+    compatibility = "PASS" if installed and supported else "BONSAI_RUNTIME_UNKNOWN"
+    return {
+        "runtime_id": PRISM_RUNTIME_ID,
+        "runtime_installed": "YES" if installed else "NO",
+        "runtime_path": str(runtime_path),
+        "llama_server_path": str(executable) if executable else None,
+        "version_summary": version.splitlines()[:4],
+        "help_summary": help_text.splitlines()[:8],
+        "supports_pq2_0": "YES" if supports["pq2_0"] else "NO",
+        "supports_ptq1_0": "YES" if supports["ptq1_0"] else "NO",
+        "supports_q2_0_g64": "YES" if supports["q2_0_g64"] else "NO",
+        "official_prismml_marker": "YES" if official_marker else "NO",
+        "compatibility_status": compatibility,
+        "BONSAI_RUNTIME_UNKNOWN": "YES" if compatibility != "PASS" else "NO",
+        "NO_IMPLICIT_RUNTIME_BUILD": "YES",
+        "OFFICIAL_PRISMML_RUNTIME_ONLY": "YES",
+    }
+
+
+def runtime_for_model(model: "GGUFModel", config: dict | None = None) -> tuple[str | None, str]:
+    """Return the required runtime id without treating a filename as compatibility proof."""
+    filename = model.path.name
+    quantization = str(model.quantization or "UNKNOWN").upper()
+    if not model.text_model:
+        return None, "MMPROJ_NOT_TEXT_MODEL"
+    bonsai_format = bonsai_format_from_filename(filename)
+    bonsai = bonsai_format != "UNKNOWN" or bool(re.search(r"(?:^|[-_.])(?:ternary[-_.])?bonsai(?:[-_.]|$)", filename, re.I))
+    if bonsai and bonsai_format in {"PQ2_0", "PTQ1_0", "Q1_0"}:
+        return PRISM_RUNTIME_ID, "BONSAI_PRISM_RUNTIME_REQUIRED"
+    if bonsai and bonsai_format == "Q2_0_G64":
+        standard = config or load_local_backend_config()
+        standard_path = str(((standard.get("runtimes") or {}).get(STANDARD_RUNTIME_ID) or {}).get("llama_server_path") or standard.get("llama_server_path") or "")
+        _, standard_help = _runtime_probe_output(Path(standard_path) if standard_path else None)
+        if "q2_0_g64" in standard_help.lower() or "q2-g64" in standard_help.lower():
+            return STANDARD_RUNTIME_ID, "STANDARD_RUNTIME_EXPLICIT_Q2_0_G64"
+        return PRISM_RUNTIME_ID, "BONSAI_PRISM_RUNTIME_REQUIRED"
+    return STANDARD_RUNTIME_ID, "STANDARD_GGUF_RUNTIME"
 
 
 def save_local_backend_config(config: dict, path: Path | None = None) -> Path:
@@ -475,9 +591,27 @@ class ManagedLlamaCppBackend:
             "port_owner": owner,
             "auto_port_fallback": self._last_port_event.get("auto_port_fallback", "NO"),
             "port_fallback_from": self._last_port_event.get("port_fallback_from"),
+            "runtime_registry": self.runtime_registry(),
             "bonsai_support": self.bonsai_support_status(),
             "history_profiles": local_profile_summaries(),
             **reconciliation,
+        }
+
+    def runtime_registry(self) -> dict:
+        """Expose the separate standard and Prism runtime slots without changing either."""
+        config = load_local_backend_config(self.config_path)
+        standard = dict((config.get("runtimes") or {}).get(STANDARD_RUNTIME_ID) or {})
+        executable = self.executable_path()
+        standard["runtime_id"] = STANDARD_RUNTIME_ID
+        standard["llama_server_path"] = str(executable) if executable else None
+        standard["runtime_installed"] = "YES" if executable else "NO"
+        prism = prism_bonsai_runtime_status(config)
+        return {
+            "LOCAL_RUNTIME_REGISTRY": "YES",
+            "STANDARD_LLAMA_CPP_PRESERVED": "YES",
+            "PRISM_BONSAI_RUNTIME_SLOT": "YES",
+            STANDARD_RUNTIME_ID: standard,
+            PRISM_RUNTIME_ID: prism,
         }
 
     def serve(self) -> dict:
@@ -513,9 +647,13 @@ class ManagedLlamaCppBackend:
         """
         bonsai_models = [item for item in self.profiles() if item.get("bonsai_model") == "YES"]
         executable = self.executable_path()
+        prism = prism_bonsai_runtime_status(load_local_backend_config(self.config_path))
         if not bonsai_models:
             compatibility = "NOT_TESTED_NO_MODEL"
             status = "BONSAI_NOT_INSTALLED"
+        elif prism["compatibility_status"] != "PASS":
+            compatibility = "BONSAI_RUNTIME_UNKNOWN"
+            status = "BONSAI_INSTALLED_RUNTIME_NOT_READY"
         elif executable is None:
             compatibility = "LLAMA_SERVER_NOT_FOUND"
             status = "BONSAI_INSTALLED_SERVER_MISSING"
@@ -534,6 +672,7 @@ class ManagedLlamaCppBackend:
             "BONSAI_NOT_DEFAULT_BEFORE_SMOKE": "YES",
             "llama_server_found": "YES" if executable else "NO",
             "llama_server_compatibility": compatibility,
+            "prism_bonsai_runtime": prism,
             "models": [{"model_id": item["model_id"], "format": item["bonsai_format"]} for item in bonsai_models],
         }
 
@@ -541,6 +680,9 @@ class ManagedLlamaCppBackend:
         config = load_local_backend_config(self.config_path)
         config["selected_model_path"] = str(model.path)
         config["llama_server_path"] = str(self.executable_path() or config.get("llama_server_path") or "")
+        runtimes = config.setdefault("runtimes", {})
+        standard = runtimes.setdefault(STANDARD_RUNTIME_ID, {"runtime_id": STANDARD_RUNTIME_ID})
+        standard["llama_server_path"] = config["llama_server_path"]
         save_local_backend_config(config, self.config_path)
         self.selected = model
 
@@ -553,8 +695,15 @@ class ManagedLlamaCppBackend:
         self._persist_selected(chosen)
         return chosen
 
-    def _command(self, model: GGUFModel) -> list[str]:
-        executable = self.executable_path()
+    def _command(self, model: GGUFModel, runtime_id: str = STANDARD_RUNTIME_ID) -> list[str]:
+        config = load_local_backend_config(self.config_path)
+        if runtime_id == PRISM_RUNTIME_ID:
+            prism = prism_bonsai_runtime_status(config)
+            if prism["compatibility_status"] != "PASS":
+                raise ProviderError("BONSAI_RUNTIME_NOT_READY")
+            executable = Path(str(prism["llama_server_path"])) if prism.get("llama_server_path") else None
+        else:
+            executable = self.executable_path()
         if executable is None:
             raise ProviderError("LLAMA_SERVER_NOT_FOUND")
         command = [str(executable), "-m", str(model.path), "--host", "127.0.0.1", "--port", str(self.port), "--ctx-size", str(self.ctx_size)]
@@ -586,10 +735,6 @@ class ManagedLlamaCppBackend:
             return False
 
     def start(self, model: GGUFModel | None = None) -> dict:
-        if self.running():
-            return self.status()
-        if not self.executable_available():
-            raise ProviderError("LLAMA_SERVER_NOT_FOUND")
         selected = model or self.selected
         if selected is None:
             discovered = self.discover()
@@ -598,13 +743,22 @@ class ManagedLlamaCppBackend:
             raise ProviderError("MODEL_NOT_SELECTED")
         if not selected.path.is_file():
             raise ProviderError("NO_GGUF_MODEL")
+        runtime_id, route_reason = runtime_for_model(selected, load_local_backend_config(self.config_path))
+        if runtime_id is None:
+            raise ProviderError(route_reason)
+        if runtime_id == PRISM_RUNTIME_ID and prism_bonsai_runtime_status(load_local_backend_config(self.config_path))["compatibility_status"] != "PASS":
+            raise ProviderError("BONSAI_RUNTIME_NOT_READY")
+        if self.running():
+            return self.status()
+        if runtime_id == STANDARD_RUNTIME_ID and not self.executable_available():
+            raise ProviderError("LLAMA_SERVER_NOT_FOUND")
         self._prepare_port()
-        command = self._command(selected)
+        command = self._command(selected, runtime_id)
         router_user_dir().mkdir(parents=True, exist_ok=True)
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.pid_path.write_text(str(self.process.pid), encoding="utf-8")
-            self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "executable": str(self.executable_path() or "")}, ensure_ascii=False), encoding="utf-8")
+            self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "runtime_id": runtime_id, "executable": command[0]}, ensure_ascii=False), encoding="utf-8")
         except OSError as exc:
             raise ProviderError("START_FAILED") from exc
         self.selected = selected

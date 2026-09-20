@@ -16,7 +16,7 @@ from .providers.model_discovery import codex_profile_requires_bearer_auth
 from .policy import FastLocalPolicy
 from .network import NetworkMode
 from .server import RouterResponsesServer, RouterService
-from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend, load_local_backend_config, save_local_backend_config, local_backend_config_path
+from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend, load_local_backend_config, save_local_backend_config, local_backend_config_path, prism_bonsai_runtime_status
 from .providers.local_profiles import build_history_chongzhen_prompt, get_local_profile, local_profile_summaries
 from .providers.runtime_models import RuntimeModelState, probe_model, text_candidates
 from .providers.model_states import model_state_report
@@ -126,6 +126,7 @@ def main() -> None:
         item = local_sub.add_parser(action)
         if action == "smoke": item.add_argument("task", nargs="?", default="只回复 LOCAL_DIRECT_OK")
     local_profiles = local_sub.add_parser("profiles")
+    bonsai_runtime = local_sub.add_parser("bonsai-runtime"); bonsai_runtime.add_argument("action", choices=("status",))
     local_explain = local_sub.add_parser("explain-select"); local_explain.add_argument("task"); local_explain.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_explain.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
     local_auto = local_sub.add_parser("auto-smoke"); local_auto.add_argument("--task", required=True); local_auto.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_auto.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
     local_profile = local_sub.add_parser("profile"); local_profile.add_argument("profile_id", choices=("history_chongzhen",))
@@ -478,6 +479,8 @@ def main() -> None:
                 if args.ctx_size is not None: local_data["ctx_size"] = args.ctx_size
                 if args.timeout_seconds is not None: local_data["timeout_seconds"] = args.timeout_seconds
                 emit({"status": "CONFIGURED", "config_path": str(save_local_backend_config(local_data))})
+            elif args.local_action == "bonsai-runtime":
+                emit({"BONSAI_RUNTIME_STATUS_COMMAND": "YES", "BONSAI_RUNTIME_COMPATIBILITY_PROBE": "YES", **prism_bonsai_runtime_status(load_local_backend_config())})
             elif args.local_action == "status": emit(backend.status())
             elif args.local_action == "models": emit({"models": [model.as_dict() for model in backend.discover()], "llama_server_found": "YES" if backend.executable_available() else "NO", "source": "lmstudio_gguf_direct", "LMSTUDIO_GGUF_REUSE": "YES", "NO_FULL_DISK_SCAN": "YES"})
             elif args.local_action == "profiles":

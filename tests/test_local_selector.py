@@ -4,7 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_ai_router.providers.local_backend import GGUFModel, ManagedLlamaCppBackend, discover_gguf_models
+from codex_ai_router.providers.local_backend import (
+    PRISM_RUNTIME_ID,
+    STANDARD_RUNTIME_ID,
+    GGUFModel,
+    ManagedLlamaCppBackend,
+    discover_gguf_models,
+    prism_bonsai_runtime_status,
+    runtime_for_model,
+)
 from codex_ai_router.providers.local_model_selector import LocalModelSelector, bonsai_format_from_filename, profile_from_model
 
 
@@ -77,6 +85,22 @@ class LocalSelectorTests(unittest.TestCase):
         }
         for filename, expected in cases.items():
             self.assertEqual(bonsai_format_from_filename(filename), expected)
+
+    def test_runtime_routing_requires_prism_for_bonsai_and_preserves_standard(self):
+        root = Path(tempfile.mkdtemp())
+        standard = GGUFModel(root / "Qwen-Q4_K_M.gguf", "standard", 1, quantization="Q4_K_M")
+        ternary = GGUFModel(root / "Ternary-Bonsai-PQ2_0.gguf", "ternary", 1, quantization="PQ2_0")
+        projector = GGUFModel(root / "mmproj-Bonsai.gguf", "projector", 1, quantization="UNKNOWN", text_model=False, vision_projector=True)
+        self.assertEqual(runtime_for_model(standard)[0], STANDARD_RUNTIME_ID)
+        self.assertEqual(runtime_for_model(ternary)[0], PRISM_RUNTIME_ID)
+        self.assertEqual(runtime_for_model(projector), (None, "MMPROJ_NOT_TEXT_MODEL"))
+
+    def test_uninstalled_prism_runtime_is_unknown_and_never_ready_for_download(self):
+        root = Path(tempfile.mkdtemp()) / "prism-bonsai-runtime"
+        status = prism_bonsai_runtime_status({"runtimes": {PRISM_RUNTIME_ID: {"runtime_path": str(root)}}})
+        self.assertEqual(status["runtime_installed"], "NO")
+        self.assertEqual(status["compatibility_status"], "BONSAI_RUNTIME_UNKNOWN")
+        self.assertEqual(status["NO_IMPLICIT_RUNTIME_BUILD"], "YES")
 
 
 if __name__ == "__main__":
