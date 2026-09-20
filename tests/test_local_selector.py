@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from codex_ai_router.providers.local_backend import GGUFModel, ManagedLlamaCppBackend, discover_gguf_models
-from codex_ai_router.providers.local_model_selector import LocalModelSelector, profile_from_model
+from codex_ai_router.providers.local_model_selector import LocalModelSelector, bonsai_format_from_filename, profile_from_model
 
 
 class LocalSelectorTests(unittest.TestCase):
@@ -57,6 +57,26 @@ class LocalSelectorTests(unittest.TestCase):
             found = discover_gguf_models([root])
             self.assertEqual(found[0].text_model, False)
             self.assertEqual(found[0].vision_projector, True)
+
+    def test_bonsai_filename_formats_are_profiled_and_not_auto_selected(self):
+        root = Path(tempfile.mkdtemp())
+        bonsai = GGUFModel(root / "Ternary-Bonsai-7B-Instruct-PTQ1_0.gguf", "bonsai", 1, quantization="UNKNOWN")
+        qwen = GGUFModel(root / "Qwen2.5-7B-Instruct-Q4_K_M.gguf", "qwen", 1, quantization="Q4_K_M")
+        profile = profile_from_model(bonsai)
+        self.assertEqual((profile["family_guess"], profile["bonsai_model"], profile["bonsai_format"], profile["quantization"]), ("Ternary-Bonsai", "YES", "PTQ1_0", "PTQ1_0"))
+        result = LocalModelSelector([profile, profile_from_model(qwen)]).select("解释这个错误")
+        self.assertEqual(result["selected_model"], "qwen")
+        self.assertIn({"model": "bonsai", "reason": "BONSAI_REQUIRES_EXPLICIT_COMPATIBILITY_CHECK"}, result["skipped_models"])
+
+    def test_all_reserved_bonsai_filename_formats_are_recognized(self):
+        cases = {
+            "Bonsai-Q2_0_g64.gguf": "Q2_0_G64",
+            "Ternary-Bonsai-PQ2_0.gguf": "PQ2_0",
+            "Ternary-Bonsai-PTQ1_0.gguf": "PTQ1_0",
+            "Bonsai-Q1_0.gguf": "Q1_0",
+        }
+        for filename, expected in cases.items():
+            self.assertEqual(bonsai_format_from_filename(filename), expected)
 
 
 if __name__ == "__main__":

@@ -1104,7 +1104,7 @@ $homeConfigSwitcherStatus = New-Object System.Windows.Forms.TextBox; $homeConfig
 $homeConfigSwitcherButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $homeConfigSwitcherButtons.Dock = 'Fill'; $homeConfigSwitcherButtons.AutoScroll = $true; $homeConfigSwitcherButtons.WrapContents = $true; $homeConfigSwitcherButtons.FlowDirection = 'LeftToRight'; $homeConfigSwitcherButtons.Font = $buttonFont; $homeConfigSwitcherLayout.Controls.Add($homeConfigSwitcherButtons,0,1)
 $statusGroup = New-Object System.Windows.Forms.GroupBox; $statusGroup.Text = '当前状态'; $statusGroup.Dock = 'Fill'; $statusGroup.Padding = New-Object System.Windows.Forms.Padding(10); $homeLayout.Controls.Add($statusGroup,0,3)
 $statusBox = New-Object System.Windows.Forms.TextBox; $statusBox.Multiline = $true; $statusBox.ReadOnly = $true; $statusBox.Dock = 'Fill'; $statusBox.ScrollBars = 'Vertical'; $statusBox.Font = $uiFont; $statusGroup.Controls.Add($statusBox)
-$directLocalGroup = New-Object System.Windows.Forms.GroupBox; $directLocalGroup.Text = '直接本地模型（推荐）'; $directLocalGroup.Dock = 'Fill'; $directLocalGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($directLocalGroup,0,4)
+$directLocalGroup = New-Object System.Windows.Forms.GroupBox; $directLocalGroup.Text = '直接本地模型（推荐） Studio'; $directLocalGroup.Dock = 'Fill'; $directLocalGroup.Padding = New-Object System.Windows.Forms.Padding(8); $homeLayout.Controls.Add($directLocalGroup,0,4)
 $directLocalStatus = New-Object System.Windows.Forms.TextBox; $directLocalStatus.Multiline = $true; $directLocalStatus.ReadOnly = $true; $directLocalStatus.Dock = 'Fill'; $directLocalStatus.Font = $uiFont; $directLocalStatus.ScrollBars = 'Vertical'; $directLocalGroup.Controls.Add($directLocalStatus)
 $directLocalButtons = New-Object System.Windows.Forms.FlowLayoutPanel; $directLocalButtons.Dock = 'Bottom'; $directLocalButtons.Height = 42; $directLocalButtons.Font = $buttonFont; $directLocalGroup.Controls.Add($directLocalButtons)
 $configSwitcherTab.AutoScroll = $true
@@ -1765,9 +1765,9 @@ function Get-LocalErrorExplanation([string]$Code) {
 # 高级调试字段保留英文内部标识，不放在主要用户界面：llama.cpp direct；LM Studio：仅作可选 fallback。
 # 旧命令名称映射到中文按钮：扫描 LM Studio 模型、修复本地后端、测试本地推理。
 function Refresh-DirectLocalCard {
-    $statusRaw = Invoke-LocalCli @('status'); $modelsRaw = Invoke-LocalCli @('models'); $status = $null; $models = $null
-    try { $status = $statusRaw | ConvertFrom-Json } catch {}; try { $models = $modelsRaw | ConvertFrom-Json } catch {}
-    if($status){$selected = if($status.selected_model){$status.selected_model.model_id}else{'未选择'}; $path = if($status.llama_server_path){$status.llama_server_path}else{'未发现'}; $owner = if($status.port_owner){('{0} (PID {1})' -f $status.port_owner.process_name,$status.port_owner.pid)}else{'无'}; $lastRepair = if($script:DirectLocalLastRepair){$script:DirectLocalLastRepair}else{'未运行'}; $directLocalStatus.Text = ("后端：直接本地模型`r`n服务程序：{0}`r`n当前加载模型：{1}`r`n服务状态：{2}`r`n本地端点：{3}`r`n当前端口：{4}`r`n端口占用：{5}`r`n端口所有者：{6}`r`n备用端口切换：{7}`r`n最近修复：{8}`r`n模型画像数：{9}`r`n自动选择模型：已启用`r`n说明：控制台仅负责管理，不接收主要任务输入。" -f $path,$selected,$status.server_running,$status.endpoint,$status.port,$status.port_in_use,$owner,$status.auto_port_fallback,$lastRepair,$status.model_count)}else{$directLocalStatus.Text = ('直接本地状态不可用：' + $statusRaw)}
+    $statusRaw = Invoke-LocalCli @('status'); $modelsRaw = Invoke-LocalCli @('models'); $profilesRaw = Invoke-LocalCli @('profiles'); $status = $null; $models = $null; $profiles = $null
+    try { $status = $statusRaw | ConvertFrom-Json } catch {}; try { $models = $modelsRaw | ConvertFrom-Json } catch {}; try { $profiles = $profilesRaw | ConvertFrom-Json } catch {}
+    if($status){$selected = if($status.selected_model){$status.selected_model.model_id}else{'未选择'}; $path = if($status.llama_server_path){$status.llama_server_path}else{'未发现'}; $owner = if($status.port_owner){('{0} (PID {1})' -f $status.port_owner.process_name,$status.port_owner.pid)}else{'无'}; $lastRepair = if($script:DirectLocalLastRepair){$script:DirectLocalLastRepair}else{'未运行'}; $bonsai = if($status.bonsai_support){$status.bonsai_support.status}else{'UNKNOWN'}; $selectedProfile = if($profiles -and $profiles.profiles){$profiles.profiles | Where-Object {$_.model_id -eq $selected} | Select-Object -First 1}else{$null}; $lastSmoke = if($selectedProfile){$selectedProfile.last_smoke_status}else{'UNKNOWN'}; $lastError = if($selectedProfile -and $selectedProfile.last_error_code){$selectedProfile.last_error_code}else{'NONE'}; $directLocalStatus.Text = ("DIRECT_LOCAL_MODEL_STUDIO：{0}`r`n本地 OpenAI 兼容端点：{1}`r`n后端：直接本地模型`r`n服务程序：{2}`r`n当前加载模型：{3}`r`n推荐模型：按任务自动选择`r`n服务状态：{4}`r`n本地端点：{5}`r`n当前端口：{6}`r`n端口占用：{7}`r`n端口所有者：{8}`r`n备用端口切换：{9}`r`n最近修复：{10}`r`n模型画像数：{11}`r`n最近 smoke：{12}`r`n最近错误：{13}`r`n崇祯历史模拟 profile：history_chongzhen`r`nBonsai 状态：{14}`r`n自动选择模型：已启用`r`n说明：控制台仅负责管理；仅本地 smoke/demo，不是正式任务入口；正式任务入口仍是 Codex。" -f $status.DIRECT_LOCAL_MODEL_STUDIO,$status.LOCAL_OPENAI_COMPATIBLE_ENDPOINT,$path,$selected,$status.server_running,$status.endpoint,$status.port,$status.port_in_use,$owner,$status.auto_port_fallback,$lastRepair,$status.model_count,$lastSmoke,$lastError,$bonsai)}else{$directLocalStatus.Text = ('直接本地状态不可用：' + $statusRaw)}
 }
 function Format-ModelList([object]$Models) { $items=@($Models); if($items.Count -eq 0){return 'NONE'}; $shown=@($items|Select-Object -First 8) -join ', '; if($items.Count -gt 8){return ($shown + (' …（共 {0} 个）' -f $items.Count))}; return $shown }
 function New-ProviderTable {
@@ -1958,12 +1958,16 @@ Add-DirectLocalButton '添加模型目录' { $picker=New-Object System.Windows.F
 Add-DirectLocalButton '扫描本地模型' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('models')),'本地模型列表') ; Refresh-DirectLocalCard }
 Add-DirectLocalButton '选择本地模型' { Add-Type -AssemblyName Microsoft.VisualBasic; $value=[Microsoft.VisualBasic.Interaction]::InputBox('输入已发现的 GGUF model_id：','选择本地模型',''); if($value){[System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('select',$value)),'本地模型');Refresh-DirectLocalCard} }
 Add-DirectLocalButton '启动本地后端' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('start')),'启动本地后端');Refresh-DirectLocalCard }
+Add-DirectLocalButton '启动本地模型服务' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('serve')),'直接本地模型 Studio');Refresh-DirectLocalCard }
 Add-DirectLocalButton '停止本地后端' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('stop')),'停止本地后端');Refresh-DirectLocalCard }
 Add-DirectLocalButton '本地修复' { $raw = Invoke-LocalCli @('repair'); try { $result = $raw | ConvertFrom-Json; $script:DirectLocalLastRepair = if($result.status -eq 'PASS'){'已通过'}else{[string]$result.error_code + '：' + (Get-LocalErrorExplanation ([string]$result.error_code))} } catch { $script:DirectLocalLastRepair = 'REPAIR_RESPONSE_INVALID：修复结果无法读取。' }; [System.Windows.Forms.MessageBox]::Show($raw,'本地修复');Refresh-DirectLocalCard }
 Add-DirectLocalButton '测试本地模型' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('smoke','只回复 LOCAL_DIRECT_OK')),'本地模型测试');Refresh-DirectLocalCard }
 Add-DirectLocalButton '查看模型画像' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('profiles')),'本地模型画像') ; Refresh-DirectLocalCard }
 Add-DirectLocalButton '解释选择' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('explain-select','解释这个 Python 报错，不修改文件')),'自动选择说明') ; Refresh-DirectLocalCard }
 Add-DirectLocalButton '自动选择模型' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('policy')),'自动选择策略') ; Refresh-DirectLocalCard }
+Add-DirectLocalButton '自动选择测试' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('auto-smoke','--task','只回复 LOCAL_AUTO_SELECT_OK','--risk','simple')),'自动选择测试') ; Refresh-DirectLocalCard }
+Add-DirectLocalButton '崇祯历史模拟 demo' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('run-profile','history_chongzhen','--prompt','用三句话模拟崇祯询问辽东军饷问题，不修改文件')),'仅本地 smoke/demo') ; Refresh-DirectLocalCard }
+Add-DirectLocalButton 'Bonsai 下载说明' { $scriptPath=Join-Path $PSScriptRoot 'download-bonsai-model.ps1'; [System.Windows.Forms.MessageBox]::Show((Redact-Text (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath 2>&1 | Out-String)),'Bonsai 下载说明') ; Refresh-DirectLocalCard }
 Add-DirectLocalButton '允许慢模型' { [System.Windows.Forms.MessageBox]::Show((Invoke-LocalCli @('policy','--allow-slow-local')),'慢模型策略') ; Refresh-DirectLocalCard }
 Add-DirectLocalButton '禁止 BF16 自动选择' { [System.Windows.Forms.MessageBox]::Show('已保持默认安全策略：BF16 模型不会自动选择。需要时请在高级配置中明确允许。','本地模型策略') ; Refresh-DirectLocalCard }
 Add-DirectLocalButton '打开配置文件' { $path=Join-Path $env:USERPROFILE '.codex-ai-router\local-backend.json'; if(Test-Path -LiteralPath $path){Start-Process notepad.exe -ArgumentList ('"'+$path+'"')}else{[System.Windows.Forms.MessageBox]::Show('配置文件尚未创建。','本地配置')} }
@@ -2132,6 +2136,9 @@ if ($SelfTest) {
     Write-Output ('BATCH_UI_CONSTRUCTION=' + $(if($dialogSmoke){'PASS'}else{'SKIPPED_NO_PROVIDER'}))
     Write-Output 'DIRECT_LOCAL_UI_CONSTRUCTION=PASS'
     Write-Output 'LOCAL_REPAIR_UI_CONSTRUCTION=PASS'
+    Write-Output 'DIRECT_LOCAL_MODEL_STUDIO_UI=YES'
+    Write-Output 'HISTORY_PROFILE_UI=YES'
+    Write-Output 'BONSAI_STATUS_UI=YES'
     Write-Output 'DEEPSEEK_LOCAL_BRIDGE_UI_CONSTRUCTION=PASS'
     $launcherDiagnostic = Test-LauncherPrerequisites
     $routerRuntime = try { Get-RouterLaunchSpec } catch { $null }

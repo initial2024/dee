@@ -10,6 +10,14 @@ import re
 from typing import Any, Iterable
 
 
+_BONSAI_FORMAT_PATTERNS = (
+    ("Q2_0_G64", r"(?:^|[-_.])Q2[_-]0[_-]G64(?:[-_.]|$)"),
+    ("PQ2_0", r"(?:^|[-_.])PQ2[_-]0(?:[-_.]|$)"),
+    ("PTQ1_0", r"(?:^|[-_.])PTQ1[_-]0(?:[-_.]|$)"),
+    ("Q1_0", r"(?:^|[-_.])Q1[_-]0(?:[-_.]|$)"),
+)
+
+
 def _yes(value: bool) -> str:
     return "YES" if value else "NO"
 
@@ -27,6 +35,18 @@ def _parameter_guess(filename: str) -> str:
     return "UNKNOWN"
 
 
+def bonsai_format_from_filename(filename: str) -> str:
+    """Identify a known Bonsai quantization token without opening a model file."""
+    for name, pattern in _BONSAI_FORMAT_PATTERNS:
+        if re.search(pattern, filename, flags=re.IGNORECASE):
+            return name
+    return "UNKNOWN"
+
+
+def is_bonsai_filename(filename: str) -> bool:
+    return bool(re.search(r"(?:^|[-_.])(?:ternary[-_.])?bonsai(?:[-_.]|$)", filename, flags=re.IGNORECASE))
+
+
 def _family_and_roles(filename: str) -> tuple[str, list[str]]:
     lower = filename.lower()
     roles: list[str] = []
@@ -38,7 +58,10 @@ def _family_and_roles(filename: str) -> tuple[str, list[str]]:
         roles.append("coding")
     if not roles:
         roles.append("general")
-    if "qwen" in lower:
+    if is_bonsai_filename(filename):
+        family = "Ternary-Bonsai" if "ternary" in lower else "Bonsai"
+        roles.extend(("general", "instruct"))
+    elif "qwen" in lower:
         family = "Qwen"
     elif "deepseek" in lower:
         family = "DeepSeek"
@@ -58,6 +81,10 @@ def profile_from_model(model: Any, persisted: dict[str, Any] | None = None) -> d
     path = Path(getattr(model, "path", ""))
     filename = str(getattr(model, "filename", path.name) or path.name)
     quantization = str(getattr(model, "quantization", "UNKNOWN") or "UNKNOWN").upper()
+    bonsai_model = is_bonsai_filename(filename)
+    bonsai_format = bonsai_format_from_filename(filename) if bonsai_model else "NOT_APPLICABLE"
+    if quantization == "UNKNOWN" and bonsai_format != "UNKNOWN" and bonsai_model:
+        quantization = bonsai_format
     projector = "mmproj" in filename.lower() or "vision-projector" in filename.lower()
     text_model = not projector
     family, roles = _family_and_roles(filename)
@@ -87,6 +114,8 @@ def profile_from_model(model: Any, persisted: dict[str, Any] | None = None) -> d
         "role_tags": roles,
         "speed_class": speed,
         "quality_class": quality,
+        "bonsai_model": _yes(bonsai_model),
+        "bonsai_format": bonsai_format,
         "manual_disabled": False,
         "manual_preferred": False,
         "manual_only": False,
@@ -146,6 +175,9 @@ class LocalModelSelector:
             model_id = str(profile.get("model_id", ""))
             if str(profile.get("text_model", "YES")).upper() != "YES":
                 skipped.append({"model": model_id, "reason": "MMPROJ_NOT_TEXT_MODEL"})
+                continue
+            if str(profile.get("bonsai_model", "NO")).upper() == "YES":
+                skipped.append({"model": model_id, "reason": "BONSAI_REQUIRES_EXPLICIT_COMPATIBILITY_CHECK"})
                 continue
             if profile.get("manual_disabled") or model_id in denied_by_policy:
                 skipped.append({"model": model_id, "reason": "MANUAL_DENY"})

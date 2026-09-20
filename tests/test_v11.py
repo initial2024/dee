@@ -362,6 +362,18 @@ class RouterV11Tests(unittest.TestCase):
             self.assertEqual(status["state_reconciled"], "STALE_PID_CLEARED")
             self.assertGreaterEqual(clear_state.call_count, 1)
 
+    def test_135_bonsai_absence_is_explicit_and_never_downloaded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / "Qwen2.5-7B-Instruct-Q4_K_M.gguf").write_bytes(b"GGUF")
+            backend = ManagedLlamaCppBackend([root], executable=str(root / "missing-llama-server"), config_path=root / "local-backend.json")
+            support = backend.bonsai_support_status()
+            self.assertEqual(support["status"], "BONSAI_NOT_INSTALLED")
+            self.assertEqual(support["BONSAI_NOT_INSTALLED"], "YES")
+            self.assertEqual(support["BONSAI_NOT_INSTALLED_HANDLED"], "YES")
+            self.assertEqual(support["BONSAI_AUTO_DOWNLOAD"], "NO")
+            self.assertEqual(support["BONSAI_NOT_DEFAULT_BEFORE_SMOKE"], "YES")
+            self.assertEqual(support["llama_server_compatibility"], "NOT_TESTED_NO_MODEL")
+
 
 if __name__ == "__main__":
     unittest.main()

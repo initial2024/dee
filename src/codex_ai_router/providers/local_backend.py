@@ -15,7 +15,8 @@ from urllib.request import urlopen
 
 from .base import ProviderError
 from .lmstudio import LMStudioProvider
-from .local_model_selector import LocalModelSelector, profiles_for_models
+from .local_model_selector import LocalModelSelector, bonsai_format_from_filename, profiles_for_models
+from .local_profiles import local_profile_summaries
 
 
 LOCAL_PORT_FALLBACKS = (18791, 18792, 18793, 18794, 18795)
@@ -116,6 +117,9 @@ def discover_llama_server(explicit: str | Path | None = None, project_root: Path
 
 
 def _quantization(name: str) -> str:
+    bonsai_format = bonsai_format_from_filename(name)
+    if bonsai_format != "UNKNOWN":
+        return bonsai_format
     match = re.search(r"(Q\d+_[A-Z0-9_]+|Q\d+_\d+|F16|F32)", name.upper())
     return match.group(1) if match else "UNKNOWN"
 
@@ -453,6 +457,8 @@ class ManagedLlamaCppBackend:
         owner = self.port_owner(self.port)
         return {
             "backend": "llama.cpp direct",
+            "DIRECT_LOCAL_MODEL_STUDIO": "YES",
+            "LOCAL_OPENAI_COMPATIBLE_ENDPOINT": "YES",
             "LMSTUDIO_SERVER_REQUIRED": "NO",
             "LMSTUDIO_GGUF_REUSE": "YES",
             "configured": "YES" if self.config_path.exists() else "NO",
@@ -469,7 +475,66 @@ class ManagedLlamaCppBackend:
             "port_owner": owner,
             "auto_port_fallback": self._last_port_event.get("auto_port_fallback", "NO"),
             "port_fallback_from": self._last_port_event.get("port_fallback_from"),
+            "bonsai_support": self.bonsai_support_status(),
+            "history_profiles": local_profile_summaries(),
             **reconciliation,
+        }
+
+    def serve(self) -> dict:
+        """Start a selected model, or safely select one, on loopback only."""
+        selection = None
+        if self.selected is None:
+            selection = self.auto_select("解释本地模型服务状态", risk="simple", mode="local", apply=True)
+            if not selection.get("selected_model"):
+                return {
+                    "status": "ERROR",
+                    "action": "serve",
+                    "error_code": selection.get("error_code") or "LOCAL_NO_ELIGIBLE_MODEL",
+                    "selection": selection,
+                }
+        result = self.start(self.selected)
+        return {
+            "status": "PASS",
+            "action": "serve",
+            "DIRECT_LOCAL_MODEL_STUDIO": "YES",
+            "LOCAL_OPENAI_COMPATIBLE_ENDPOINT": "YES",
+            "LMSTUDIO_SERVER_REQUIRED": "NO",
+            "selection": selection,
+            **result,
+        }
+
+    def bonsai_support_status(self) -> dict:
+        """Report Bonsai availability without downloading or attempting to load a model.
+
+        A llama.cpp binary can prove a Bonsai quantization is usable only by
+        successfully loading that exact local GGUF.  Until then this method
+        deliberately reports an unverified state instead of inferring support
+        from the executable name or a version string.
+        """
+        bonsai_models = [item for item in self.profiles() if item.get("bonsai_model") == "YES"]
+        executable = self.executable_path()
+        if not bonsai_models:
+            compatibility = "NOT_TESTED_NO_MODEL"
+            status = "BONSAI_NOT_INSTALLED"
+        elif executable is None:
+            compatibility = "LLAMA_SERVER_NOT_FOUND"
+            status = "BONSAI_INSTALLED_SERVER_MISSING"
+        elif self.running() and self.selected and any(item.get("model_id") == self.selected.model_id for item in bonsai_models):
+            compatibility = "COMPATIBLE_MODEL_LOADED"
+            status = "BONSAI_INSTALLED"
+        else:
+            compatibility = "REQUIRES_LOCAL_LOAD_SMOKE"
+            status = "BONSAI_INSTALLED_UNVERIFIED"
+        return {
+            "status": status,
+            "BONSAI_NOT_INSTALLED": "YES" if not bonsai_models else "NO",
+            "BONSAI_NOT_INSTALLED_HANDLED": "YES",
+            "BONSAI_AUTO_DOWNLOAD": "NO",
+            "BONSAI_NOT_REQUIRED_FOR_CURRENT_SMOKE": "YES",
+            "BONSAI_NOT_DEFAULT_BEFORE_SMOKE": "YES",
+            "llama_server_found": "YES" if executable else "NO",
+            "llama_server_compatibility": compatibility,
+            "models": [{"model_id": item["model_id"], "format": item["bonsai_format"]} for item in bonsai_models],
         }
 
     def _persist_selected(self, model: GGUFModel) -> None:

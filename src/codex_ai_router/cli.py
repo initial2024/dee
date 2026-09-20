@@ -17,6 +17,7 @@ from .policy import FastLocalPolicy
 from .network import NetworkMode
 from .server import RouterResponsesServer, RouterService
 from .providers.local_backend import LocalBackend, ManagedLlamaCppBackend, load_local_backend_config, save_local_backend_config, local_backend_config_path
+from .providers.local_profiles import build_history_chongzhen_prompt, get_local_profile, local_profile_summaries
 from .providers.runtime_models import RuntimeModelState, probe_model, text_candidates
 from .providers.model_states import model_state_report
 from .handoff import compact_handoff
@@ -121,12 +122,14 @@ def main() -> None:
     explain_route = sub.add_parser("explain-route"); explain_route.add_argument("--prefer-local", action="store_true"); explain_route.add_argument("task")
     delegate_fast = sub.add_parser("delegate-fast"); delegate_fast.add_argument("--max-seconds", type=int, default=60); delegate_fast.add_argument("task")
     local = sub.add_parser("local"); local_sub = local.add_subparsers(dest="local_action", required=True)
-    for action in ("start", "stop", "restart", "repair", "status", "models", "smoke"):
+    for action in ("serve", "start", "stop", "restart", "repair", "status", "models", "smoke"):
         item = local_sub.add_parser(action)
         if action == "smoke": item.add_argument("task", nargs="?", default="只回复 LOCAL_DIRECT_OK")
     local_profiles = local_sub.add_parser("profiles")
     local_explain = local_sub.add_parser("explain-select"); local_explain.add_argument("task"); local_explain.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_explain.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
     local_auto = local_sub.add_parser("auto-smoke"); local_auto.add_argument("--task", required=True); local_auto.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_auto.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
+    local_profile = local_sub.add_parser("profile"); local_profile.add_argument("profile_id", choices=("history_chongzhen",))
+    local_run_profile = local_sub.add_parser("run-profile"); local_run_profile.add_argument("profile_id", choices=("history_chongzhen",)); local_run_profile.add_argument("--prompt", required=True)
     local_policy = local_sub.add_parser("policy"); local_policy.add_argument("--disable-model", action="append", default=[]); local_policy.add_argument("--enable-model", action="append", default=[]); local_policy.add_argument("--preferred"); local_policy.add_argument("--only"); local_policy.add_argument("--allow-slow-local", action="store_true"); local_policy.add_argument("--allow-bf16-auto", action="store_true"); local_policy.add_argument("--no-auto", action="store_true")
     local_select = local_sub.add_parser("select"); local_select.add_argument("model")
     local_configure = local_sub.add_parser("configure"); local_configure.add_argument("--llama-server-path"); local_configure.add_argument("--model-dir", action="append"); local_configure.add_argument("--port", type=int); local_configure.add_argument("--ctx-size", type=int); local_configure.add_argument("--timeout-seconds", type=int)
@@ -478,9 +481,17 @@ def main() -> None:
             elif args.local_action == "status": emit(backend.status())
             elif args.local_action == "models": emit({"models": [model.as_dict() for model in backend.discover()], "llama_server_found": "YES" if backend.executable_available() else "NO", "source": "lmstudio_gguf_direct", "LMSTUDIO_GGUF_REUSE": "YES", "NO_FULL_DISK_SCAN": "YES"})
             elif args.local_action == "profiles":
-                profiles = backend.profiles(); emit({"profiles": profiles, "model_count": len(profiles), "source": "gguf_filename_profile"})
+                profiles = backend.profiles(); emit({"profiles": profiles, "history_profiles": local_profile_summaries(), "model_count": len(profiles), "source": "gguf_filename_profile"})
             elif args.local_action == "explain-select": emit(backend.explain_select(args.task, risk=args.risk, mode=args.mode))
             elif args.local_action == "auto-smoke": emit(backend.auto_smoke(args.task, risk=args.risk, mode=args.mode))
+            elif args.local_action == "profile":
+                profile = get_local_profile(args.profile_id)
+                emit({"status": "PASS", "profile": profile, "HISTORY_CHONGZHEN_PROFILE": "YES", "HISTORY_SIMULATION_FACT_FICTION_BOUNDARY": "YES", "HISTORY_PROFILE_USES_LOCAL_SELECTOR": "YES"})
+            elif args.local_action == "run-profile":
+                profile = get_local_profile(args.profile_id)
+                if profile is None: raise ValueError("LOCAL_PROFILE_NOT_FOUND")
+                result = backend.auto_smoke(build_history_chongzhen_prompt(args.prompt), risk=profile["selector_risk"], mode=profile["selector_mode"])
+                emit({**result, "profile": profile, "HISTORY_CHONGZHEN_PROFILE": "YES", "HISTORY_SIMULATION_FACT_FICTION_BOUNDARY": "YES", "HISTORY_PROFILE_USES_LOCAL_SELECTOR": "YES"})
             elif args.local_action == "policy":
                 local_data = load_local_backend_config()
                 disabled = set(str(item) for item in local_data.get("manual_disabled_models", []) if item)
@@ -493,6 +504,7 @@ def main() -> None:
                 if args.no_auto: local_data["auto_select_model"] = False
                 emit({"status": "POLICY_SAVED", "config_path": str(save_local_backend_config(local_data)), "auto_select_model": local_data.get("auto_select_model", True), "manual_disabled_models": local_data.get("manual_disabled_models", []), "manual_preferred_model": local_data.get("manual_preferred_model", ""), "manual_only_model": local_data.get("manual_only_model", ""), "allow_slow_local": local_data.get("allow_slow_local", False), "allow_bf16_auto": local_data.get("allow_bf16_auto", False)})
             elif args.local_action == "select": emit({"status": "SELECTED", "model": backend.select(args.model).as_dict()})
+            elif args.local_action == "serve": emit(backend.serve())
             elif args.local_action == "start": emit(backend.start())
             elif args.local_action == "stop": emit(backend.stop())
             elif args.local_action == "restart": emit(backend.restart())
