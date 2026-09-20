@@ -133,7 +133,7 @@ def main() -> None:
     local_run_profile = local_sub.add_parser("run-profile"); local_run_profile.add_argument("profile_id", choices=("history_chongzhen",)); local_run_profile.add_argument("--prompt", required=True)
     local_policy = local_sub.add_parser("policy"); local_policy.add_argument("--disable-model", action="append", default=[]); local_policy.add_argument("--enable-model", action="append", default=[]); local_policy.add_argument("--preferred"); local_policy.add_argument("--only"); local_policy.add_argument("--allow-slow-local", action="store_true"); local_policy.add_argument("--allow-bf16-auto", action="store_true"); local_policy.add_argument("--no-auto", action="store_true")
     local_select = local_sub.add_parser("select"); local_select.add_argument("model")
-    local_configure = local_sub.add_parser("configure"); local_configure.add_argument("--llama-server-path"); local_configure.add_argument("--model-dir", action="append"); local_configure.add_argument("--port", type=int); local_configure.add_argument("--ctx-size", type=int); local_configure.add_argument("--timeout-seconds", type=int)
+    local_configure = local_sub.add_parser("configure"); local_configure.add_argument("--llama-server-path"); local_configure.add_argument("--prism-llama-server-path"); local_configure.add_argument("--model-dir", action="append"); local_configure.add_argument("--port", type=int); local_configure.add_argument("--ctx-size", type=int); local_configure.add_argument("--timeout-seconds", type=int)
     serve = sub.add_parser("serve"); serve.add_argument("--host", default="127.0.0.1"); serve.add_argument("--port", type=int, default=18789); serve.add_argument("--gguf-dir", action="append", default=[]); serve.add_argument("--managed-gguf", help="optional discovered GGUF id to start persistently")
     handoff = sub.add_parser("handoff"); handoff.add_argument("task"); handoff.add_argument("--tests", default="NOT_RUN"); handoff.add_argument("--blockers", default="NONE"); handoff.add_argument("--constraints", default="")
     codex = sub.add_parser("codex-provider"); codex.add_argument("action", choices=("install", "switch-status")); codex.add_argument("--port", type=int, default=18789)
@@ -474,6 +474,10 @@ def main() -> None:
             if args.local_action == "configure":
                 local_data = load_local_backend_config()
                 if args.llama_server_path is not None: local_data["llama_server_path"] = args.llama_server_path
+                if args.prism_llama_server_path is not None:
+                    prism = local_data.setdefault("runtimes", {}).setdefault("prism_bonsai", {"runtime_id": "prism_bonsai"})
+                    prism["runtime_path"] = str(Path.cwd() / "tools" / "prism-bonsai-runtime")
+                    prism["llama_server_path"] = args.prism_llama_server_path
                 if args.model_dir: local_data["model_dirs"] = list(dict.fromkeys([*local_data.get("model_dirs", []), *args.model_dir]))
                 if args.port is not None: local_data["port"] = args.port; backend.port = args.port
                 if args.ctx_size is not None: local_data["ctx_size"] = args.ctx_size

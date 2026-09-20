@@ -8,6 +8,9 @@ build/
 reports/*.runtime.json
 .codex-ai-router/
 .runtime/
+tools/prism-bonsai-runtime/
+*.gguf
+*.safetensors
 codex-handoff/sessions/
 codex-handoff/codex-config-backups/
 codex-handoff/codex-config-profiles/

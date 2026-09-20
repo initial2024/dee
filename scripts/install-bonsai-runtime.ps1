@@ -56,7 +56,7 @@ try {
   $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/PrismML-Eng/llama.cpp/releases/latest' -Headers $headers
   $asset = @($release.assets | Where-Object {
     $_.browser_download_url -match '^https://github\.com/PrismML-Eng/llama\.cpp/releases/' -and
-    $_.name -match '(?i)windows.*(cpu|cuda|vulkan|hip).*\.zip$'
+    $_.name -match '(?i)bin-win-cpu-x64\.zip$'
   } | Select-Object -First 1)
   if (-not $asset.Count) {
     $result = New-BaseResult
@@ -74,7 +74,10 @@ try {
   $binary = Get-ChildItem -LiteralPath $staging -Filter 'llama-server.exe' -File -Recurse | Select-Object -First 1
   if (-not $binary) { throw 'BONSAI_RUNTIME_BINARY_MISSING_FROM_OFFICIAL_ASSET' }
   New-Item -ItemType Directory -Path $runtimePath -Force | Out-Null
-  Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $runtimePath 'llama-server.exe') -Force
+  # Keep official sidecar DLLs beside llama-server.exe; copying only the EXE is not a runnable installation.
+  Copy-Item -LiteralPath (Split-Path -Parent $binary.FullName) -Destination $runtimePath -Recurse -Force
+  $installedServer = Get-ChildItem -LiteralPath $runtimePath -Filter 'llama-server.exe' -File -Recurse | Select-Object -First 1
+  if (-not $installedServer) { throw 'BONSAI_RUNTIME_COPY_FAILED' }
   $marker = [ordered]@{
     runtime_id = 'prism_bonsai'
     official_source = 'https://github.com/PrismML-Eng/llama.cpp'
@@ -84,7 +87,7 @@ try {
   [System.IO.File]::WriteAllText((Join-Path $runtimePath 'prism-bonsai-runtime.json'), ($marker | ConvertTo-Json -Depth 3), [System.Text.UTF8Encoding]::new($false))
   $result = New-BaseResult
   $result.status = 'BONSAI_RUNTIME_INSTALLED_OFFICIAL_BINARY'
-  $result.llama_server_path = Join-Path $runtimePath 'llama-server.exe'
+  $result.llama_server_path = [string]$installedServer.FullName
   $result.BONSAI_RUNTIME_WINDOWS_BINARY_NOT_FOUND = 'NO'
   Write-Result $result
 } catch {
