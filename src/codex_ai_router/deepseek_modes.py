@@ -27,6 +27,7 @@ MODE_ALIASES = {
     "vision_quick": "deepseek-web-vision-quick", "vision_expert": "deepseek-web-vision-expert",
     "vision_expert_thinking": "deepseek-web-vision-expert-thinking", "vision_search": "deepseek-web-vision-search",
     "file_extract": "deepseek-web-file-extract",
+    "best_available_reasoning": "deepseek-web-quick-thinking",
 }
 MODE_ALIASES["auto"] = MODE_ALIASES["quick_plain"]
 MODE_ORDER = ("quick", "expert", "thinking", "search", "vision", "file")
@@ -52,6 +53,8 @@ SearchMode = Literal["off", "on", "tool_required", "unavailable", "unknown"]
 AttachmentMode = Literal["off", "available", "requires_attachment", "unavailable", "unknown"]
 ResponseProtocol = Literal["browser_dom", "responses_api_compatible", "chat_completions_compatible", "unknown"]
 ModeSwitchStrategy = Literal["legacy_buttons", "unified_menu", "profile_menu", "unsupported"]
+ReasoningAxisType = Literal["none", "binary_toggle", "strength_levels", "unknown"]
+ReasoningOptionsStatus = Literal["full", "partial", "binary", "unavailable", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,12 @@ class DeepSeekCapabilityProfile:
     supports_tools: bool | Literal["unknown"] = "unknown"
     supports_reasoning_items: bool | Literal["unknown"] = "unknown"
     mode_switch_strategy: ModeSwitchStrategy = "unsupported"
+    reasoning_axis_type: ReasoningAxisType = "unknown"
+    available_reasoning_strengths: tuple[ReasoningStrength, ...] = ()
+    max_available_reasoning_strength: ReasoningStrength = "unknown"
+    high_reasoning_supported: bool = False
+    max_reasoning_supported: bool = False
+    reasoning_strength_options_status: ReasoningOptionsStatus = "unknown"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -105,9 +114,50 @@ THREE_IN_ONE_PROFILE_MAP: dict[str, tuple[str, ReasoningStrength, SearchMode]] =
 }
 
 
+def best_available_reasoning_profile(probe: dict[str, Any] | None = None) -> DeepSeekCapabilityProfile:
+    """Return the strongest verified no-search profile without overstating it."""
+    data = probe if isinstance(probe, dict) else {}
+    axis = str(data.get("reasoning_axis_type", "unknown"))
+    maximum = str(data.get("max_available_reasoning_strength", "unknown"))
+    if maximum not in {"off", "low", "medium", "high", "max"}:
+        strengths = data.get("available_reasoning_strengths")
+        maximum = "max" if isinstance(strengths, (list, tuple)) and "max" in strengths else "high" if isinstance(strengths, (list, tuple)) and "high" in strengths else "medium" if isinstance(strengths, (list, tuple)) and "medium" in strengths else "low" if isinstance(strengths, (list, tuple)) and "low" in strengths else "off"
+    actual: ReasoningStrength = maximum if maximum in {"low", "medium", "high", "max"} else "off"
+    default_strengths = ("off", "medium") if axis == "binary_toggle" else ("off", actual)
+    raw_strengths = data.get("available_reasoning_strengths")
+    strengths: tuple[ReasoningStrength, ...] = tuple(raw_strengths) if isinstance(raw_strengths, (list, tuple)) and raw_strengths else default_strengths
+    return DeepSeekCapabilityProfile(
+        "best_available_reasoning", ui_generation="three_in_one", base_model_family="web_default",
+        reasoning_strength=actual, search_mode="off", vision_mode="off", file_mode="off",
+        mode_switch_strategy="unified_menu", reasoning_axis_type=axis if axis in {"none", "binary_toggle", "strength_levels", "unknown"} else "unknown",
+        available_reasoning_strengths=strengths, max_available_reasoning_strength=actual,
+        high_reasoning_supported=actual in {"high", "max"}, max_reasoning_supported=actual == "max",
+        reasoning_strength_options_status="binary" if axis == "binary_toggle" else "full" if actual != "off" else "unavailable",
+    )
+
+
+def reasoning_capability_text(probe: dict[str, Any] | None = None) -> str:
+    """Return UI-safe wording that reflects verified visible reasoning controls."""
+    data = probe if isinstance(probe, dict) else {}
+    axis = str(data.get("reasoning_axis_type", "unknown"))
+    maximum = str(data.get("max_available_reasoning_strength", "unknown"))
+    if axis == "binary_toggle":
+        return "当前 DeepSeek 网页仅检测到深度思考开关；本地项目可使用已开启思考并关闭搜索，但不等同于 high/max（实际强度=medium）。"
+    if maximum == "max":
+        return "当前网页已检测到 max 思考；高风险审查可请求 max，并在验证后关闭联网搜索。"
+    if maximum == "high":
+        return "本地项目默认高思考并关闭搜索；当前网页最高可用思考强度为 high。"
+    if maximum in {"low", "medium"}:
+        return f"当前网页最高可用思考强度为 {maximum}；仅使用已验证强度并在验证后关闭联网搜索。"
+    return "高风险审查所需的 max 思考未在当前网页 UI 中检测到；请使用 Codex official 或其他支持 max 的后端。"
+
+
 def capability_profile(profile_id: str, *, ui_generation: UiGeneration = "unknown", probe: dict[str, Any] | None = None) -> DeepSeekCapabilityProfile:
     """Return a stable capability profile for a legacy alias or new profile id."""
-    base = LEGACY_PROFILE_MAP.get(profile_id, DeepSeekCapabilityProfile(profile_id))
+    if profile_id == "best_available_reasoning":
+        base = best_available_reasoning_profile(probe)
+    else:
+        base = LEGACY_PROFILE_MAP.get(profile_id, DeepSeekCapabilityProfile(profile_id))
     if ui_generation == "three_in_one" and profile_id in THREE_IN_ONE_PROFILE_MAP:
         canonical, strength, search = THREE_IN_ONE_PROFILE_MAP[profile_id]
         base = DeepSeekCapabilityProfile(
@@ -124,10 +174,10 @@ def capability_profile(profile_id: str, *, ui_generation: UiGeneration = "unknow
         return DeepSeekCapabilityProfile(**{**base.as_dict(), "ui_generation": ui_generation if ui_generation != "unknown" else base.ui_generation})
     values = base.as_dict()
     values["ui_generation"] = probe.get("ui_generation", ui_generation) or ui_generation
-    for field in ("base_model_family", "reasoning_strength", "search_mode", "vision_mode", "file_mode", "response_protocol", "mode_switch_strategy"):
+    for field in ("base_model_family", "reasoning_strength", "search_mode", "vision_mode", "file_mode", "response_protocol", "mode_switch_strategy", "reasoning_axis_type", "available_reasoning_strengths", "max_available_reasoning_strength", "reasoning_strength_options_status"):
         if probe.get(field) is not None:
             values[field] = probe[field]
-    for field in ("supports_codex", "supports_tools", "supports_reasoning_items"):
+    for field in ("supports_codex", "supports_tools", "supports_reasoning_items", "high_reasoning_supported", "max_reasoning_supported"):
         if field in probe:
             values[field] = probe[field]
     return DeepSeekCapabilityProfile(**values)
@@ -224,6 +274,9 @@ def probe_deepseek_modes(*, health_url: str = DEEPSEEK_HEALTH, probe_url: str = 
         ("base_mode_available", bool(result.get("quick_available") or result.get("expert_available"))),
         ("base_mode_required", True), ("base_mode_axis", "available"),
         ("base_mode_status", "available"),
+        ("reasoning_axis_type", "unknown"), ("available_reasoning_strengths", []),
+        ("max_available_reasoning_strength", "unknown"), ("high_reasoning_supported", False),
+        ("max_reasoning_supported", False),
     ):
         result[name] = payload.get(name, default)
     inferred_three_in_one = bool(
@@ -250,13 +303,21 @@ def probe_deepseek_modes(*, health_url: str = DEEPSEEK_HEALTH, probe_url: str = 
         options = []
         result["reasoning_strength_options"] = options
     if options:
-        result["reasoning_strength_options_status"] = "complete"
+        result["reasoning_strength_options_status"] = "full"
         result["reasoning_strength_warning"] = None
     elif current_strength != "unknown" and result.get("reasoning_strength_available"):
         result["reasoning_strength_options_status"] = "partial"
         result["reasoning_strength_warning"] = "REASONING_OPTIONS_PARTIAL"
     if result.get("ui_generation") == "three_in_one":
         result["reasoning_strength_available"] = bool(result.get("thinking_available") or result.get("reasoning_strength_available"))
+        if result.get("reasoning_axis_type") == "unknown" and result.get("thinking_available"):
+            result["reasoning_axis_type"] = "binary_toggle" if not options else "strength_levels"
+        if result.get("reasoning_axis_type") == "binary_toggle":
+            result["available_reasoning_strengths"] = ["off", "medium"]
+            result["max_available_reasoning_strength"] = "medium"
+            result["high_reasoning_supported"] = False
+            result["max_reasoning_supported"] = False
+            result["reasoning_strength_options_status"] = "binary"
         if result.get("current_profile_label") in {None, "", "unknown"}:
             result["current_profile_label"] = f"{current_strength}/{('search' if result.get('current_search') else 'no-search')}"
     if result.get("ui_generation") == "legacy":
@@ -265,8 +326,14 @@ def probe_deepseek_modes(*, health_url: str = DEEPSEEK_HEALTH, probe_url: str = 
     result["capability_profile"] = capability_profile(
         str(result.get("current_profile_label") or "web_default"),
         ui_generation=result["ui_generation"],
-        probe={"reasoning_strength": result.get("current_reasoning_strength"), "search_mode": "on" if result.get("current_search") else "off"},
+        probe={
+            "reasoning_strength": result.get("current_reasoning_strength"), "search_mode": "on" if result.get("current_search") else "off",
+            "reasoning_axis_type": result.get("reasoning_axis_type"), "available_reasoning_strengths": result.get("available_reasoning_strengths"),
+            "max_available_reasoning_strength": result.get("max_available_reasoning_strength"), "high_reasoning_supported": result.get("high_reasoning_supported"),
+            "max_reasoning_supported": result.get("max_reasoning_supported"), "reasoning_strength_options_status": result.get("reasoning_strength_options_status"),
+        },
     ).as_dict()
+    result["best_available_reasoning_profile"] = best_available_reasoning_profile(result).as_dict()
     _write_state(result, state_path); return result
 
 
@@ -288,6 +355,13 @@ def _combo_supported(availability: dict[str, Any] | None) -> bool | None:
 
 def _profile_available(profile: str, availability: dict[str, Any] | None, has_image: bool, has_file: bool) -> tuple[bool, str | None]:
     three_in_one = isinstance(availability, dict) and availability.get("ui_generation") == "three_in_one"
+    if profile == "best_available_reasoning" and not _available(availability, "thinking"):
+        return False, "DEEPSEEK_THINKING_UNAVAILABLE"
+    if three_in_one and profile in {"expert_thinking", "expert_thinking_search", "expert_max_review"}:
+        requested = "max" if profile == "expert_max_review" else "high"
+        supported_key = "max_reasoning_supported" if requested == "max" else "high_reasoning_supported"
+        if availability.get(supported_key) is False or availability.get("reasoning_axis_type") == "binary_toggle":
+            return False, "PATCH_REVIEW_MAX_REASONING_UNAVAILABLE" if requested == "max" else "DEEPSEEK_REASONING_STRENGTH_UNAVAILABLE"
     checks: list[tuple[str, str]] = [] if three_in_one else [("quick", "UI_CHANGED")]
     if not three_in_one and (profile.startswith("expert") or profile in {"vision_expert", "vision_expert_thinking", "file_extract"}): checks = [("expert", "DEEPSEEK_EXPERT_MODE_UNAVAILABLE")]
     if "thinking" in profile or profile == "expert_max_review": checks.append(("thinking", "DEEPSEEK_THINKING_UNAVAILABLE"))
@@ -371,6 +445,9 @@ def select_deepseek_mode(task_text: str, *, codex_mode: str = "CUSTOM_DEEPSEEK_T
             "accuracy": {"simple": "quick_thinking", "medium": "expert_plain", "complex": "expert_thinking"},
         }
         desired, why = table[performance][difficulty], f"{performance} 性能策略的 {difficulty} 任务"
+    if isinstance(availability, dict) and availability.get("ui_generation") == "three_in_one" and availability.get("reasoning_axis_type") == "binary_toggle":
+        if not fixed and desired in {"expert_thinking", "expert_thinking_search"} and difficulty != "high_risk":
+            desired, why = "best_available_reasoning", "当前网页仅提供二值深度思考；使用已验证的 medium/no-search 能力"
     split_strategy: dict[str, str] | None = None
     combo = _combo_supported(availability)
     if desired == "expert_thinking_search" and combo is False:
@@ -384,11 +461,13 @@ def select_deepseek_mode(task_text: str, *, codex_mode: str = "CUSTOM_DEEPSEEK_T
         ok, reason = _profile_available(desired, availability, has_image, has_file)
     generation = str((availability or {}).get("ui_generation", "unknown"))
     selected_profile = capability_profile(desired, ui_generation=generation).as_dict()
+    if desired == "best_available_reasoning":
+        selected_profile = best_available_reasoning_profile(availability).as_dict()
     return {"selected_mode": desired, "selected_model_alias": mode_alias(desired), "selected_profile": selected_profile, "reasoning_strength": selected_profile["reasoning_strength"], "search_required": "search" in desired, "vision_required": desired.startswith("vision"), "file_required": desired == "file_extract", "combo_policy": "allow_split_search_then_reason" if split_strategy else "require_exact", "split_strategy": split_strategy, "fallback_reason": reason, "error_code": "DEEPSEEK_SEARCH_COMBO_UNAVAILABLE" if split_strategy else reason, "mode_available": ok, "manual_override": bool(fixed), "codex_mode": codex_mode, "tools_policy": tools_policy, "performance_mode": performance, "task_difficulty": difficulty, "smart_search": "ON" if "search" in desired else "OFF", "thinking": "ON" if selected_profile["reasoning_strength"] != "off" else "OFF", "input_modality": "image" if desired.startswith("vision") else "file" if desired == "file_extract" else "text", "max_auto_escalation": 1}
 
 
 __all__ = [
-    "DeepSeekCapabilityProfile", "LEGACY_PROFILE_MAP", "THREE_IN_ONE_PROFILE_MAP", "capability_profile",
+    "DeepSeekCapabilityProfile", "LEGACY_PROFILE_MAP", "THREE_IN_ONE_PROFILE_MAP", "best_available_reasoning_profile", "reasoning_capability_text", "capability_profile",
     "legacy_profile_for_mode", "MODE_ALIASES", "mode_alias", "probe_deepseek_modes",
     "select_deepseek_mode", "classify_task_difficulty", "escalation_target",
     "preflight_attachment", "load_probe_state",

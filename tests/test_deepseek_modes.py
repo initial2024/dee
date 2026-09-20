@@ -84,7 +84,7 @@ class DeepSeekModeTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertFalse(result["promptSent"]); self.assertFalse(result["clickSend"]); self.assertFalse(result["uploadAttempted"])
 
-    def test_probe_infers_three_in_one_without_legacy_buttons_and_marks_partial_options(self):
+    def test_probe_infers_three_in_one_without_legacy_buttons_and_marks_binary_options(self):
         def opener(request, timeout=0):
             self.assertEqual(request.get_method(), "GET")
             if request.full_url.endswith("/health"): return FakeResponse({"ok": True})
@@ -102,8 +102,12 @@ class DeepSeekModeTests(unittest.TestCase):
         self.assertFalse(result["legacy_buttons_available"])
         self.assertEqual(result["base_mode_status"], "not_applicable_for_three_in_one")
         self.assertEqual(result["current_reasoning_strength"], "medium")
-        self.assertEqual(result["reasoning_strength_options_status"], "partial")
-        self.assertEqual(result["reasoning_strength_warning"], "REASONING_OPTIONS_PARTIAL")
+        self.assertEqual(result["reasoning_axis_type"], "binary_toggle")
+        self.assertEqual(result["available_reasoning_strengths"], ["off", "medium"])
+        self.assertEqual(result["max_available_reasoning_strength"], "medium")
+        self.assertEqual(result["reasoning_strength_options_status"], "binary")
+        self.assertFalse(result["high_reasoning_supported"])
+        self.assertFalse(result["max_reasoning_supported"])
         self.assertTrue(result["current_search"])
 
 

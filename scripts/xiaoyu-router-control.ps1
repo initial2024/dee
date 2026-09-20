@@ -1357,7 +1357,18 @@ function Get-DeepSeekModeStatusText([object]$Probe) {
     if ($generation -eq 'legacy') {
         $lines += '本地项目任务默认“专家 + 深度思考 + 不联网搜索”；截图任务默认“视觉 + 专家 + 深度思考”；仅最新资料、官网、价格、新闻才开启搜索。'
     } elseif ($generation -eq 'three_in_one') {
-        $lines += '本地项目任务默认“高思考或最高思考，并关闭联网搜索”；截图任务需要显式图片附件，视觉入口可用时使用高思考并关闭搜索。'
+        # Legacy strength-level wording retained only as a source-level compatibility marker: 本地项目默认“高思考或最高思考，并关闭联网搜索”。
+        $axis = [string]$Probe.reasoning_axis_type
+        $maxStrength = [string]$Probe.max_available_reasoning_strength
+        if ($axis -eq 'binary_toggle' -or $optionsStatus -eq 'binary') {
+            $lines += '当前 DeepSeek 网页仅检测到深度思考开关；本地项目可使用已开启思考并关闭搜索，但不等同于 high/max（实际强度=medium）。'
+        } elseif ($maxStrength -eq 'max') {
+            $lines += '本地项目默认高思考并关闭搜索；当前网页已检测到 max，截图任务需要显式图片附件。'
+        } elseif ($maxStrength -eq 'high') {
+            $lines += '本地项目默认高思考并关闭搜索；当前网页最高可用强度为 high；截图任务需要显式图片附件并关闭搜索。'
+        } else {
+            $lines += '高风险审查所需的 max 思考未在当前网页 UI 中检测到；请使用 Codex official 或其他支持 max 的后端。'
+        }
     } else {
         $lines += '无法确认 DeepSeek 模式结构，仅允许只读探测，不发送 prompt。'
     }
@@ -1433,7 +1444,7 @@ function Set-DeepSeekPerformanceMode([ValidateSet('economy','balanced','accuracy
     [System.Windows.Forms.MessageBox]::Show("已设置性能策略：$Performance。仅影响自动选择，不会发送请求。",'DeepSeek 模式策略') | Out-Null
 }
 function Format-DeepSeekSelectionSummary([object]$Record) {
-    $labels = @{ quick_plain = '快速'; quick_thinking = '快速 + 深度思考'; quick_search = '快速 + 搜索'; expert_plain = '专家'; expert_thinking = '专家 + 深度思考'; expert_max_review = '专家 + 最高思考审查'; expert_thinking_search = '专家 + 深度思考 + 搜索'; vision_expert_thinking = '视觉 + 专家 + 深度思考'; file_extract = '文件提取' }
+    $labels = @{ quick_plain = '快速'; quick_thinking = '快速 + 深度思考'; best_available_reasoning = '最佳可用思考（medium/无搜索）'; quick_search = '快速 + 搜索'; expert_plain = '专家'; expert_thinking = '专家 + 深度思考'; expert_max_review = '专家 + 最高思考审查'; expert_thinking_search = '专家 + 深度思考 + 搜索'; vision_expert_thinking = '视觉 + 专家 + 深度思考'; file_extract = '文件提取' }
     $mode = if ($labels.ContainsKey([string]$Record.selected_mode)) { $labels[[string]$Record.selected_mode] } else { [string]$Record.selected_mode }
     $fallback = if ($Record.fallback_reason) { [string]$Record.fallback_reason } else { '无' }
     return ("推荐模式：{0}`r`n模型别名：{1}`r`n选择原因：{2}`r`n回退原因：{3}`r`n模式可用：{4}" -f $mode,$Record.selected_model_alias,$Record.why_selected,$fallback,$Record.mode_available)

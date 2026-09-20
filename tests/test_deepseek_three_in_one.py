@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from codex_ai_router.deepseek_modes import DeepSeekCapabilityProfile, capability_profile, select_deepseek_mode
+from codex_ai_router.deepseek_modes import DeepSeekCapabilityProfile, best_available_reasoning_profile, capability_profile, reasoning_capability_text, select_deepseek_mode
 from codex_ai_router.work_profiles import get_work_profile, map_profile
 
 
@@ -14,7 +14,42 @@ def available(*names: str, combo: bool | None = None) -> dict:
     return result
 
 
+def binary_available(*names: str) -> dict:
+    result = available(*names)
+    result.update({
+        "reasoning_axis_type": "binary_toggle", "available_reasoning_strengths": ["off", "medium"],
+        "max_available_reasoning_strength": "medium", "high_reasoning_supported": False,
+        "max_reasoning_supported": False, "reasoning_strength_options_status": "binary",
+    })
+    return result
+
+
 class DeepSeekThreeInOneTests(unittest.TestCase):
+    def test_binary_capability_reports_medium_best_profile_and_dynamic_text(self):
+        profile = best_available_reasoning_profile(binary_available("thinking", "search"))
+        self.assertEqual(profile.reasoning_strength, "medium")
+        self.assertEqual(profile.search_mode, "off")
+        self.assertEqual(profile.available_reasoning_strengths, ("off", "medium"))
+        self.assertFalse(profile.high_reasoning_supported)
+        self.assertFalse(profile.max_reasoning_supported)
+        self.assertIn("二值", reasoning_capability_text(binary_available("thinking", "search")))
+
+    def test_binary_hard_profiles_never_silently_fallback(self):
+        high = select_deepseek_mode("复杂 router 调试", availability=binary_available("thinking", "search"))
+        self.assertEqual(high["selected_mode"], "best_available_reasoning")
+        self.assertEqual(high["reasoning_strength"], "medium")
+        self.assertEqual(high["smart_search"], "OFF")
+        review = select_deepseek_mode("高风险 密钥 patch review", availability=binary_available("thinking", "search"))
+        self.assertEqual(review["selected_mode"], "expert_max_review")
+        self.assertFalse(review["mode_available"])
+        self.assertEqual(review["error_code"], "PATCH_REVIEW_MAX_REASONING_UNAVAILABLE")
+
+    def test_binary_manual_high_is_hard_unavailable(self):
+        result = select_deepseek_mode("复杂 router 调试", user_preference="expert_thinking", availability=binary_available("thinking", "search"))
+        self.assertEqual(result["selected_mode"], "expert_thinking")
+        self.assertFalse(result["mode_available"])
+        self.assertEqual(result["error_code"], "DEEPSEEK_REASONING_STRENGTH_UNAVAILABLE")
+
     def test_profile_contains_three_axes(self):
         value = capability_profile("expert_max_review", ui_generation="three_in_one")
         self.assertIsInstance(value, DeepSeekCapabilityProfile)
