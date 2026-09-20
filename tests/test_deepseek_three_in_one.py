@@ -32,7 +32,7 @@ class DeepSeekThreeInOneTests(unittest.TestCase):
         self.assertEqual(profile.available_reasoning_strengths, ("off", "medium"))
         self.assertFalse(profile.high_reasoning_supported)
         self.assertFalse(profile.max_reasoning_supported)
-        self.assertIn("二值", reasoning_capability_text(binary_available("thinking", "search")))
+        self.assertIn("深度思考开关", reasoning_capability_text(binary_available("thinking", "search")))
 
     def test_binary_hard_profiles_never_silently_fallback(self):
         high = select_deepseek_mode("复杂 router 调试", availability=binary_available("thinking", "search"))
