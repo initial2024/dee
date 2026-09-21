@@ -22,6 +22,7 @@ from .local_profiles import local_profile_summaries
 LOCAL_PORT_FALLBACKS = (18791, 18792, 18793, 18794, 18795)
 STANDARD_RUNTIME_ID = "standard_llama_cpp"
 PRISM_RUNTIME_ID = "prism_bonsai"
+VULKAN_RUNTIME_ID = "lmstudio_vulkan"
 OFFICIAL_PRISMML_SOURCES = {
     "https://github.com/PrismML-Eng/Bonsai-demo",
     "https://github.com/PrismML-Eng/llama.cpp",
@@ -38,6 +39,16 @@ BONSAI_MINIMAL_SMOKE = {
     "ctx_size": 1024,
     "timeout_seconds": 300,
 }
+PR206_AVX2_COMMIT = "10df298811c35948ab31f3fa0e2d9032809fe339"
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def classify_bonsai_performance(status: str, elapsed_seconds: float | None, error_code: str | None = None) -> tuple[str, str]:
@@ -68,6 +79,33 @@ def default_lmstudio_model_dirs() -> list[Path]:
     return [user / ".lmstudio" / "models", user / ".cache" / "lm-studio" / "models"]
 
 
+def lmstudio_vulkan_runtime_status() -> dict:
+    """Reuse an installed LM Studio Vulkan binary without starting LM Studio."""
+    root = Path(os.environ.get("USERPROFILE") or Path.home()) / ".lmstudio" / "extensions" / "backends"
+    candidates = sorted(root.glob("llama.cpp-win-x86_64-vulkan-*/llama-server.exe"), reverse=True)
+    executable = candidates[0] if candidates else None
+    version, _ = _runtime_probe_output(executable)
+    devices = ""
+    if executable is not None:
+        try:
+            result = subprocess.run([str(executable), "--list-devices"], capture_output=True, text=True, timeout=8, check=False)
+            devices = (result.stdout + result.stderr)[:2000]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    detected = re.search(r"Vulkan\d+:\s*(.+?)\s*\(", devices)
+    device_name = detected.group(1).strip() if detected else None
+    return {
+        "runtime_id": VULKAN_RUNTIME_ID,
+        "runtime_installed": "YES" if executable else "NO",
+        "llama_server_path": str(executable) if executable else None,
+        "LMSTUDIO_VULKAN_RUNTIME_REUSED": "YES" if executable else "NO",
+        "VULKAN_DEVICE_DETECTED": "YES" if device_name else "NO",
+        "VULKAN_DEVICE_NAME": device_name,
+        "GPU_ACCELERATION_AVAILABLE": "YES" if device_name else "NO",
+        "version_summary": version.splitlines()[:4],
+    }
+
+
 def default_local_backend_config() -> dict:
     return {
         "backend": "llama_cpp",
@@ -79,6 +117,12 @@ def default_local_backend_config() -> dict:
         "ctx_size": 4096,
         "threads": "auto",
         "gpu_layers": "auto",
+        # Bonsai PQ2_0 has a dedicated runtime and must not inherit tuning
+        # intended for ordinary GGUF models. These values are the measured
+        # CPU fallback unless a compatible accelerator is actually detected.
+        "bonsai_ctx_size": 1024,
+        "bonsai_cpu_threads": 12,
+        "bonsai_acceleration": {},
         "timeout_seconds": 60,
         "auto_select_model": True,
         "manual_disabled_models": [],
@@ -86,6 +130,8 @@ def default_local_backend_config() -> dict:
         "manual_only_model": "",
         "allow_slow_local": False,
         "allow_bf16_auto": False,
+        "backend_preference": "AUTO",
+        "vulkan_benchmark": {},
         "active_performance_profile": "balanced",
         "performance_profiles": LOCAL_PERFORMANCE_PROFILES,
         "model_profiles": {},
@@ -97,6 +143,7 @@ def default_local_backend_config() -> dict:
                 "llama_server_path": "",
                 "official_source": "https://github.com/PrismML-Eng/Bonsai-demo",
             },
+            VULKAN_RUNTIME_ID: {"runtime_id": VULKAN_RUNTIME_ID, "llama_server_path": ""},
         },
     }
 
@@ -124,6 +171,7 @@ def load_local_backend_config(path: Path | None = None) -> dict:
     prism = config["runtimes"].setdefault(PRISM_RUNTIME_ID, default_local_backend_config()["runtimes"][PRISM_RUNTIME_ID])
     if not isinstance(prism, dict):
         config["runtimes"][PRISM_RUNTIME_ID] = default_local_backend_config()["runtimes"][PRISM_RUNTIME_ID]
+    config["runtimes"].setdefault(VULKAN_RUNTIME_ID, default_local_backend_config()["runtimes"][VULKAN_RUNTIME_ID])
     config["host"] = "127.0.0.1"
     config["port"] = int(config.get("port") or 18790)
     return config
@@ -182,6 +230,17 @@ def prism_bonsai_runtime_status(config: dict | None = None) -> dict:
     installed = runtime_path.is_dir() and executable is not None
     supported = official_marker or all(supports.values())
     compatibility = "PASS" if installed and supported else "BONSAI_RUNTIME_UNKNOWN"
+    variants = runtime.get("variants") if isinstance(runtime.get("variants"), dict) else {}
+    candidate = variants.get("experimental_pr206_avx2") if isinstance(variants.get("experimental_pr206_avx2"), dict) else {}
+    candidate_path = Path(str(candidate.get("llama_server_path") or ""))
+    candidate_version, _ = _runtime_probe_output(candidate_path if candidate_path.is_file() else None)
+    candidate_hash = _file_sha256(candidate_path) if candidate_path.is_file() else None
+    candidate_ready = bool(
+        candidate_path.is_file()
+        and str(candidate.get("expected_commit") or "").lower()[:8] in candidate_version.lower()
+        and str(candidate.get("sha256") or "").lower() == str(candidate_hash or "").lower()
+        and candidate.get("smoke_status") == "PASS"
+    )
     return {
         "runtime_id": PRISM_RUNTIME_ID,
         "runtime_installed": "YES" if installed else "NO",
@@ -197,6 +256,75 @@ def prism_bonsai_runtime_status(config: dict | None = None) -> dict:
         "BONSAI_RUNTIME_UNKNOWN": "YES" if compatibility != "PASS" else "NO",
         "NO_IMPLICIT_RUNTIME_BUILD": "YES",
         "OFFICIAL_PRISMML_RUNTIME_ONLY": "YES",
+        "experimental_pr206_avx2_ready": "YES" if candidate_ready else "NO",
+        "experimental_pr206_avx2_path": str(candidate_path) if candidate_path.is_file() else None,
+        "experimental_pr206_avx2_fallback_reason": None if candidate_ready else "PR206_CANDIDATE_NOT_VERIFIED",
+    }
+
+
+def configure_pr206_avx2_variant(config: dict, executable_path: str | Path) -> dict:
+    """Record an already-smoked, external PR206 build; never copy it into Router."""
+    executable = Path(executable_path).expanduser().resolve()
+    version, _ = _runtime_probe_output(executable if executable.is_file() else None)
+    if not executable.is_file() or PR206_AVX2_COMMIT[:8] not in version:
+        raise ProviderError("PR206_RUNTIME_COMMIT_MISMATCH")
+    prism = config.setdefault("runtimes", {}).setdefault(PRISM_RUNTIME_ID, {"runtime_id": PRISM_RUNTIME_ID})
+    variants = prism.setdefault("variants", {})
+    variants["experimental_pr206_avx2"] = {
+        "llama_server_path": str(executable), "expected_commit": PR206_AVX2_COMMIT,
+        "sha256": _file_sha256(executable), "kernel": "AVX2_VERIFIED", "threads": 12,
+        "measured_tg": 2.258, "measured_pp": 3.733, "smoke_status": "PASS",
+    }
+    return variants["experimental_pr206_avx2"]
+
+
+def prism_bonsai_acceleration_status(config: dict | None = None) -> dict:
+    """Probe local Prism HIP candidates without treating a DLL as GPU proof."""
+    config = config or load_local_backend_config()
+    runtime = dict((config.get("runtimes") or {}).get(PRISM_RUNTIME_ID) or {})
+    runtime_path = Path(str(runtime.get("runtime_path") or Path.cwd() / "tools" / "prism-bonsai-runtime"))
+    candidates = sorted(
+        (item for item in runtime_path.glob("**/llama-server.exe") if (item.parent / "ggml-hip.dll").is_file()),
+        key=lambda item: str(item).lower(),
+    )
+    executable = candidates[0] if candidates else None
+    device_output = ""
+    if executable is not None:
+        try:
+            result = subprocess.run([str(executable), "--list-devices"], capture_output=True, text=True, timeout=8, check=False)
+            device_output = (result.stdout + result.stderr)[:2000]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    device_lines = [line.strip() for line in device_output.splitlines() if line.strip() and not line.strip().lower().startswith("available devices")]
+    usable_devices = [line for line in device_lines if line.lower() != "(none)"]
+    runtime_installed = executable is not None
+    device_ready = bool(usable_devices)
+    benchmark = config.get("bonsai_acceleration") if isinstance(config.get("bonsai_acceleration"), dict) else {}
+    return {
+        "bonsai_acceleration_available": "YES" if device_ready else "NO",
+        "bonsai_acceleration_backend": "HIP" if device_ready else "NONE",
+        "bonsai_acceleration_device": usable_devices[0] if device_ready else None,
+        "bonsai_gpu_offload": "FULL" if device_ready else "0",
+        "bonsai_measured_tps": benchmark.get("best_generation_tps"),
+        "bonsai_pp_tps": benchmark.get("best_prompt_tps"),
+        "bonsai_ttft_seconds": benchmark.get("estimated_ttft_seconds"),
+        "bonsai_runtime": PRISM_RUNTIME_ID,
+        "bonsai_runtime_variant": benchmark.get("runtime_variant", "stable_prism_cpu"),
+        "bonsai_cpu_kernel": benchmark.get("cpu_kernel", "DISPATCH_NOT_EMITTED"),
+        "bonsai_cpu_threads": benchmark.get("cpu_threads", int(config.get("bonsai_cpu_threads") or 12)),
+        "bonsai_mtp_enabled": "YES" if benchmark.get("mtp_enabled") else "NO",
+        "bonsai_mtp_acceptance_rate": benchmark.get("mtp_acceptance_rate"),
+        "bonsai_measured_at": benchmark.get("measured_at"),
+        "bonsai_experimental_runtime_selected": "YES" if benchmark.get("experimental_runtime_selected") else "NO",
+        "bonsai_stable_fallback": "YES" if benchmark.get("stable_fallback", True) else "NO",
+        "PQ2_0_GPU_BACKEND_FOUND": "YES" if device_ready else "NO",
+        "PQ2_0_GPU_RUNTIME_CANDIDATE": str(executable) if executable else None,
+        "PQ2_0_GPU_DEVICE_DETECTED": "YES" if device_ready else "NO",
+        "PQ2_0_GPU_DEVICE_SUMMARY": usable_devices[:4],
+        "PQ2_0_ACCELERATION_STATUS": "READY" if device_ready else ("HIP_RUNTIME_INSTALLED_DEVICE_UNAVAILABLE" if runtime_installed else "NO_PQ2_0_GPU_RUNTIME_INSTALLED"),
+        "PQ2_0_CPU_FALLBACK_ACTIVE": "NO" if device_ready else "YES",
+        "PQ2_0_CPU_FALLBACK_THREADS": int(config.get("bonsai_cpu_threads") or 12),
+        "PQ2_0_CPU_FALLBACK_CTX_SIZE": int(config.get("bonsai_ctx_size") or 1024),
     }
 
 
@@ -681,13 +809,62 @@ class ManagedLlamaCppBackend:
         standard["llama_server_path"] = str(executable) if executable else None
         standard["runtime_installed"] = "YES" if executable else "NO"
         prism = prism_bonsai_runtime_status(config)
+        prism_acceleration = prism_bonsai_acceleration_status(config)
+        vulkan = lmstudio_vulkan_runtime_status()
+        benchmark = config.get("vulkan_benchmark") if isinstance(config.get("vulkan_benchmark"), dict) else {}
         return {
             "LOCAL_RUNTIME_REGISTRY": "YES",
             "STANDARD_LLAMA_CPP_PRESERVED": "YES",
             "PRISM_BONSAI_RUNTIME_SLOT": "YES",
+            "LMSTUDIO_VULKAN_RUNTIME_REUSED": vulkan["LMSTUDIO_VULKAN_RUNTIME_REUSED"],
+            "backend_preference": str(config.get("backend_preference") or "AUTO").upper(),
+            "vulkan_benchmark": benchmark,
             STANDARD_RUNTIME_ID: standard,
             PRISM_RUNTIME_ID: prism,
+            "prism_bonsai_acceleration": prism_acceleration,
+            VULKAN_RUNTIME_ID: vulkan,
         }
+
+    def vulkan_status(self) -> dict:
+        config = load_local_backend_config(self.config_path)
+        benchmark = config.get("vulkan_benchmark") if isinstance(config.get("vulkan_benchmark"), dict) else {}
+        vulkan = lmstudio_vulkan_runtime_status()
+        cpu_tps = benchmark.get("standard_cpu_generation_tps")
+        vulkan_tps = benchmark.get("standard_vulkan_generation_tps")
+        preferred = "CPU"
+        if isinstance(cpu_tps, (int, float)) and isinstance(vulkan_tps, (int, float)) and vulkan_tps > cpu_tps:
+            preferred = "VULKAN"
+        return {"SYSTEM_GPU_AVAILABLE": vulkan["GPU_ACCELERATION_AVAILABLE"], "CURRENT_BACKEND_GPU_CAPABLE": vulkan["runtime_installed"], "GPU_OFFLOAD_ACTIVE": "NO", "recommended_backend": preferred, "benchmark": benchmark, **vulkan}
+
+    def set_backend_preference(self, preference: str) -> dict:
+        selected = str(preference).upper()
+        if selected not in {"AUTO", "VULKAN", "CPU"}:
+            raise ProviderError("LOCAL_BACKEND_PREFERENCE_INVALID")
+        config = load_local_backend_config(self.config_path)
+        config["backend_preference"] = selected
+        save_local_backend_config(config, self.config_path)
+        return {"status": "BACKEND_PREFERENCE_SAVED", "backend_preference": selected, "effective_backend": self.vulkan_status()["recommended_backend"] if selected == "AUTO" else selected, "restart_required": "YES" if self.running() else "NO"}
+
+    def preferred_standard_runtime(self) -> str:
+        config = load_local_backend_config(self.config_path)
+        preference = str(config.get("backend_preference") or "AUTO").upper()
+        if preference not in {"AUTO", "VULKAN", "CPU"}:
+            preference = "AUTO"
+        status = self.vulkan_status()
+        if preference == "CPU":
+            return STANDARD_RUNTIME_ID
+        if preference == "VULKAN" and status["runtime_installed"] == "YES":
+            return VULKAN_RUNTIME_ID
+        if status["recommended_backend"] == "VULKAN" and status["runtime_installed"] == "YES":
+            return VULKAN_RUNTIME_ID
+        return STANDARD_RUNTIME_ID
+
+    def record_vulkan_benchmark(self, standard_cpu_tps: float, standard_vulkan_tps: float, best_gpu_layers: int, bonsai_error: str | None = None) -> dict:
+        config = load_local_backend_config(self.config_path)
+        benchmark = {"standard_cpu_generation_tps": round(float(standard_cpu_tps), 3), "standard_vulkan_generation_tps": round(float(standard_vulkan_tps), 3), "best_gpu_layers": int(best_gpu_layers), "bonsai_vulkan_status": "INCOMPATIBLE" if bonsai_error else "NOT_TESTED", "bonsai_vulkan_error": bonsai_error}
+        config["vulkan_benchmark"] = benchmark
+        save_local_backend_config(config, self.config_path)
+        return benchmark
 
     def serve(self) -> dict:
         """Start a selected model, or safely select one, on loopback only."""
@@ -784,13 +961,19 @@ class ManagedLlamaCppBackend:
         self._persist_selected(chosen)
         return chosen
 
-    def _command(self, model: GGUFModel, runtime_id: str = STANDARD_RUNTIME_ID) -> list[str]:
+    def _command(self, model: GGUFModel, runtime_id: str = STANDARD_RUNTIME_ID, prefer_experimental: bool = True) -> list[str]:
         config = load_local_backend_config(self.config_path)
         if runtime_id == PRISM_RUNTIME_ID:
             prism = prism_bonsai_runtime_status(config)
             if prism["compatibility_status"] != "PASS":
                 raise ProviderError("BONSAI_RUNTIME_NOT_READY")
             executable = Path(str(prism["llama_server_path"])) if prism.get("llama_server_path") else None
+            is_bonsai2_pq2 = bool(re.search(r"ternary[-_.]bonsai[-_.]2.*pq2[_-]?0", model.path.name, re.I))
+            if prefer_experimental and is_bonsai2_pq2 and prism["experimental_pr206_avx2_ready"] == "YES":
+                executable = Path(str(prism["experimental_pr206_avx2_path"]))
+        elif runtime_id == VULKAN_RUNTIME_ID:
+            vulkan = lmstudio_vulkan_runtime_status()
+            executable = Path(str(vulkan["llama_server_path"])) if vulkan.get("llama_server_path") else None
         else:
             executable = self.executable_path()
         if executable is None:
@@ -800,7 +983,11 @@ class ManagedLlamaCppBackend:
             # Keep a tiny smoke response visible instead of spending its token
             # budget in the model template's reasoning channel.
             command.extend(["--reasoning", "off"])
-        if isinstance(self.threads, int) or (isinstance(self.threads, str) and self.threads.isdigit()):
+            command[command.index("--ctx-size") + 1] = str(int(config.get("bonsai_ctx_size") or 1024))
+            bonsai_threads = config.get("bonsai_cpu_threads")
+            if isinstance(bonsai_threads, int) or (isinstance(bonsai_threads, str) and bonsai_threads.isdigit()):
+                command.extend(["--threads", str(bonsai_threads)])
+        elif isinstance(self.threads, int) or (isinstance(self.threads, str) and self.threads.isdigit()):
             command.extend(["--threads", str(self.threads)])
         if isinstance(self.gpu_layers, int) or (isinstance(self.gpu_layers, str) and self.gpu_layers.isdigit()):
             command.extend(["--n-gpu-layers", str(self.gpu_layers)])
@@ -839,6 +1026,8 @@ class ManagedLlamaCppBackend:
         runtime_id, route_reason = runtime_for_model(selected, load_local_backend_config(self.config_path))
         if runtime_id is None:
             raise ProviderError(route_reason)
+        if runtime_id == STANDARD_RUNTIME_ID:
+            runtime_id = self.preferred_standard_runtime()
         if runtime_id == PRISM_RUNTIME_ID and prism_bonsai_runtime_status(load_local_backend_config(self.config_path))["compatibility_status"] != "PASS":
             raise ProviderError("BONSAI_RUNTIME_NOT_READY")
         if self.running():
@@ -847,16 +1036,57 @@ class ManagedLlamaCppBackend:
             raise ProviderError("LLAMA_SERVER_NOT_FOUND")
         self._prepare_port()
         command = self._command(selected, runtime_id)
+        candidate_command = runtime_id == PRISM_RUNTIME_ID and "build-pr206-avx2" in command[0].lower()
         router_user_dir().mkdir(parents=True, exist_ok=True)
         try:
             self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.pid_path.write_text(str(self.process.pid), encoding="utf-8")
             self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "runtime_id": runtime_id, "executable": command[0]}, ensure_ascii=False), encoding="utf-8")
         except OSError as exc:
-            raise ProviderError("START_FAILED") from exc
+            if runtime_id != VULKAN_RUNTIME_ID or not self.executable_available():
+                raise ProviderError("START_FAILED") from exc
+            # A failed local Vulkan executable receives one local CPU attempt.
+            # This is deliberately bounded and never changes provider routing.
+            command = self._command(selected, STANDARD_RUNTIME_ID)
+            try:
+                self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                self.pid_path.write_text(str(self.process.pid), encoding="utf-8")
+                self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "runtime_id": STANDARD_RUNTIME_ID, "executable": command[0], "vulkan_fallback_reason": "VULKAN_START_OR_LOAD_FAILED"}, ensure_ascii=False), encoding="utf-8")
+            except OSError as fallback_exc:
+                raise ProviderError("CPU_FALLBACK_START_FAILED") from fallback_exc
+            self.selected = selected
+            if self.wait_ready():
+                return self.status()
+            self.stop()
+            raise ProviderError("HEALTH_TIMEOUT")
         self.selected = selected
         if not self.wait_ready():
             self.stop()
+            if candidate_command:
+                # A candidate failure must not strand a working Bonsai install.
+                command = self._command(selected, runtime_id, prefer_experimental=False)
+                try:
+                    self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    self.pid_path.write_text(str(self.process.pid), encoding="utf-8")
+                    self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "runtime_id": runtime_id, "executable": command[0], "bonsai_fallback_reason": "PR206_START_OR_LOAD_FAILED"}, ensure_ascii=False), encoding="utf-8")
+                except OSError as exc:
+                    raise ProviderError("START_FAILED") from exc
+                if self.wait_ready():
+                    return self.status()
+                self.stop()
+            elif runtime_id == VULKAN_RUNTIME_ID and self.executable_available():
+                # A local Vulkan startup failure gets one bounded CPU fallback;
+                # it never changes provider selection or contacts an external provider.
+                command = self._command(selected, STANDARD_RUNTIME_ID)
+                try:
+                    self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    self.pid_path.write_text(str(self.process.pid), encoding="utf-8")
+                    self.state_path.write_text(json.dumps({"selected_model_path": str(selected.path), "endpoint": self.endpoint(), "port": self.port, "runtime_id": STANDARD_RUNTIME_ID, "executable": command[0], "vulkan_fallback_reason": "VULKAN_START_OR_LOAD_FAILED"}, ensure_ascii=False), encoding="utf-8")
+                except OSError as exc:
+                    raise ProviderError("START_FAILED") from exc
+                if self.wait_ready():
+                    return self.status()
+                self.stop()
             raise ProviderError("HEALTH_TIMEOUT")
         return self.status()
 
