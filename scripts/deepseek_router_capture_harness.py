@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import io
 import json
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -21,9 +22,14 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-TASK_NAME = "XIAOYU-ROUTER-P1W10X-DEEPSEEK-L4-R8E-IMPLEMENT-CAPTURE-HARNESS-NO-MODEL-CALL"
-FIXTURE_MARKER = "R8E_FIXTURE_CAPTURE_OK"
+TASK_NAME = "XIAOYU-ROUTER-P1W10X-DEEPSEEK-L4-R8L-PATCH-RESPONSE-MARKER-TRISTATE-NO-MODEL-CALL"
+FIXTURE_MARKER = "L4_R8J_FIXTURE_CAPTURE_OK"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_SAFE_REQUEST_MARKER = re.compile(
+    r"^(?:FIXTURE_[A-Z0-9_]{1,64}|L4_R8[A-Z0-9_]{1,56}|XIAOYU_[A-Z0-9_]{1,64})$"
+)
+_TELEMETRY_PROVIDER_CAPTURE = "telemetry_provider_capture"
+_ASSISTANT_TEXT_FIELDS = ("assistant_text", "model_text", "response_text")
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,34 @@ def _loopback_url(url: str) -> bool:
     return parsed.scheme == "http" and (parsed.hostname or "").lower() in _LOOPBACK_HOSTS
 
 
+def _response_marker_status(
+    body: dict[str, Any] | None,
+    request_marker: str | None,
+) -> tuple[str, str]:
+    """Return sanitized marker status without returning assistant or model text."""
+    if body is None or request_marker is None:
+        return "unknown", "unavailable"
+
+    for field in _ASSISTANT_TEXT_FIELDS:
+        text = body.get(field)
+        if isinstance(text, str):
+            return ("yes" if request_marker in text else "no"), "assistant_text"
+
+    response_marker = body.get("response_marker")
+    if isinstance(response_marker, str):
+        return ("yes" if response_marker == request_marker else "no"), "structured_response"
+
+    prompt_marker_expected = body.get("prompt_marker_expected")
+    response_contains_marker = body.get("response_contains_marker")
+    if isinstance(prompt_marker_expected, str) and isinstance(response_contains_marker, bool):
+        return (
+            "yes" if response_contains_marker and prompt_marker_expected == request_marker else "no",
+            "structured_response",
+        )
+
+    return "unknown", "telemetry_only"
+
+
 def _allowlisted_summary(
     result: CaptureResult,
     *,
@@ -46,6 +80,7 @@ def _allowlisted_summary(
     marker: str,
     stdout: str,
     stderr: str,
+    response_marker_required_for_pass: bool = False,
 ) -> dict[str, Any]:
     body: dict[str, Any] | None = None
     try:
@@ -54,22 +89,27 @@ def _allowlisted_summary(
     except (UnicodeDecodeError, json.JSONDecodeError):
         body = None
 
-    marker_found = bool(
-        body
-        and (
-            body.get("response_marker") == marker
-            or (
-                body.get("response_contains_marker") is True
-                and body.get("prompt_marker_expected") == marker
-            )
-        )
-    )
+    request_marker = marker if _SAFE_REQUEST_MARKER.fullmatch(marker) else None
+    response_marker_found, marker_check_source = _response_marker_status(body, request_marker)
     provider = None if body is None else body.get("selected_brain") or body.get("router_selected_backend")
     success_telemetry = bool(body and body.get("bridge_send_attempted") == "YES" and body.get("status") == "PASS")
     capability_metadata_ok = bool(body and body.get("router_capability_metadata_sent") is True)
     fallback = None if body is None else body.get("fallback_triggered")
     if not isinstance(fallback, bool):
         fallback = False if body and body.get("fallback_reason") in {None, "", "NONE"} else None
+    base_pass = bool(
+        result.http_status is not None
+        and 200 <= result.http_status < 300
+        and result.exit_code == 0
+        and body is not None
+        and provider in {"deepseek-bridge-direct", "deepseek-web"}
+        and fallback is False
+        and success_telemetry
+        and capability_metadata_ok
+    )
+    capture_pass = base_pass and (
+        not response_marker_required_for_pass or response_marker_found == "yes"
+    )
 
     return {
         "TASK_NAME": TASK_NAME,
@@ -86,7 +126,13 @@ def _allowlisted_summary(
         "response_body_captured": bool(result.body),
         "response_body_bytes": len(result.body),
         "router_json_parsed": body is not None,
-        "marker_found": marker_found,
+        "request_marker": request_marker,
+        "request_marker_expected": request_marker is not None,
+        "response_marker_found": response_marker_found,
+        "marker_found": response_marker_found,
+        "marker_check_source": marker_check_source,
+        "response_marker_required_for_pass": response_marker_required_for_pass,
+        "pass_criteria_mode": _TELEMETRY_PROVIDER_CAPTURE,
         "provider_selected": provider if provider in {"deepseek-bridge-direct", "deepseek-web"} else "unknown",
         "fallback_triggered": fallback,
         "success_telemetry": success_telemetry,
@@ -95,6 +141,7 @@ def _allowlisted_summary(
         "error_message_allowlisted": "NONE" if result.error_type is None else "HTTP_OR_TRANSPORT_CAPTURE_FAILED",
         "temp_files_used": False,
         "temp_files_cleaned": True,
+        "final_status": "PASS" if capture_pass else "FAIL_TELEMETRY_PROVIDER_CAPTURE",
     }
 
 
@@ -135,8 +182,8 @@ class _FixtureHandler(BaseHTTPRequestHandler):
             "fallback_triggered": False,
             "bridge_send_attempted": "YES",
             "router_capability_metadata_sent": True,
-            "response_contains_marker": True,
-            "prompt_marker_expected": self.marker,
+            "response_contains_marker": False,
+            "prompt_marker_expected": None,
         }
         raw = json.dumps(body).encode("utf-8")
         self.send_response(200)
@@ -146,7 +193,11 @@ class _FixtureHandler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
 
-def run_fixture(marker: str = FIXTURE_MARKER) -> dict[str, Any]:
+def run_fixture(
+    marker: str = FIXTURE_MARKER,
+    *,
+    response_marker_required_for_pass: bool = False,
+) -> dict[str, Any]:
     """Exercise the capture path with only an in-process loopback fixture."""
     _FixtureHandler.marker = marker
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureHandler)
@@ -163,10 +214,23 @@ def run_fixture(marker: str = FIXTURE_MARKER) -> dict[str, Any]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
-    return _allowlisted_summary(result, mode="fixture", marker=marker, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+    return _allowlisted_summary(
+        result,
+        mode="fixture",
+        marker=marker,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+        response_marker_required_for_pass=response_marker_required_for_pass,
+    )
 
 
-def run_live(router_url: str, task: str, marker: str) -> dict[str, Any]:
+def run_live(
+    router_url: str,
+    task: str,
+    marker: str,
+    *,
+    response_marker_required_for_pass: bool = False,
+) -> dict[str, Any]:
     """Reserved single non-streaming Router request; do not call without authorization."""
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -185,7 +249,14 @@ def run_live(router_url: str, task: str, marker: str) -> dict[str, Any]:
             },
             timeout=140,
         )
-    return _allowlisted_summary(result, mode="live", marker=marker, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+    return _allowlisted_summary(
+        result,
+        mode="live",
+        marker=marker,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+        response_marker_required_for_pass=response_marker_required_for_pass,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -195,14 +266,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--router-url", default="http://127.0.0.1:18789")
     parser.add_argument("--task")
     parser.add_argument("--marker", default=FIXTURE_MARKER)
+    parser.add_argument(
+        "--require-response-marker",
+        action="store_true",
+        help="Require an observed structured response marker in addition to telemetry/provider capture.",
+    )
     args = parser.parse_args(argv)
 
     if args.live:
         if not args.i_understand_this_sends_one_model_request or not args.task:
             parser.error("--live requires --i-understand-this-sends-one-model-request and --task")
-        summary = run_live(args.router_url, args.task, args.marker)
+        summary = run_live(
+            args.router_url,
+            args.task,
+            args.marker,
+            response_marker_required_for_pass=args.require_response_marker,
+        )
     else:
-        summary = run_fixture(args.marker)
+        summary = run_fixture(
+            args.marker,
+            response_marker_required_for_pass=args.require_response_marker,
+        )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return int(summary["exit_code"])
 
