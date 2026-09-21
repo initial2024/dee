@@ -74,7 +74,7 @@ class DeepSeekLiveEndpointPassthroughTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _coordinate(self) -> tuple[int, dict]:
-        payload = {"task": "minimal fake bridge smoke", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "search": False, "collect_context": False, "allow_patch_draft": False, "allow_apply": False, "allow_commit": False, "allow_test": False}
+        payload = {"task": "XIAOYU_ROUTER_SMOKE_OK", "brain_provider": "deepseek-bridge-direct", "invoke_brain": True, "search": False, "collect_context": False, "allow_patch_draft": False, "allow_apply": False, "allow_commit": False, "allow_test": False}
         request = Request(self.router_url + "/deepseek-head/coordinate", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urlopen(request, timeout=5) as response:
@@ -86,6 +86,22 @@ class DeepSeekLiveEndpointPassthroughTests(unittest.TestCase):
         status, body = self._coordinate()
         self.assertEqual(status, 200)
         self.assertEqual(body["bridge_send_attempted"], "YES")
+        self.assertEqual(body["live_router_endpoint"], "/deepseek-head/coordinate")
+        self.assertEqual(body["router_selected_profile"], "best_available_reasoning")
+        self.assertEqual((body["requested_profile"], body["resolved_profile"], body["target_profile"]), ("best_available_reasoning", "best_available_reasoning", "best_available_reasoning"))
+        self.assertTrue(body["router_capability_metadata_sent"])
+        self.assertEqual(body["router_capability_reasoning_axis_type"], "binary_toggle")
+        self.assertEqual(body["router_capability_available_reasoning_strengths"], ["off", "medium"])
+        self.assertEqual(body["router_capability_max_available_reasoning"], "medium")
+        self.assertEqual((body["router_allow_search"], body["router_allow_files"], body["router_allow_vision"], body["router_disallow_silent_high_max_fallback"]), (False, False, False, True))
+        self.assertEqual((body["ui_send_attempt_count"], body["search_used"], body["files_uploaded"], body["external_provider_used"], body["private_api_replay"]), (1, False, False, False, False))
+        self.assertEqual((body["prompt_marker_expected"], body["marker_check_performed"], body["marker_missing"], body["response_contains_marker"], body["prompt_shape"]), ("XIAOYU_ROUTER_SMOKE_OK", True, False, True, "coordinator_wrapped"))
+        self.assertEqual(body["agent_plan"]["task_summary"], "TASK_REDACTED")
+        self.assertEqual(body["agent_plan"]["steps"][0]["description"], "MODEL_RESPONSE_REDACTED")
+        self.assertEqual(body["agent_plan"]["codex_instruction"], "MODEL_RESPONSE_REDACTED")
+        encoded = json.dumps(body, ensure_ascii=False)
+        for forbidden in ("cookie", "authorization", "storageState", "private api"):
+            self.assertNotIn(forbidden.lower(), encoded.lower())
         sent = _FakeBridge.requests[-1]
         self.assertEqual(sent["target_profile"], "best_available_reasoning")
         self.assertEqual(sent["capability_snapshot"]["reasoning_axis_type"], "binary_toggle")

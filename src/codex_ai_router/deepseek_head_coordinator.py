@@ -185,6 +185,24 @@ def _sanitize_api_response(value: Any) -> Any:
     return value
 
 
+def _success_telemetry_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Keep success endpoint output structural while omitting task and model bodies."""
+    return {
+        "task_summary": "TASK_REDACTED",
+        "brain_provider": plan.get("brain_provider"),
+        "risk_level": plan.get("risk_level"),
+        "requires_files": plan.get("requires_files") is True,
+        "requires_write": plan.get("requires_write") is True,
+        "requires_tests": plan.get("requires_tests") is True,
+        "requires_commit": plan.get("requires_commit") is True,
+        "steps": [{"type": "analysis", "description": "MODEL_RESPONSE_REDACTED", "requires_confirmation": False, "risk": plan.get("risk_level", "low")}],
+        "patch_draft": None,
+        "codex_instruction": "MODEL_RESPONSE_REDACTED",
+        "manual_commands": [],
+        "stop_conditions": list(plan.get("stop_conditions") or []),
+    }
+
+
 @dataclass
 class DeepSeekHeadCoordinator:
     root: Path
@@ -262,6 +280,7 @@ class DeepSeekHeadCoordinator:
         bridge_ui_send_attempt_count = 0
         model_output_available = "NO"
         adapter_diagnostics: dict[str, Any] = {}
+        success_telemetry: dict[str, Any] = {}
         if invoke and (classify_risk(task) == "high" or contains_high_risk_intent(task) or contains_real_secret_value(task) or bool(bundle.get("secret_value_detected"))):
             error_code = "LOCAL_AGENT_HIGH_RISK_STOP"
             provider_error_stage = "before_bridge_send"
@@ -278,10 +297,10 @@ class DeepSeekHeadCoordinator:
                     prompt = _context_prompt(bundle, task, require_patch_draft=patch_draft_requested)
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     raise DeepSeekHeadCoordinatorError("LLM_CONTEXT_BUNDLE_BUILD_FAILED")
-                raw_brain_text = invoke_brain(selected, prompt, selected_mode=str(selected_mode) if selected_mode is not None else None, search=search if isinstance(search, bool) else None)
+                raw_brain_text = invoke_brain(selected, prompt, selected_mode=str(selected_mode) if selected_mode is not None else None, search=search if isinstance(search, bool) else None, telemetry_out=success_telemetry)
                 model_output_available = "YES" if raw_brain_text else "NO"
-                bridge_send_attempted = "YES" if selected == "deepseek-bridge-direct" and raw_brain_text else "NO"
-                bridge_ui_send_attempt_count = 1 if bridge_send_attempted == "YES" else 0
+                bridge_send_attempted = str(success_telemetry.get("bridge_send_attempted") or ("YES" if selected == "deepseek-bridge-direct" and raw_brain_text else "NO"))
+                bridge_ui_send_attempt_count = int(success_telemetry.get("ui_send_attempt_count") or (1 if bridge_send_attempted == "YES" else 0))
                 output_plan = _plan_from_text(raw_brain_text, selected, task, choice["task_difficulty"], suppress_model_text=patch_draft_requested)
             except BrainProviderError as exc:
                 error_code = exc.code
@@ -352,7 +371,7 @@ class DeepSeekHeadCoordinator:
                 "task_session_id": task_session_id,
                 "selected_brain": choice["selected_brain"], "task_difficulty": choice["task_difficulty"], "why_selected": choice["why_selected"],
                 "provider_health": choice["provider_health"], "deepseek_plan_id": plan_id if selected.startswith("deepseek") else None,
-                "agent_plan": output_plan, "local_agent_actions": actions,
+                "agent_plan": _success_telemetry_plan(output_plan) if success_telemetry else output_plan, "local_agent_actions": actions,
                 "requires_confirmation": bool(output_plan.get("requires_write") or output_plan.get("requires_tests") or output_plan.get("requires_commit")),
                 "allow_apply": allow_apply, "allow_test": allow_test, "allow_commit": allow_commit,
                 "risk_level": output_plan.get("risk_level", "low"), "fallback_reason": error_code or choice.get("fallback_reason"),
@@ -369,6 +388,9 @@ class DeepSeekHeadCoordinator:
                 "loopback_only": "YES", "worker_required": "NO", "wrangler_required": "NO", "tools_forwarded": "NO",
                 "prompt_response_logged": "NO", "sensitive_data_logged": "NO", "codex_agent_used": "NO", "codex_agentic_usage_required": "NO"}
         result.update(adapter_diagnostics)
+        result.update(success_telemetry)
+        if success_telemetry:
+            result["live_router_endpoint"] = DEEPSEEK_HEAD_PATH
         if task_session_id:
             try:
                 self.session_hub.record_deepseek_outcome(task_session_id, result)

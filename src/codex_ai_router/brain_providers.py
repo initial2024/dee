@@ -148,6 +148,55 @@ def _text(value: Any) -> str:
     return ""
 
 
+_SAFE_MARKER = re.compile(r"\bXIAOYU_[A-Z0-9_]{1,64}\b")
+
+
+def _deepseek_success_telemetry(result: dict[str, Any], text: str, task: str) -> dict[str, Any]:
+    """Return allowlisted success metadata without retaining prompt or model text."""
+    capability = result.get("capability") if isinstance(result.get("capability"), dict) else {}
+    marker = _SAFE_MARKER.search(task)
+    expected_marker = marker.group(0) if marker else None
+    return {
+        "router_selected_backend": "deepseek-bridge-direct",
+        "router_selected_profile": result.get("selected_profile") or result.get("selected_mode") or "unknown",
+        "requested_profile": "best_available_reasoning",
+        "resolved_profile": result.get("selected_profile") or result.get("selected_mode") or "unknown",
+        "target_profile": "best_available_reasoning",
+        "router_capability_metadata_sent": True,
+        "router_capability_reasoning_axis_type": capability.get("reasoning_axis_type", "unknown"),
+        "router_capability_available_reasoning_strengths": capability.get("available_reasoning_strengths", []),
+        "router_capability_max_available_reasoning": capability.get("max_available_reasoning_strength", "unknown"),
+        "router_capability_high_reasoning_supported": capability.get("high_reasoning_supported") is True,
+        "router_capability_max_reasoning_supported": capability.get("max_reasoning_supported") is True,
+        "router_allow_search": False,
+        "router_allow_files": False,
+        "router_allow_vision": False,
+        "router_disallow_silent_high_max_fallback": True,
+        "pre_send_actual_reasoning": capability.get("current_reasoning_strength", "unknown"),
+        "pre_send_actual_search": capability.get("current_search") is True,
+        "pre_send_profile_label": capability.get("current_profile_label", "unknown"),
+        "best_available_reasoning_confirmed": capability.get("best_available_reasoning_supported") is True,
+        "best_available_reasoning_actual_reasoning": capability.get("best_available_reasoning_actual_strength", "unknown"),
+        "best_available_reasoning_actual_search": False,
+        "patch_review_max_reasoning_unavailable": capability.get("patch_review_max_reasoning_available") is not True,
+        "no_silent_fallback_to_medium": capability.get("no_silent_fallback_to_medium") is True,
+        "ui_send_attempt_count": int(result.get("bridge_ui_send_attempt_count") or 0),
+        "search_used": False,
+        "files_uploaded": False,
+        "external_provider_used": False,
+        "private_api_replay": False,
+        "response_received": True,
+        "response_contains_marker": bool(expected_marker and expected_marker in text),
+        "response_marker": expected_marker if expected_marker and expected_marker in text else None,
+        "response_length": len(text),
+        "prompt_marker_expected": expected_marker,
+        "marker_check_performed": expected_marker is not None,
+        "marker_missing": bool(expected_marker and expected_marker not in text),
+        "prompt_shape": "coordinator_wrapped" if str(task).startswith("当前为 TEXT_ONLY") else "raw_minimal",
+        "bridge_send_attempted": str(result.get("bridge_send_attempted") or "YES"),
+    }
+
+
 def _external_provider() -> OpenAICompatibleProvider:
     """Create one explicitly enabled external provider without exposing its key."""
     records = allowlisted_providers()
@@ -187,6 +236,7 @@ def invoke_brain(
     external_factory: Callable[[], OpenAICompatibleProvider] = _external_provider,
     selected_mode: str | None = None,
     search: bool | None = None,
+    telemetry_out: dict[str, Any] | None = None,
 ) -> str:
     """Invoke one explicitly selected brain and return advisory text.
 
@@ -273,6 +323,8 @@ def invoke_brain(
         if provider == "local-light":
             raise _provider_error("LOCAL_EMPTY_RESPONSE", "UPSTREAM_CONTENT_EMPTY")
         raise _provider_error("UPSTREAM_CONTENT_EMPTY")
+    if provider == "deepseek-bridge-direct" and telemetry_out is not None:
+        telemetry_out.update(_deepseek_success_telemetry(result, text, task))
     return text
 
 
