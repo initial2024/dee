@@ -27,6 +27,9 @@ Assert-True ($backend -match 'LOCAL_RUNTIME_REGISTRY' -and $backend -match 'stan
 Assert-True ($backend -match 'BONSAI_RUNTIME_UNKNOWN' -and $backend -match 'NO_IMPLICIT_RUNTIME_BUILD') 'unknown_runtime_blocks_without_build'
 Assert-True ($backend -match 'MMPROJ_NOT_TEXT_MODEL' -and $backend -match 'BONSAI_PRISM_RUNTIME_REQUIRED') 'format_runtime_routing_is_guarded'
 Assert-True ($cli -match 'bonsai-runtime' -and $cli -match 'BONSAI_RUNTIME_STATUS_COMMAND') 'bonsai_runtime_status_command_present'
+Assert-True ($cli -match "local_vulkan" -and $cli -match 'set_backend_preference' -and $backend -match 'preferred_standard_runtime') 'vulkan_preference_is_local_backend_only'
+Assert-True ($control -match 'vulkan' -and $control -match "'CPU'" -and $backend -match 'VULKAN_START_OR_LOAD_FAILED') 'cpu_control_and_bounded_vulkan_fallback_present'
+Assert-True ($cli -match "local_vulkan" -and $backend -match 'lmstudio_vulkan_runtime_status' -and $control -match '\u68c0\u6d4b Vulkan') 'vulkan_runtime_status_and_ui_present'
 Assert-True ((Get-Content -LiteralPath $runtimeInstaller -Raw -Encoding UTF8) -match 'PrismML-Eng' -and (Get-Content -LiteralPath $runtimeInstaller -Raw -Encoding UTF8) -match 'STANDARD_RUNTIME_NOT_REPLACED') 'official_runtime_installer_present'
 Assert-True ($control -match 'install-bonsai-runtime\.ps1' -and $control -match 'bonsai-runtime' -and $control -match 'Bonsai runtime') 'bonsai_runtime_controls_present'
 $helperDefault = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $downloadHelper 2>&1 | Out-String
@@ -34,7 +37,7 @@ $helperConfirmed = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $do
 Assert-True ($helperDefault -match 'BONSAI_DOWNLOAD_BLOCKED_RUNTIME_NOT_READY' -and $helperDefault -match 'BONSAI_AUTO_DOWNLOAD') 'bonsai_helper_blocks_without_runtime'
 Assert-True ($helperConfirmed -match 'BONSAI_DOWNLOAD_BLOCKED_RUNTIME_NOT_READY' -and $helperConfirmed -match 'PrismML') 'bonsai_helper_exposes_runtime_warning'
 
-Write-Output "POWERSHELL_TEST_TOTAL=21"
+Write-Output "POWERSHELL_TEST_TOTAL=$($passed + $failed)"
 Write-Output "POWERSHELL_TEST_PASS=$passed"
 Write-Output "POWERSHELL_TEST_FAIL=$failed"
 if ($failed -gt 0) { exit 1 }
