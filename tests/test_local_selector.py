@@ -5,11 +5,13 @@ import unittest
 from pathlib import Path
 
 from codex_ai_router.providers.local_backend import (
+    BONSAI_MINIMAL_SMOKE,
     PRISM_RUNTIME_ID,
     STANDARD_RUNTIME_ID,
     GGUFModel,
     ManagedLlamaCppBackend,
     discover_gguf_models,
+    classify_bonsai_performance,
     prism_bonsai_runtime_status,
     runtime_for_model,
 )
@@ -101,6 +103,27 @@ class LocalSelectorTests(unittest.TestCase):
         self.assertEqual(status["runtime_installed"], "NO")
         self.assertEqual(status["compatibility_status"], "BONSAI_RUNTIME_UNKNOWN")
         self.assertEqual(status["NO_IMPLICIT_RUNTIME_BUILD"], "YES")
+
+    def test_bonsai_minimal_smoke_is_bounded_and_never_auto_enabled(self):
+        self.assertLessEqual(BONSAI_MINIMAL_SMOKE["max_tokens"], 8)
+        self.assertEqual(BONSAI_MINIMAL_SMOKE["temperature"], 0)
+        classification, policy = classify_bonsai_performance("PASS", 56.223)
+        self.assertEqual(classification, "BONSAI_USABLE_FAST")
+        self.assertIn("Manual", policy)
+
+    def test_bonsai_timeout_is_classified_without_auto_selection(self):
+        classification, policy = classify_bonsai_performance("TIMEOUT", 300, "COMPLETION_TIMEOUT")
+        self.assertEqual(classification, "BONSAI_LOADS_BUT_TOO_SLOW")
+        self.assertIn("automatic selection", policy)
+
+    def test_warm_model_and_measured_speed_affect_local_routing(self):
+        profiles = self.profiles()
+        qwen = next(item for item in profiles if item["model_id"] == "qwen")
+        qwen["measured_generation_tps"] = 0.919
+        result = LocalModelSelector(profiles, current_model="stheno").select("解释这个错误")
+        self.assertEqual(result["selected_model"], "stheno")
+        self.assertEqual(result["keep_warm_model"], "YES")
+        self.assertEqual(result["model_switch_cost_accounted"], "YES")
 
 
 if __name__ == "__main__":

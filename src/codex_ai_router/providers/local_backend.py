@@ -26,6 +26,33 @@ OFFICIAL_PRISMML_SOURCES = {
     "https://github.com/PrismML-Eng/Bonsai-demo",
     "https://github.com/PrismML-Eng/llama.cpp",
 }
+LOCAL_PERFORMANCE_PROFILES = {
+    "fast": {"ctx_size": 2048, "max_tokens": 64, "prefer_small_models": True, "low_latency": True},
+    "balanced": {"ctx_size": 4096, "max_tokens": 128, "prefer_small_models": False, "low_latency": False},
+    "quality": {"ctx_size": 4096, "max_tokens": 256, "prefer_small_models": False, "low_latency": False, "explicit_only": True},
+}
+BONSAI_MINIMAL_SMOKE = {
+    "prompt": "只回复 OK",
+    "max_tokens": 4,
+    "temperature": 0,
+    "ctx_size": 1024,
+    "timeout_seconds": 300,
+}
+
+
+def classify_bonsai_performance(status: str, elapsed_seconds: float | None, error_code: str | None = None) -> tuple[str, str]:
+    """Classify a bounded Bonsai completion without making it auto-selectable."""
+    elapsed = float(elapsed_seconds or 0)
+    normalized = str(status).upper()
+    code = str(error_code or "").upper()
+    if normalized == "PASS":
+        if elapsed < 60:
+            return "BONSAI_USABLE_FAST", "Manual prefer-bonsai for complex analysis, code review, or historical reasoning."
+        if elapsed <= 300:
+            return "BONSAI_USABLE_SLOW", "Manual prefer-bonsai only; do not use for simple tasks or ordinary delegation."
+    if "TIMEOUT" in code or normalized == "TIMEOUT":
+        return "BONSAI_LOADS_BUT_TOO_SLOW", "Installed but too slow for this machine; keep out of automatic selection."
+    return "BONSAI_RUNTIME_COMPLETION_BROKEN", "Keep out of automatic selection until the completion path is repaired."
 
 
 def router_user_dir() -> Path:
@@ -59,6 +86,8 @@ def default_local_backend_config() -> dict:
         "manual_only_model": "",
         "allow_slow_local": False,
         "allow_bf16_auto": False,
+        "active_performance_profile": "balanced",
+        "performance_profiles": LOCAL_PERFORMANCE_PROFILES,
         "model_profiles": {},
         "runtimes": {
             STANDARD_RUNTIME_ID: {"runtime_id": STANDARD_RUNTIME_ID, "llama_server_path": ""},
@@ -592,10 +621,56 @@ class ManagedLlamaCppBackend:
             "auto_port_fallback": self._last_port_event.get("auto_port_fallback", "NO"),
             "port_fallback_from": self._last_port_event.get("port_fallback_from"),
             "runtime_registry": self.runtime_registry(),
+            "performance_profiles": self.performance_status(),
             "bonsai_support": self.bonsai_support_status(),
             "history_profiles": local_profile_summaries(),
             **reconciliation,
         }
+
+    def performance_status(self) -> dict:
+        config = load_local_backend_config(self.config_path)
+        active = str(config.get("active_performance_profile") or "balanced")
+        profiles = config.get("performance_profiles") if isinstance(config.get("performance_profiles"), dict) else LOCAL_PERFORMANCE_PROFILES
+        return {
+            "LOCAL_PERFORMANCE_PROFILES": "YES",
+            "LOCAL_FAST_PROFILE_IMPLEMENTED": "YES",
+            "active_profile": active,
+            "profiles": profiles,
+            "configured_ctx_size": self.ctx_size,
+            "configured_threads": self.threads,
+            "configured_gpu_layers": self.gpu_layers,
+            "KEEP_WARM_MODEL_WHEN_REASONABLE": "YES",
+            "MODEL_SWITCH_COST_ACCOUNTED": "YES",
+        }
+
+    def set_performance_profile(self, profile_id: str) -> dict:
+        if profile_id not in LOCAL_PERFORMANCE_PROFILES:
+            raise ProviderError("LOCAL_PERFORMANCE_PROFILE_NOT_FOUND")
+        config = load_local_backend_config(self.config_path)
+        settings = dict(LOCAL_PERFORMANCE_PROFILES[profile_id])
+        config["active_performance_profile"] = profile_id
+        config["ctx_size"] = settings["ctx_size"]
+        save_local_backend_config(config, self.config_path)
+        self.ctx_size = settings["ctx_size"]
+        return {"status": "PERFORMANCE_PROFILE_SAVED", "active_profile": profile_id, "settings": settings, "restart_required": "YES" if self.running() else "NO"}
+
+    def record_model_performance(self, model_id: str, generation_tps: float, prompt_tps: float, cold_start_seconds: float | None = None, switch_cost_seconds: float | None = None) -> dict:
+        config = load_local_backend_config(self.config_path)
+        profiles = config.get("model_profiles") if isinstance(config.get("model_profiles"), dict) else {}
+        profile = dict(profiles.get(model_id) or {})
+        measured_tps = round(float(generation_tps), 3)
+        speed_class = "SLOW" if measured_tps < 2 else ("FAST" if measured_tps >= 8 else "BALANCED")
+        profile.update({"measured_generation_tps": measured_tps, "measured_prompt_tps": round(float(prompt_tps), 3), "cold_start_seconds": cold_start_seconds, "model_switch_cost_seconds": switch_cost_seconds, "measured_speed_class": speed_class})
+        if str(profile.get("bonsai_model", "NO")).upper() == "YES" and measured_tps < 2:
+            profile.update({
+                "bonsai_performance_class": "BONSAI_USABLE_SLOW",
+                "bonsai_recommended_use": "Manual prefer-bonsai only; measured generation is below the fast threshold.",
+                "bonsai_auto_select_allowed": "NO",
+            })
+        profiles[model_id] = profile
+        config["model_profiles"] = profiles
+        save_local_backend_config(config, self.config_path)
+        return profile
 
     def runtime_registry(self) -> dict:
         """Expose the separate standard and Prism runtime slots without changing either."""
@@ -657,12 +732,26 @@ class ManagedLlamaCppBackend:
         elif executable is None:
             compatibility = "LLAMA_SERVER_NOT_FOUND"
             status = "BONSAI_INSTALLED_SERVER_MISSING"
+        elif any(item.get("bonsai_minimal_smoke_status") == "PASS" for item in bonsai_models):
+            compatibility = "COMPATIBLE_MODEL_SMOKE_PASSED"
+            status = "BONSAI_INSTALLED"
         elif self.running() and self.selected and any(item.get("model_id") == self.selected.model_id for item in bonsai_models):
             compatibility = "COMPATIBLE_MODEL_LOADED"
             status = "BONSAI_INSTALLED"
         else:
             compatibility = "REQUIRES_LOCAL_LOAD_SMOKE"
             status = "BONSAI_INSTALLED_UNVERIFIED"
+        bonsai_details = []
+        for item in bonsai_models:
+            bonsai_details.append({
+                "model_id": item["model_id"],
+                "format": item["bonsai_format"],
+                "minimal_smoke_status": item.get("bonsai_minimal_smoke_status", "NOT_RUN"),
+                "performance_class": item.get("bonsai_performance_class", "NOT_CLASSIFIED"),
+                "recommended_use": item.get("bonsai_recommended_use", "NOT_APPLICABLE"),
+                "auto_select_allowed": item.get("bonsai_auto_select_allowed", "NO"),
+                "last_error_code": item.get("last_error_code") or "NONE",
+            })
         return {
             "status": status,
             "BONSAI_NOT_INSTALLED": "YES" if not bonsai_models else "NO",
@@ -673,7 +762,7 @@ class ManagedLlamaCppBackend:
             "llama_server_found": "YES" if executable else "NO",
             "llama_server_compatibility": compatibility,
             "prism_bonsai_runtime": prism,
-            "models": [{"model_id": item["model_id"], "format": item["bonsai_format"]} for item in bonsai_models],
+            "models": bonsai_details,
         }
 
     def _persist_selected(self, model: GGUFModel) -> None:
@@ -707,6 +796,10 @@ class ManagedLlamaCppBackend:
         if executable is None:
             raise ProviderError("LLAMA_SERVER_NOT_FOUND")
         command = [str(executable), "-m", str(model.path), "--host", "127.0.0.1", "--port", str(self.port), "--ctx-size", str(self.ctx_size)]
+        if runtime_id == PRISM_RUNTIME_ID:
+            # Keep a tiny smoke response visible instead of spending its token
+            # budget in the model template's reasoning channel.
+            command.extend(["--reasoning", "off"])
         if isinstance(self.threads, int) or (isinstance(self.threads, str) and self.threads.isdigit()):
             command.extend(["--threads", str(self.threads)])
         if isinstance(self.gpu_layers, int) or (isinstance(self.gpu_layers, str) and self.gpu_layers.isdigit()):
@@ -845,6 +938,59 @@ class ManagedLlamaCppBackend:
             )
         except Exception:
             pass
+
+    def record_bonsai_minimal_smoke(self, model_id: str, status: str, elapsed: float, error_code: str | None = None) -> dict:
+        """Persist a measured bounded smoke result; Bonsai remains manual-only by policy."""
+        selected = next((item for item in self.discover() if item.model_id == model_id), None)
+        if selected is None or bonsai_format_from_filename(selected.path.name) == "UNKNOWN":
+            raise ProviderError("BONSAI_MODEL_NOT_FOUND")
+        performance_class, recommended_use = classify_bonsai_performance(status, elapsed, error_code)
+        config = load_local_backend_config(self.config_path)
+        profiles = config.get("model_profiles") if isinstance(config.get("model_profiles"), dict) else {}
+        profile = dict(profiles.get(model_id) or {})
+        profile.update({
+            "last_smoke_status": status,
+            "last_latency_seconds": elapsed,
+            "last_error_code": error_code,
+            "bonsai_minimal_smoke_status": status,
+            "bonsai_performance_class": performance_class,
+            "bonsai_recommended_use": recommended_use,
+            "bonsai_auto_select_allowed": "NO",
+        })
+        profiles[model_id] = profile
+        config["model_profiles"] = profiles
+        save_local_backend_config(config, self.config_path)
+        return {"model_id": model_id, "minimal_smoke": BONSAI_MINIMAL_SMOKE, **profile}
+
+    def bonsai_minimal_smoke(self) -> dict:
+        """Run an explicit, bounded Prism-only Bonsai completion smoke."""
+        if self.selected is None or bonsai_format_from_filename(self.selected.path.name) == "UNKNOWN":
+            raise ProviderError("BONSAI_MODEL_NOT_SELECTED")
+        if runtime_for_model(self.selected, load_local_backend_config(self.config_path))[0] != PRISM_RUNTIME_ID:
+            raise ProviderError("BONSAI_PRISM_RUNTIME_REQUIRED")
+        original_ctx_size = self.ctx_size
+        self.ctx_size = BONSAI_MINIMAL_SMOKE["ctx_size"]
+        started = time.monotonic()
+        try:
+            if self.running():
+                self.restart(self.selected)
+            else:
+                self.start(self.selected)
+            provider = LMStudioProvider(
+                self.endpoint(), self.selected.model_id,
+                timeout=BONSAI_MINIMAL_SMOKE["timeout_seconds"],
+                max_tokens=BONSAI_MINIMAL_SMOKE["max_tokens"],
+            )
+            response = provider.ask(BONSAI_MINIMAL_SMOKE["prompt"])
+            elapsed = round(time.monotonic() - started, 3)
+            status = "PASS" if response.strip() == "OK" else "FAIL"
+            error_code = None if status == "PASS" else "BONSAI_MINIMAL_SMOKE_UNEXPECTED_RESPONSE"
+            return {"status": status, "response": response, "duration_seconds": elapsed, **self.record_bonsai_minimal_smoke(self.selected.model_id, status, elapsed, error_code)}
+        except ProviderError as exc:
+            elapsed = round(time.monotonic() - started, 3)
+            return {"status": "ERROR", "error_code": str(exc), "duration_seconds": elapsed, **self.record_bonsai_minimal_smoke(self.selected.model_id, "TIMEOUT" if "TIMEOUT" in str(exc).upper() else "FAIL", elapsed, str(exc))}
+        finally:
+            self.ctx_size = original_ctx_size
 
     def available(self) -> bool:
         return self.running() or (self.selected is not None and self.executable_available())

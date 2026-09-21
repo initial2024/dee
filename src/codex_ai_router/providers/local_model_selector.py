@@ -122,9 +122,18 @@ def profile_from_model(model: Any, persisted: dict[str, Any] | None = None) -> d
         "last_smoke_status": "UNKNOWN",
         "last_latency_seconds": None,
         "last_error_code": None,
+        "measured_generation_tps": None,
+        "measured_prompt_tps": None,
+        "cold_start_seconds": None,
+        "model_switch_cost_seconds": None,
+        "measured_speed_class": "UNKNOWN",
+        "bonsai_minimal_smoke_status": "NOT_RUN" if bonsai_model else "NOT_APPLICABLE",
+        "bonsai_performance_class": "NOT_CLASSIFIED" if bonsai_model else "NOT_APPLICABLE",
+        "bonsai_recommended_use": "NOT_APPLICABLE",
+        "bonsai_auto_select_allowed": "NO" if bonsai_model else "NOT_APPLICABLE",
     }
     if isinstance(persisted, dict):
-        for key in ("manual_disabled", "manual_preferred", "manual_only", "last_smoke_status", "last_latency_seconds", "last_error_code"):
+        for key in ("manual_disabled", "manual_preferred", "manual_only", "last_smoke_status", "last_latency_seconds", "last_error_code", "measured_generation_tps", "measured_prompt_tps", "cold_start_seconds", "model_switch_cost_seconds", "measured_speed_class", "bonsai_minimal_smoke_status", "bonsai_performance_class", "bonsai_recommended_use", "bonsai_auto_select_allowed"):
             if key in persisted:
                 result[key] = persisted[key]
     return result
@@ -221,11 +230,23 @@ class LocalModelSelector:
             role_score = 30 if tags & roles else 0
             preferred_score = 50 if item.get("manual_preferred") or item.get("model_id") == preferred else 0
             speed_score = {"fast": 20, "balanced": 12, "unknown": 5, "heavy": 0}.get(str(item.get("speed_class")), 0)
-            current_score = 5 if item.get("model_id") == self.current_model else 0
+            measured_tps = item.get("measured_generation_tps")
+            try:
+                measured_tps = float(measured_tps) if measured_tps is not None else None
+            except (TypeError, ValueError):
+                measured_tps = None
+            if measured_tps is not None and measured_tps < 2:
+                speed_score = min(speed_score, 0)
+            elif measured_tps is not None and measured_tps >= 8:
+                speed_score += 8
+            current_score = 20 if item.get("model_id") == self.current_model else 0
             return preferred_score + role_score + speed_score + current_score, role_score, speed_score, current_score
         chosen = sorted(eligible, key=score, reverse=True)[0]
+        current = next((item for item in eligible if item.get("model_id") == self.current_model), None)
+        if current is not None and chosen is not current and score(chosen)[0] - score(current)[0] < 20:
+            chosen = current
         for item in eligible:
             if item is not chosen and item.get("model_id") not in {preferred, self.current_model}:
                 skipped.append({"model": str(item.get("model_id")), "reason": "LOWER_TASK_SCORE"})
         complex_task = resolved_risk in {"MEDIUM", "HIGH", "COMPLEX"} and any(word in task_text.lower() for word in ("multiple files", "refactor", "complex", "architecture", "复杂"))
-        return {"selected_model": chosen.get("model_id"), "why_selected": "按任务类型、风险、速度和人工偏好选择本地模型。", "skipped_models": skipped, "switched_model": chosen.get("model_id") != self.current_model, "requires_api_or_official_codex": bool(complex_task), "error_code": None}
+        return {"selected_model": chosen.get("model_id"), "why_selected": "按任务类型、风险、实测速度、切换成本和人工偏好选择本地模型。", "skipped_models": skipped, "switched_model": chosen.get("model_id") != self.current_model, "keep_warm_model": "YES" if chosen.get("model_id") == self.current_model else "NO", "model_switch_cost_accounted": "YES", "requires_api_or_official_codex": bool(complex_task), "error_code": None}

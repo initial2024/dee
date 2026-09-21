@@ -125,6 +125,8 @@ def main() -> None:
     for action in ("serve", "start", "stop", "restart", "repair", "status", "models", "smoke"):
         item = local_sub.add_parser(action)
         if action == "smoke": item.add_argument("task", nargs="?", default="只回复 LOCAL_DIRECT_OK")
+    local_sub.add_parser("bonsai-smoke")
+    local_performance = local_sub.add_parser("performance"); local_performance.add_argument("action", choices=("status", "set")); local_performance.add_argument("--profile", choices=("fast", "balanced", "quality"))
     local_profiles = local_sub.add_parser("profiles")
     bonsai_runtime = local_sub.add_parser("bonsai-runtime"); bonsai_runtime.add_argument("action", choices=("status",))
     local_explain = local_sub.add_parser("explain-select"); local_explain.add_argument("task"); local_explain.add_argument("--risk", choices=("auto", "simple", "medium", "complex", "high"), default="auto"); local_explain.add_argument("--mode", choices=("auto", "local", "read", "review", "plan", "roleplay", "code"), default="auto")
@@ -491,6 +493,8 @@ def main() -> None:
                 profiles = backend.profiles(); emit({"profiles": profiles, "history_profiles": local_profile_summaries(), "model_count": len(profiles), "source": "gguf_filename_profile"})
             elif args.local_action == "explain-select": emit(backend.explain_select(args.task, risk=args.risk, mode=args.mode))
             elif args.local_action == "auto-smoke": emit(backend.auto_smoke(args.task, risk=args.risk, mode=args.mode))
+            elif args.local_action == "bonsai-smoke": emit(backend.bonsai_minimal_smoke())
+            elif args.local_action == "performance": emit(backend.performance_status() if args.action == "status" else backend.set_performance_profile(args.profile or ""))
             elif args.local_action == "profile":
                 profile = get_local_profile(args.profile_id)
                 emit({"status": "PASS", "profile": profile, "HISTORY_CHONGZHEN_PROFILE": "YES", "HISTORY_SIMULATION_FACT_FICTION_BOUNDARY": "YES", "HISTORY_PROFILE_USES_LOCAL_SELECTOR": "YES"})
