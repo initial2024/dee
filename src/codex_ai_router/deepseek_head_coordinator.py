@@ -290,7 +290,7 @@ class DeepSeekHeadCoordinator:
                 bridge_send_attempted = str(exc.metadata.get("bridge_send_attempted") or "NO")
                 bridge_ui_send_attempt_count = int(exc.metadata.get("bridge_ui_send_attempt_count") or 0)
                 model_output_available = str(exc.metadata.get("model_output_available") or "NO")
-                adapter_diagnostics = {key: value for key, value in exc.metadata.items() if key in {"provider_error_code", "bridge_error_code", "bridge_stage", "bridge_reason", "requested_profile", "resolved_profile", "reasoning_axis_type", "available_reasoning_strengths", "max_available_reasoning_strength", "high_reasoning_supported", "max_reasoning_supported", "actual_reasoning", "actual_search", "http_post_to_bridge_attempted"}}
+                adapter_diagnostics = {key: value for key, value in exc.metadata.items() if key in {"provider_error_code", "bridge_error_code", "bridge_stage", "bridge_reason", "requested_profile", "resolved_profile", "target_profile", "router_selected_profile", "router_capability_metadata_sent", "metadata_build_completed", "reasoning_axis_type", "available_reasoning_strengths", "max_available_reasoning_strength", "high_reasoning_supported", "max_reasoning_supported", "actual_reasoning", "actual_search", "allow_search", "allow_files", "allow_vision", "disallow_silent_high_max_fallback", "http_post_to_bridge_attempted", "bridge_http_status", "sanitized_exception_type", "sanitized_exception_message"}}
             except DeepSeekHeadCoordinatorError as exc:
                 error_code = exc.code
                 provider_error_stage = "before_bridge_send"

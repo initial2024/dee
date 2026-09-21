@@ -174,6 +174,53 @@ def _presend_diagnostics(capability: DeepSeekWebCapability | None, *, requested_
     }
 
 
+def _request_diagnostics(
+    capability: DeepSeekWebCapability,
+    *,
+    bridge_error_code: str,
+    bridge_stage: str,
+    bridge_reason: str,
+    http_post_to_bridge_attempted: str,
+    bridge_http_status: int | None = None,
+) -> dict[str, Any]:
+    """Return only request metadata that is safe to expose after a bridge failure."""
+    return {
+        "provider_error_code": "DEEPSEEK_BRIDGE_ADAPTER_ERROR",
+        "bridge_error_code": bridge_error_code,
+        "bridge_stage": bridge_stage,
+        "bridge_reason": bridge_reason[:160],
+        "requested_profile": "best_available_reasoning",
+        "resolved_profile": "best_available_reasoning",
+        "target_profile": "best_available_reasoning",
+        "router_selected_profile": "best_available_reasoning",
+        "router_capability_metadata_sent": "YES",
+        "metadata_build_completed": True,
+        "allow_search": False,
+        "allow_files": False,
+        "allow_vision": False,
+        "disallow_silent_high_max_fallback": True,
+        "http_post_to_bridge_attempted": http_post_to_bridge_attempted,
+        "bridge_http_status": bridge_http_status,
+        "sanitized_exception_type": "HTTPError" if bridge_http_status is not None else "",
+        "sanitized_exception_message": "bridge_http_error" if bridge_http_status is not None else "",
+        **capability.as_dict(),
+    }
+
+
+def _bridge_error_details(body: bytes) -> dict[str, str]:
+    """Extract the small, allowlisted diagnostic envelope from a bridge error."""
+    try:
+        parsed = json.loads(body.decode("utf-8")) if body else {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    source = error if isinstance(error, dict) else parsed if isinstance(parsed, dict) else {}
+    code = _safe_error_code(source.get("bridge_error_code") or source.get("code") or source.get("error_code"))
+    stage = str(source.get("bridge_stage") or "bridge_send")[:80]
+    reason = str(source.get("bridge_reason") or "bridge_http_error")[:160]
+    return {"bridge_error_code": code, "bridge_stage": stage, "bridge_reason": reason}
+
+
 def _ui_send_attempt_count(health: dict[str, Any]) -> int:
     bridge = health.get("bridge") if isinstance(health.get("bridge"), dict) else health
     value = bridge.get("uiSendAttemptCount", bridge.get("ui_send_attempt_count", 0)) if isinstance(bridge, dict) else 0
@@ -282,15 +329,26 @@ def run_deepseek_bridge_direct(
             return _bridge_error(code, request_id, started, ui_send_attempt_count=ui_send_attempt_count)
     if requested_mode is not None and not _probe_matches_requested_mode(probe, requested_mode):
         return _bridge_error("DEEPSEEK_BRIDGE_DIRECT_MODE_PARAM_INVALID", request_id, started, ui_send_attempt_count=ui_send_attempt_count)
-    try:
-        selected = select_deepseek_mode(
-            str(task),
-            explicit_model_alias=mode_alias(requested_mode) if requested_mode else None,
-            availability=capability.selector_availability(probe),
-            search_allowed=search is not False,
-        )
-    except (KeyError, TypeError, ValueError):
-        return _bridge_error("DEEPSEEK_BRIDGE_DIRECT_CONTEXT_BUILD_FAILED", request_id, started, ui_send_attempt_count=ui_send_attempt_count)
+    if capability.ui_generation == "three_in_one" and capability.reasoning_axis_type == "binary_toggle":
+        # Three-in-one has no quick/expert axis.  Do not let advisory-prompt
+        # keywords select an unavailable legacy high/max profile.
+        selected = {
+            "selected_mode": "best_available_reasoning",
+            "selected_model_alias": "deepseek-web-quick-thinking",
+            "task_difficulty": "capability_first",
+            "performance_mode": "medium_reasoning",
+            "mode_available": True,
+        }
+    else:
+        try:
+            selected = select_deepseek_mode(
+                str(task),
+                explicit_model_alias=mode_alias(requested_mode) if requested_mode else None,
+                availability=capability.selector_availability(probe),
+                search_allowed=search is not False,
+            )
+        except (KeyError, TypeError, ValueError):
+            return _bridge_error("DEEPSEEK_BRIDGE_DIRECT_CONTEXT_BUILD_FAILED", request_id, started, ui_send_attempt_count=ui_send_attempt_count)
     if not selected["mode_available"]:
         return _bridge_error(str(selected.get("fallback_reason") or "DEEPSEEK_MODE_UNAVAILABLE"), request_id, started, ui_send_attempt_count=ui_send_attempt_count)
     try:
@@ -313,9 +371,10 @@ def run_deepseek_bridge_direct(
         return {"request_id": request_id, "status": "PASS", "model": selected_model, "selected_mode": selected["selected_mode"], "selected_profile": selected["selected_mode"], "capability": capability.as_dict(), "task_difficulty": selected["task_difficulty"], "performance_mode": selected["performance_mode"], "stream_mode": "non_stream", "endpoint_mode": "DEEPSEEK_BRIDGE_DIRECT", "loopback_only": "YES", "provider_error_stage": None, "bridge_send_attempted": "YES", "bridge_ui_send_attempt_count": ui_send_attempt_count + 1, "model_output_available": "YES", "duration_ms": round((time.monotonic() - started) * 1000), "prompt_response_logged": "NO", "secrets_logged": "NO", **result}
     except HTTPError as exc:
         try:
-            code = _error_from_body(exc.read())
+            details = _bridge_error_details(exc.read())
         except OSError:
-            code = ""
+            details = {}
+        code = str(details.get("bridge_error_code") or "")
         mapped = {"LOGIN_REQUIRED": "DEEPSEEK_LOGIN_REQUIRED", "BRIDGE_BUSY": "DEEPSEEK_BRIDGE_BUSY", "MODE_NOT_AVAILABLE": "DEEPSEEK_MODE_UNAVAILABLE", "MODE_SWITCH_FAILED": "DEEPSEEK_MODE_UNAVAILABLE", "UI_CHANGED": "DEEPSEEK_MODE_UNAVAILABLE", "INPUT_NOT_FOUND": "DEEPSEEK_MODE_UNAVAILABLE", "BROWSER_NOT_CONNECTED": "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE"}.get(code)
         if mapped:
             return _bridge_error(mapped, request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
@@ -323,7 +382,15 @@ def run_deepseek_bridge_direct(
             return _bridge_error("DEEPSEEK_BRIDGE_BUSY", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
         if exc.code in {401, 503}:
             return _bridge_error("DEEPSEEK_LOGIN_REQUIRED" if exc.code == 401 else "DEEPSEEK_BRIDGE_DIRECT_UNAVAILABLE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
-        return _bridge_error("DEEPSEEK_MODE_UNAVAILABLE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
+        diagnostics = _request_diagnostics(
+            capability,
+            bridge_error_code=code or "DEEPSEEK_BRIDGE_HTTP_ERROR",
+            bridge_stage=str(details.get("bridge_stage") or "bridge_send"),
+            bridge_reason=str(details.get("bridge_reason") or "bridge_http_error"),
+            http_post_to_bridge_attempted="YES",
+            bridge_http_status=exc.code,
+        )
+        return _bridge_error("DEEPSEEK_BRIDGE_PRESEND_VALIDATION_FAILED", request_id, started, stage=diagnostics["bridge_stage"], ui_send_attempt_count=ui_send_attempt_count, diagnostics=diagnostics)
     except ResponseCompatibilityError:
         return _bridge_error("DEEPSEEK_EMPTY_RESPONSE", request_id, started, stage="bridge_send", bridge_send_attempted=True, ui_send_attempt_count=ui_send_attempt_count + 1)
     except (URLError, TimeoutError, OSError, json.JSONDecodeError):

@@ -219,13 +219,13 @@ def invoke_brain(
             if str(result.get("status")) != "PASS":
                 original = str(result.get("error_code") or result.get("status") or "DEEPSEEK_BRIDGE_OFFLINE")
                 raise _provider_error(
-                    original if original.startswith("DEEPSEEK_BRIDGE_") or original.startswith("DEEPSEEK_CAPABILITY_") else _map_deepseek_error(original),
+                    original if original.startswith(("DEEPSEEK_", "PATCH_REVIEW_")) else _map_deepseek_error(original),
                     original,
                     provider_error_stage=str(result.get("provider_error_stage") or "before_bridge_send"),
                     bridge_send_attempted=str(result.get("bridge_send_attempted") or "NO"),
                     bridge_ui_send_attempt_count=int(result.get("bridge_ui_send_attempt_count") or 0),
                     model_output_available=str(result.get("model_output_available") or "NO"),
-                    **{key: value for key, value in result.items() if key in {"provider_error_code", "bridge_error_code", "bridge_stage", "bridge_reason", "requested_profile", "resolved_profile", "reasoning_axis_type", "available_reasoning_strengths", "max_available_reasoning_strength", "high_reasoning_supported", "max_reasoning_supported", "actual_reasoning", "actual_search", "http_post_to_bridge_attempted"}},
+                    **{key: value for key, value in result.items() if key in {"provider_error_code", "bridge_error_code", "bridge_stage", "bridge_reason", "requested_profile", "resolved_profile", "target_profile", "router_selected_profile", "router_capability_metadata_sent", "metadata_build_completed", "reasoning_axis_type", "available_reasoning_strengths", "max_available_reasoning_strength", "high_reasoning_supported", "max_reasoning_supported", "actual_reasoning", "actual_search", "allow_search", "allow_files", "allow_vision", "disallow_silent_high_max_fallback", "http_post_to_bridge_attempted", "bridge_http_status", "sanitized_exception_type", "sanitized_exception_message"}},
                 )
             text = _text(result.get("analysis") or result)
         elif provider == "external-allowed":
